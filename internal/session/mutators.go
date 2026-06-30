@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -146,6 +147,19 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		// next hook event. Unlock via `session set <id> title-locked false`.
 		inst.TitleLocked = true
 		inst.SyncTmuxDisplayName()
+		if IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "" && strings.TrimSpace(value) != "" {
+			codexHome := inst.getCodexHomeDir()
+			sessionID := inst.CodexSessionID
+			title := inst.Title
+			postCommit = func() {
+				if err := AppendCodexSessionIndexName(codexHome, sessionID, title, time.Now()); err != nil {
+					sessionLog.Warn("codex_session_name_sync_failed",
+						slog.String("session_id", sessionID),
+						slog.String("title", title),
+						slog.String("error", err.Error()))
+				}
+			}
+		}
 
 	case FieldPath:
 		oldValue = inst.ProjectPath
