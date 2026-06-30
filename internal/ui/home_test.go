@@ -31,6 +31,63 @@ func TestNewHome(t *testing.T) {
 	}
 }
 
+func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	id := "88888888-8888-8888-8888-888888888888"
+	writeCodexIndexForHomeImport(t, codexHome, id, "saved codex", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForHomeImport(t, codexHome, id)
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible after import hotkey")
+	}
+	if got := h.importSourceDialog.CodexCount(); got != 1 {
+		t.Fatalf("codex count = %d, want 1", got)
+	}
+}
+
+func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	h := NewHomeWithProfile("codex_import_tui")
+	entry := session.CodexIndexEntry{
+		ID:         "99999999-9999-9999-9999-999999999999",
+		ThreadName: "imported from tui",
+		UpdatedAt:  time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	writeCodexRolloutForHomeImport(t, codexHome, entry.ID)
+	h.codexImportDialog.Show([]session.CodexIndexEntry{entry})
+
+	_, cmd := h.handleCodexImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting a Codex import should create a session command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	instances, _, err := h.storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances=%d, want 1", len(instances))
+	}
+	got := instances[0]
+	if got.Tool != "codex" || got.CodexSessionID != entry.ID || got.Title != entry.ThreadName || got.Status != session.StatusStopped {
+		t.Fatalf("bad persisted Codex import: %#v", got)
+	}
+}
+
 func TestNewHome_DisablesTmuxNotificationsWhenStatusInjectionDisabled(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	config := "[tmux]\ninject_status_line = false\n"
@@ -3808,5 +3865,28 @@ func TestDeleteBindingOnNonDefaultGroupOpensDialog(t *testing.T) {
 	}
 	if h.err != nil {
 		t.Errorf("non-default group delete must not set an error, got %v", h.err)
+	}
+}
+
+func writeCodexIndexForHomeImport(t *testing.T, home, id, threadName, updatedAt string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	line := `{"id":"` + id + `","thread_name":"` + threadName + `","updated_at":"` + updatedAt + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatalf("write codex index: %v", err)
+	}
+}
+
+func writeCodexRolloutForHomeImport(t *testing.T, home, sessionID string) {
+	t.Helper()
+	dir := filepath.Join(home, "sessions", "2026", "06", "30")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir codex rollout dir: %v", err)
+	}
+	path := filepath.Join(dir, "rollout-2026-06-30T10-00-00-"+sessionID+".jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write codex rollout: %v", err)
 	}
 }

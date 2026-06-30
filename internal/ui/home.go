@@ -251,11 +251,14 @@ type Home struct {
 	worktreeFinishDialog *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
 	feedbackDialog       *FeedbackDialog       // For in-app feedback popup (Phase 2)
 	zoxidePicker         *ZoxidePicker         // Quick-open picker backed by the zoxide DB
-	feedbackState        *feedback.State       // Loaded at first show, avoids repeated disk I/O
-	feedbackSender       *feedback.Sender      // Sender constructed once in NewHome (Phase 3, per D-05)
-	watcherPanel         *WatcherPanel         // For showing watcher status and events
-	toolVisibilityPanel  *ToolVisibilityPanel  // Edits [ui].hidden_tools
-	watcherEngine        *watcher.Engine       // nil until Init (D-07: lifecycle tied to TUI startup)
+	importSourceDialog   *ImportSourceDialog   // Chooses between existing tmux and saved Codex imports
+	codexImportDialog    *CodexImportDialog    // Picks a saved Codex session to import
+	codexImportEntries   []session.CodexIndexEntry
+	feedbackState        *feedback.State      // Loaded at first show, avoids repeated disk I/O
+	feedbackSender       *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
+	watcherPanel         *WatcherPanel        // For showing watcher status and events
+	toolVisibilityPanel  *ToolVisibilityPanel // Edits [ui].hidden_tools
+	watcherEngine        *watcher.Engine      // nil until Init (D-07: lifecycle tied to TUI startup)
 
 	// Configurable hotkeys
 	hotkeys        map[string]string // action -> configured key
@@ -866,6 +869,11 @@ type sessionCreatedMsg struct {
 	tempID   string // matches creatingSessions key for placeholder removal
 }
 
+type codexImportEntriesLoadedMsg struct {
+	entries []session.CodexIndexEntry
+	err     error
+}
+
 type sessionForkedMsg struct {
 	instance *session.Instance
 	sourceID string // ID of the source session that was forked (for cleanup)
@@ -1103,6 +1111,8 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		worktreeFinishDialog:      NewWorktreeFinishDialog(),
 		feedbackDialog:            NewFeedbackDialog(),
 		zoxidePicker:              NewZoxidePicker(),
+		importSourceDialog:        NewImportSourceDialog(),
+		codexImportDialog:         NewCodexImportDialog(),
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -4534,6 +4544,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, h.fetchPreview(inst, key, winIdx)
 
+	case codexImportEntriesLoadedMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		h.codexImportEntries = msg.entries
+		h.importSourceDialog.Show(len(msg.entries))
+		h.importSourceDialog.SetSize(h.width, h.height)
+		return h, nil
+
 	case loadSessionsMsg:
 		// Clear loading indicators and store file mtime for external change detection
 		h.reloadMu.Lock()
@@ -6181,6 +6201,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.globalSearch.IsVisible() {
 			return h.handleGlobalSearchKey(msg)
+		}
+		if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+			return h.handleImportSourceDialogKey(msg)
+		}
+		if h.codexImportDialog != nil && h.codexImportDialog.IsVisible() {
+			return h.handleCodexImportDialogKey(msg)
 		}
 		if h.newDialog.IsVisible() {
 			return h.handleNewDialogKey(msg)
@@ -8106,7 +8132,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "i":
-		return h, h.importSessions
+		return h, h.openImportDialog
 
 	case "I":
 		// Enter insert mode (#1069 feature 1): subsequent keystrokes are
@@ -11956,6 +11982,88 @@ func (r remoteAttachCmd) SetStdin(reader io.Reader)  {}
 func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
+func (h *Home) openImportDialog() tea.Msg {
+	codexHome := session.GetCodexHomeDir()
+	entries, err := session.ListCodexIndex(codexHome)
+	if err != nil {
+		return codexImportEntriesLoadedMsg{err: err}
+	}
+	return codexImportEntriesLoadedMsg{
+		entries: codexImportEntriesWithRollout(codexHome, entries),
+	}
+}
+
+func codexImportEntriesWithRollout(codexHome string, entries []session.CodexIndexEntry) []session.CodexIndexEntry {
+	filtered := make([]session.CodexIndexEntry, 0, len(entries))
+	for _, entry := range entries {
+		if session.CodexRolloutExists(codexHome, entry.ID) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.importSourceDialog, cmd = h.importSourceDialog.Update(msg)
+	source, ok := h.importSourceDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+
+	h.importSourceDialog.Hide()
+	switch source {
+	case importSourceTmux:
+		return h, h.importSessions
+	case importSourceCodex:
+		if len(h.codexImportEntries) == 0 {
+			h.setError(fmt.Errorf("no saved Codex sessions found"))
+			return h, nil
+		}
+		h.codexImportDialog.Show(h.codexImportEntries)
+		h.codexImportDialog.SetSize(h.width, h.height)
+		return h, nil
+	default:
+		return h, nil
+	}
+}
+
+func (h *Home) handleCodexImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.codexImportDialog, cmd = h.codexImportDialog.Update(msg)
+	entry, ok := h.codexImportDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+	h.codexImportDialog.Hide()
+	return h, h.createSessionFromCodexImport(entry)
+}
+
+func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(entry.ID) == "" {
+			return sessionCreatedMsg{err: session.ErrCodexSessionNotFound}
+		}
+		if !session.CodexRolloutExists(session.GetCodexHomeDir(), entry.ID) {
+			return sessionCreatedMsg{err: fmt.Errorf("%w: %s", session.ErrCodexRolloutMissing, entry.ID)}
+		}
+		title := strings.TrimSpace(entry.ThreadName)
+		if title == "" {
+			title = shortCodexID(entry.ID)
+		}
+		projectPath := "."
+		if cwd, err := os.Getwd(); err == nil {
+			projectPath = cwd
+		}
+		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "codex")
+		inst.Command = "codex"
+		inst.CodexSessionID = strings.ToLower(strings.TrimSpace(entry.ID))
+		inst.CodexDetectedAt = entry.UpdatedAt
+		inst.Status = session.StatusStopped
+		return sessionCreatedMsg{instance: inst}
+	}
+}
+
 // importSessions imports existing tmux sessions
 func (h *Home) importSessions() tea.Msg {
 	discovered, err := session.DiscoverExistingTmuxSessions(h.instances)
@@ -12211,6 +12319,12 @@ func (h *Home) updateSizes() {
 	h.groupDialog.SetSize(h.width, h.height)
 	h.confirmDialog.SetSize(h.width, h.height)
 	h.geminiModelDialog.SetSize(h.width, h.height)
+	if h.importSourceDialog != nil {
+		h.importSourceDialog.SetSize(h.width, h.height)
+	}
+	if h.codexImportDialog != nil {
+		h.codexImportDialog.SetSize(h.width, h.height)
+	}
 	if h.sessionSwitcher != nil {
 		// The switcher is a centered full-screen overlay; keep it sized so a
 		// resize while it is open (notably from the overview, where it can stay
@@ -12293,6 +12407,12 @@ func (h *Home) View() string {
 	}
 	if h.globalSearch.IsVisible() {
 		return h.globalSearch.View()
+	}
+	if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+		return h.importSourceDialog.View()
+	}
+	if h.codexImportDialog != nil && h.codexImportDialog.IsVisible() {
+		return h.codexImportDialog.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
