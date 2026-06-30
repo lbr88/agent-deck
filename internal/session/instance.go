@@ -1777,6 +1777,7 @@ func (i *Instance) setOpenCodeSession(sessionID string) {
 
 type openCodeSessionMetadata struct {
 	ID        string `json:"id"`
+	Title     string `json:"title"`
 	Directory string `json:"directory"`
 	Path      string `json:"path"`
 	Created   int64  `json:"created"`
