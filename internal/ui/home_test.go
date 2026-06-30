@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,6 +74,30 @@ func TestHomeOpenCodeImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 }
 
+func TestHomeOpenCodeImportHotkeyShowsSourceDialogBeforeOpenCodeLoadCompletes(t *testing.T) {
+	h := NewHome()
+	blocked := make(chan struct{})
+	h.loadOpenCodeImportEntries = func(context.Context) ([]session.OpenCodeImportEntry, error) {
+		<-blocked
+		return nil, nil
+	}
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	h = model.(*Home)
+
+	if cmd == nil {
+		t.Fatal("import hotkey should still return an async load command")
+	}
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible before OpenCode load completes")
+	}
+	if got := h.importSourceDialog.OpenCodeCount(); got != 0 {
+		t.Fatalf("OpenCode count before load = %d, want 0", got)
+	}
+
+	close(blocked)
+}
+
 func TestHomeImportHotkeyKeepsTmuxSourceWhenOpenCodeListFails(t *testing.T) {
 	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, "{")
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -109,6 +134,25 @@ func TestHomeImportSourceOpenCodeSelectionShowsDeferredListError(t *testing.T) {
 
 	if h.err == nil || !strings.Contains(h.err.Error(), "failed to load saved OpenCode sessions") {
 		t.Fatalf("selecting OpenCode source should surface deferred list error, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceOpenCodeSelectionShowsEmptyListError(t *testing.T) {
+	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `[]`)
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "no saved OpenCode sessions found") {
+		t.Fatalf("selecting OpenCode source should surface empty-list error, got %v", h.err)
 	}
 }
 

@@ -255,6 +255,7 @@ type Home struct {
 	openCodeImportDialog  *OpenCodeImportDialog // Picks a saved OpenCode session to import
 	openCodeImportEntries []session.OpenCodeImportEntry
 	openCodeImportErr     error
+	loadOpenCodeImportEntries func(context.Context) ([]session.OpenCodeImportEntry, error)
 	feedbackState         *feedback.State      // Loaded at first show, avoids repeated disk I/O
 	feedbackSender        *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
 	watcherPanel          *WatcherPanel        // For showing watcher status and events
@@ -1114,6 +1115,9 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		zoxidePicker:              NewZoxidePicker(),
 		importSourceDialog:        NewImportSourceDialog(),
 		openCodeImportDialog:      NewOpenCodeImportDialog(),
+		loadOpenCodeImportEntries: func(ctx context.Context) ([]session.OpenCodeImportEntry, error) {
+			return session.ListOpenCodeImportEntries(ctx, "")
+		},
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -4552,8 +4556,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.openCodeImportEntries = msg.entries
 		}
-		h.importSourceDialog.Show(len(h.openCodeImportEntries))
-		h.importSourceDialog.SetSize(h.width, h.height)
+		h.importSourceDialog.SetOpenCodeCount(len(h.openCodeImportEntries))
 		return h, nil
 
 	case loadSessionsMsg:
@@ -8134,6 +8137,12 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "i":
+		if h.importSourceDialog != nil {
+			h.importSourceDialog.Show(0)
+			h.importSourceDialog.SetSize(h.width, h.height)
+		}
+		h.openCodeImportErr = nil
+		h.openCodeImportEntries = nil
 		return h, h.openImportDialog
 
 	case "I":
@@ -11985,7 +11994,7 @@ func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
-	entries, err := session.ListOpenCodeImportEntries(h.ctx, "")
+	entries, err := h.loadOpenCodeImportEntries(h.ctx)
 	if err != nil {
 		return openCodeImportEntriesLoadedMsg{err: err}
 	}

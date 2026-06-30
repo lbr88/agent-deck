@@ -28,6 +28,6 @@
 
 OpenCode rename sync is unsupported/skipped. The installed local CLI exposes `opencode session list` and `opencode session delete`; no stable supported rename command or metadata write mechanism was discovered, and this branch does not read or mutate OpenCode session content.
 
-## TUI Gap
+## TUI Status
 
-TUI saved OpenCode import is not implemented in this branch. The existing `i` action directly imports discoverable live tmux sessions without a picker; adding saved OpenCode selection would require a new discovery/picker flow, so this change is limited to the CLI and session package.
+TUI saved OpenCode import is implemented in this branch. Pressing `i` opens the source chooser immediately, existing tmux import remains selectable without waiting on `opencode session list`, and the saved OpenCode path surfaces deferred list errors or the empty-list message when selected.

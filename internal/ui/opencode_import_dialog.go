@@ -182,6 +182,13 @@ func (d *ImportSourceDialog) OpenCodeCount() int {
 	return d.openCodeCount
 }
 
+func (d *ImportSourceDialog) SetOpenCodeCount(openCodeCount int) {
+	if d == nil {
+		return
+	}
+	d.openCodeCount = openCodeCount
+}
+
 func (d *ImportSourceDialog) SetSize(width, height int) {
 	d.width = width
 	d.height = height
