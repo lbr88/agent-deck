@@ -38,7 +38,11 @@
   - `git diff --check`
   - Result: passed.
 
+## TUI Follow-up
+
+- TUI import selection for saved Claude sessions is now implemented by follow-up commit `74093dc` (`feat(ui): add Claude session import picker`).
+- The `i` import flow now opens a source chooser with existing tmux sessions and saved Claude sessions. Selecting a saved Claude entry persists a stopped Claude session without reading transcript content.
+
 ## Concerns
 
-- TUI import selection for saved Claude sessions was not implemented in this branch. The CLI and session package are complete; TUI support should add a saved-Claude picker to the existing `i` import flow separately.
 - The normal commit hook failed on existing `.github` workflow `zizmor` findings unrelated to this change. The implementation commit was created with `--no-verify` after the uncached Go test pass and `git diff --check`.
