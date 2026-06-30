@@ -2,12 +2,19 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/asheshgoplani/agent-deck/internal/atomicfile"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
+
+// ErrClaudeSessionMetadataNotFound means no ~/.claude/sessions/*.json metadata
+// entry matched the requested Claude session ID.
+var ErrClaudeSessionMetadataNotFound = errors.New("claude session metadata not found")
 
 // claudeSessionMeta is the subset of ~/.claude/sessions/<PID>.json that
 // agent-deck reads for title sync (issue #572).
@@ -17,36 +24,33 @@ type claudeSessionMeta struct {
 	UpdatedAt *int64 `json:"updatedAt"` // unix ms; nil when absent
 }
 
-// ClaudeSessionNameIn scans claudeDir/sessions/*.json and returns the trimmed
-// `name` of the entry whose sessionId matches. Empty string when there's no
-// match, no name, or the sessions dir is unreadable.
-//
-// The files are per-PID, so a resumed session can match several entries — the
-// live process plus stale files left by earlier runs. The freshest entry (by
-// updatedAt, falling back to file mtime) is authoritative, even when its name
-// is empty: returning a stale file's old name would re-sync a title the user
-// has since changed or cleared.
-//
-// Issue #572: Claude Code writes per-process metadata here when the user starts
-// with `claude --name X` or runs `/rename X` mid-session. claudeDir is an
-// explicit parameter so tests can point it at a temp dir.
-func ClaudeSessionNameIn(claudeDir, sessionID string) string {
+type claudeSessionMetaCandidate struct {
+	path string
+	data []byte
+	meta claudeSessionMeta
+	time int64
+}
+
+func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMetaCandidate, error) {
 	claudeDir = strings.TrimSpace(claudeDir)
 	sessionID = strings.TrimSpace(sessionID)
 	if claudeDir == "" || sessionID == "" {
-		return ""
+		return nil, ErrClaudeSessionMetadataNotFound
 	}
 	entries, err := os.ReadDir(filepath.Join(claudeDir, "sessions"))
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return nil, ErrClaudeSessionMetadataNotFound
+		}
+		return nil, fmt.Errorf("read Claude session metadata: %w", err)
 	}
-	bestName := ""
-	bestTime := int64(-1)
+	var best *claudeSessionMetaCandidate
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(claudeDir, "sessions", entry.Name()))
+		path := filepath.Join(claudeDir, "sessions", entry.Name())
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -63,12 +67,40 @@ func ClaudeSessionNameIn(claudeDir, sessionID string) string {
 		} else if info, err := entry.Info(); err == nil {
 			ts = info.ModTime().UnixMilli()
 		}
-		if ts > bestTime {
-			bestTime = ts
-			bestName = strings.TrimSpace(meta.Name)
+		if best == nil || ts > best.time {
+			best = &claudeSessionMetaCandidate{
+				path: path,
+				data: data,
+				meta: meta,
+				time: ts,
+			}
 		}
 	}
-	return bestName
+	if best == nil {
+		return nil, ErrClaudeSessionMetadataNotFound
+	}
+	return best, nil
+}
+
+// ClaudeSessionNameIn scans claudeDir/sessions/*.json and returns the trimmed
+// `name` of the entry whose sessionId matches. Empty string when there's no
+// match, no name, or the sessions dir is unreadable.
+//
+// The files are per-PID, so a resumed session can match several entries — the
+// live process plus stale files left by earlier runs. The freshest entry (by
+// updatedAt, falling back to file mtime) is authoritative, even when its name
+// is empty: returning a stale file's old name would re-sync a title the user
+// has since changed or cleared.
+//
+// Issue #572: Claude Code writes per-process metadata here when the user starts
+// with `claude --name X` or runs `/rename X` mid-session. claudeDir is an
+// explicit parameter so tests can point it at a temp dir.
+func ClaudeSessionNameIn(claudeDir, sessionID string) string {
+	best, err := freshestClaudeSessionMetaIn(claudeDir, sessionID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(best.meta.Name)
 }
 
 // ClaudeSessionName resolves the user's ~/.claude and returns the Claude
@@ -79,6 +111,55 @@ func ClaudeSessionName(sessionID string) string {
 		return ""
 	}
 	return ClaudeSessionNameIn(filepath.Join(home, ".claude"), sessionID)
+}
+
+// SyncClaudeSessionNameIn updates the freshest Claude session metadata entry
+// matching sessionID to name. It preserves unknown JSON fields and writes the
+// selected metadata file atomically. Transcript JSONL files are never touched.
+func SyncClaudeSessionNameIn(claudeDir, sessionID, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	best, err := freshestClaudeSessionMetaIn(claudeDir, sessionID)
+	if err != nil {
+		return err
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(best.data, &raw); err != nil {
+		return fmt.Errorf("decode Claude session metadata %s: %w", best.path, err)
+	}
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return fmt.Errorf("encode Claude session name: %w", err)
+	}
+	raw["name"] = nameJSON
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Claude session metadata %s: %w", best.path, err)
+	}
+	out = append(out, '\n')
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(best.path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := atomicfile.WriteFile(best.path, out, perm); err != nil {
+		return fmt.Errorf("write Claude session metadata %s: %w", best.path, err)
+	}
+	return nil
+}
+
+// SyncClaudeSessionNameForInstance pushes an explicit Agent Deck title into
+// the matching Claude session metadata when this is a Claude-compatible session
+// with a known Claude session ID. TitleLocked intentionally does not block this
+// direction: it only blocks Claude -> Agent Deck title reconciliation.
+func SyncClaudeSessionNameForInstance(inst *Instance) error {
+	if inst == nil || !IsClaudeCompatible(inst.Tool) || strings.TrimSpace(inst.ClaudeSessionID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(inst.Title) == "" {
+		return nil
+	}
+	return SyncClaudeSessionNameIn(GetClaudeConfigDirForInstance(inst), inst.ClaudeSessionID, inst.Title)
 }
 
 // ReconcileTitleFromClaude refreshes i.Title from the agent's current Claude

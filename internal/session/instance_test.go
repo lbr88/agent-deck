@@ -3242,6 +3242,34 @@ func TestBuildClaudeExtraFlags_NilOpts(t *testing.T) {
 	}
 }
 
+func TestBuildClaudeExtraFlags_NameForLockedTitle(t *testing.T) {
+	inst := &Instance{Tool: "claude", Title: "Agent Deck Rename", TitleLocked: true, ClaudeSessionID: "sid-name"}
+	flags := inst.buildClaudeExtraFlags(nil)
+
+	want := "--name " + shellescape.Quote("Agent Deck Rename")
+	if !strings.Contains(flags, want) {
+		t.Fatalf("expected %q in flags, got %q", want, flags)
+	}
+}
+
+func TestBuildClaudeExtraFlags_NoNameForLockedTitleWithoutClaudeSessionID(t *testing.T) {
+	inst := &Instance{Tool: "claude", Title: "Agent Deck Rename", TitleLocked: true}
+	flags := inst.buildClaudeExtraFlags(nil)
+
+	if strings.Contains(flags, "--name") {
+		t.Fatalf("locked title without ClaudeSessionID should not emit --name, got %q", flags)
+	}
+}
+
+func TestBuildClaudeExtraFlags_NoNameForUnlockedTitle(t *testing.T) {
+	inst := &Instance{Tool: "claude", Title: "Claude can still rename me", ClaudeSessionID: "sid-name"}
+	flags := inst.buildClaudeExtraFlags(nil)
+
+	if strings.Contains(flags, "--name") {
+		t.Fatalf("unlocked title should not emit --name, got %q", flags)
+	}
+}
+
 func TestBuildClaudeExtraFlags_Model(t *testing.T) {
 	inst := &Instance{Tool: "claude"}
 	flags := inst.buildClaudeExtraFlags(&ClaudeOptions{Model: "claude-sonnet-4-6"})

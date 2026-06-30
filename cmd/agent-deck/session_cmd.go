@@ -1459,15 +1459,25 @@ func handleSessionSet(profile string, args []string) {
 		os.Exit(1)
 	}
 
-	// Output success
-	out.Success(fmt.Sprintf("Updated %s: %q -> %q", field, oldValue, value), map[string]interface{}{
+	sessionSetData := map[string]interface{}{
 		"success":   true,
 		"id":        inst.ID,
 		"title":     inst.Title,
 		"field":     field,
 		"old_value": oldValue,
 		"new_value": value,
-	})
+	}
+	if field == session.FieldTitle {
+		if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+			if !*jsonOutput {
+				fmt.Fprintf(os.Stderr, "Warning: Claude name sync failed: %v\n", syncErr)
+			}
+			sessionSetData["warning"] = fmt.Sprintf("Claude name sync failed: %v", syncErr)
+		}
+	}
+
+	// Output success
+	out.Success(fmt.Sprintf("Updated %s: %q -> %q", field, oldValue, value), sessionSetData)
 
 	maybeEmitSessionSetTelegramWarnings(os.Stderr, session.GetClaudeConfigDirForGroup(inst.GroupPath), inst, field)
 }

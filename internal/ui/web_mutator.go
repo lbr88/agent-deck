@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -439,6 +440,7 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
+	titleChanged := false
 	var postCommits []func()
 
 	m.h.instancesMu.Lock()
@@ -452,6 +454,9 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 			continue
 		}
 		changed = append(changed, field)
+		if field == session.FieldTitle {
+			titleChanged = true
+		}
 		if postCommit != nil {
 			postCommits = append(postCommits, postCommit)
 		}
@@ -482,6 +487,15 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
 		return nil, false, fmt.Errorf("save session: %w", err)
+	}
+	if titleChanged {
+		if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+			uiLog.Warn("claude_name_sync_failed",
+				slog.String("session_id", id),
+				slog.String("claude_session_id", inst.ClaudeSessionID),
+				slog.String("error", syncErr.Error()),
+			)
+		}
 	}
 	return changed, restartRequired, nil
 }
