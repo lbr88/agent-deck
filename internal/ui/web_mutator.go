@@ -418,9 +418,10 @@ func (m *WebMutator) ForkSession(id string) (string, error) {
 // same path the TUI EditSessionDialog uses) and persists. Returns the list
 // of fields that actually changed and whether any change requires a restart.
 //
-// instancesMu is held only across the SetField loop — postCommits and the
-// storage flush run after unlock, mirroring the TUI's home.go edit handler
-// so slow tmux subprocesses don't stall the status worker.
+// instancesMu is held only across the SetField loop; the storage flush and
+// postCommits run after unlock, mirroring the TUI's home.go edit handler so
+// slow tmux/Codex side effects don't stall the status worker or precede
+// persistence.
 func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, error) {
 	if len(updates) == 0 {
 		return nil, false, nil
@@ -461,10 +462,6 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 	}
 	m.h.instancesMu.Unlock()
 
-	for _, fn := range postCommits {
-		fn()
-	}
-
 	if len(changed) == 0 {
 		return nil, false, nil
 	}
@@ -482,6 +479,9 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
 		return nil, false, fmt.Errorf("save session: %w", err)
+	}
+	for _, fn := range postCommits {
+		fn()
 	}
 	return changed, restartRequired, nil
 }

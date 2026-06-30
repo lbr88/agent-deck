@@ -9404,11 +9404,6 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.instancesMu.Unlock()
-		// postCommits run AFTER unlocking so slow tmux subprocesses don't
-		// stall the status worker / preview cache / reconciler.
-		for _, fn := range postCommits {
-			fn()
-		}
 
 		// Mirror the rename-path #697 race fix: queue title so a watcher
 		// reload can re-apply it after the load swap.
@@ -9421,6 +9416,11 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// saveInstances. Title-only loss is caught by pendingTitleChanges
 		// re-application; non-Title fields have no such net.
 		h.forceSaveInstances()
+		// postCommits run AFTER unlocking and saving so slow tmux/Codex
+		// side effects don't stall background readers or precede persistence.
+		for _, fn := range postCommits {
+			fn()
+		}
 
 		h.editSessionDialog.Hide()
 		// Auto-restart on restart-required edits — Tool/Skip/Auto/ExtraArgs

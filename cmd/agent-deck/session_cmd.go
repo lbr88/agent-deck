@@ -1432,11 +1432,6 @@ func handleSessionSet(profile string, args []string) {
 		os.Exit(1)
 		return // unreachable, satisfies staticcheck SA5011
 	}
-	// CLI holds no lock — run tmux side effects inline. TUI defers them
-	// until after instancesMu.Unlock.
-	if postCommit != nil {
-		postCommit()
-	}
 
 	// Copy the conversation into the new account's config dir so the
 	// restart-required switch resumes with full context. Copy-only; a fresh
@@ -1457,6 +1452,9 @@ func handleSessionSet(profile string, args []string) {
 	if err := storage.SaveWithGroups(instances, groupTree); err != nil {
 		out.Error(fmt.Sprintf("failed to save: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+	if postCommit != nil {
+		postCommit()
 	}
 
 	// Output success
