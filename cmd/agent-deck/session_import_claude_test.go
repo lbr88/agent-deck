@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,6 +83,9 @@ func TestImportClaudeSession_DefaultsAndPersistsStopped(t *testing.T) {
 	if got.GroupPath != session.DefaultGroupPath {
 		t.Errorf("GroupPath = %q, want %q", got.GroupPath, session.DefaultGroupPath)
 	}
+	if got.TitleLocked {
+		t.Errorf("TitleLocked = true, want false for normal Claude import defaults")
+	}
 }
 
 func TestImportClaudeSession_ExplicitOverridesAndShortUUIDFallback(t *testing.T) {
@@ -123,6 +127,9 @@ func TestImportClaudeSession_ExplicitOverridesAndShortUUIDFallback(t *testing.T)
 	if got.GroupPath != "work/imports" {
 		t.Errorf("GroupPath = %q, want explicit group", got.GroupPath)
 	}
+	if got.TitleLocked {
+		t.Errorf("TitleLocked = true, want false for explicit --title import")
+	}
 
 	saved = nil
 	deps.resolve = func(_ string, _ string) (*session.ClaudeImportCandidate, error) {
@@ -137,6 +144,75 @@ func TestImportClaudeSession_ExplicitOverridesAndShortUUIDFallback(t *testing.T)
 	}
 	if got := saved[0][0].ProjectPath; got != "/fallback/cwd" {
 		t.Errorf("fallback ProjectPath = %q, want current directory", got)
+	}
+}
+
+func TestImportClaudeSession_ProjectPathFallbackOrder(t *testing.T) {
+	tests := []struct {
+		name        string
+		explicit    string
+		candidate   session.ClaudeImportCandidate
+		cwd         string
+		wantProject string
+	}{
+		{
+			name:        "explicit path wins",
+			explicit:    "/explicit/path",
+			candidate:   session.ClaudeImportCandidate{SessionID: "11111111-2222-3333-4444-555555555555", CWD: "/metadata/cwd", Path: "/metadata/path"},
+			cwd:         "/fallback/cwd",
+			wantProject: "/explicit/path",
+		},
+		{
+			name:        "metadata cwd beats metadata path",
+			candidate:   session.ClaudeImportCandidate{SessionID: "11111111-2222-3333-4444-555555555555", CWD: "/metadata/cwd", Path: "/metadata/path"},
+			cwd:         "/fallback/cwd",
+			wantProject: "/metadata/cwd",
+		},
+		{
+			name:        "metadata path beats current working directory",
+			candidate:   session.ClaudeImportCandidate{SessionID: "11111111-2222-3333-4444-555555555555", Path: "/metadata/path"},
+			cwd:         "/fallback/cwd",
+			wantProject: "/metadata/path",
+		},
+		{
+			name:        "cwd is final fallback",
+			candidate:   session.ClaudeImportCandidate{SessionID: "11111111-2222-3333-4444-555555555555"},
+			cwd:         "/fallback/cwd",
+			wantProject: "/fallback/cwd",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var saved [][]*session.Instance
+			deps := importClaudeSessionDeps{
+				load: func(string) (*session.Storage, []*session.Instance, []*session.GroupData, error) {
+					return nil, nil, nil, nil
+				},
+				save: func(_ *session.Storage, instances []*session.Instance, _ []*session.GroupData) error {
+					saved = append(saved, cloneImportInstances(instances))
+					return nil
+				},
+				resolve: func(_ string, _ string) (*session.ClaudeImportCandidate, error) {
+					candidate := tc.candidate
+					return &candidate, nil
+				},
+				cwd: func() (string, error) {
+					return tc.cwd, nil
+				},
+			}
+
+			_, err := importClaudeSession("", importClaudeSessionOptions{
+				Target:      tc.candidate.SessionID,
+				ProjectPath: tc.explicit,
+			}, deps)
+			if err != nil {
+				t.Fatalf("importClaudeSession: %v", err)
+			}
+			if got := saved[0][0].ProjectPath; got != tc.wantProject {
+				t.Fatalf("ProjectPath = %q, want %q", got, tc.wantProject)
+			}
+		})
 	}
 }
 
@@ -262,6 +338,68 @@ func TestSessionImportClaudeCLI_PersistsImportedStoppedSession(t *testing.T) {
 		shown.Tool != "claude" || shown.Command != "claude" || shown.ClaudeSessionID != sessionID ||
 		shown.Path != cwd || shown.Group != session.DefaultGroupPath {
 		t.Fatalf("persisted session mismatch: %+v", shown)
+	}
+}
+
+func TestSessionImportClaudeCLI_AmbiguousNameReturnsCandidates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess CLI test skipped in short mode")
+	}
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(filepath.Join(claudeDir, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, sessionID := range []string{
+		"66666666-7777-8888-9999-000000000000",
+		"77777777-8888-9999-0000-111111111111",
+	} {
+		projectDir := filepath.Join(claudeDir, "projects", "project-"+strconv.Itoa(i))
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(projectDir, sessionID+".jsonl"),
+			[]byte(`{"sessionId":"`+sessionID+`","cwd":"/tmp/project-`+strconv.Itoa(i)+`","timestamp":"2026-06-30T10:00:00Z"}`),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(claudeDir, "sessions", strconv.Itoa(i)+".json"),
+			[]byte(`{"sessionId":"`+sessionID+`","name":"Duplicate Claude","updatedAt":2000}`),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout, stderr, code := runAgentDeck(t, home, "session", "import-claude", "Duplicate Claude", "--json")
+	if code != 1 {
+		t.Fatalf("expected ambiguous import to fail with exit 1, got %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	var resp struct {
+		Success    bool   `json:"success"`
+		Error      string `json:"error"`
+		Code       string `json:"code"`
+		Candidates []struct {
+			SessionID string `json:"session_id"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("unmarshal ambiguous response: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if resp.Success {
+		t.Fatalf("ambiguous response marked success: %+v", resp)
+	}
+	if resp.Code != ErrCodeAmbiguous {
+		t.Fatalf("code = %q, want %q", resp.Code, ErrCodeAmbiguous)
+	}
+	if len(resp.Candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2", len(resp.Candidates))
+	}
+	if resp.Candidates[0].SessionID == "" || resp.Candidates[1].SessionID == "" {
+		t.Fatalf("candidate UUIDs missing: %+v", resp.Candidates)
 	}
 }
 

@@ -235,7 +235,7 @@ func importClaudeSession(profile string, opts importClaudeSessionOptions, deps i
 		return nil, fmt.Errorf("Claude session %q not found", target)
 	}
 
-	projectPath, err := resolveImportClaudeProjectPath(opts.ProjectPath, candidate.CWD, deps.cwd)
+	projectPath, err := resolveImportClaudeProjectPath(opts.ProjectPath, candidate.CWD, candidate.Path, deps.cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -250,9 +250,6 @@ func importClaudeSession(profile string, opts importClaudeSessionOptions, deps i
 		inst.ClaudeDetectedAt = time.Now()
 	}
 	inst.Status = session.StatusStopped
-	if strings.TrimSpace(opts.Title) != "" {
-		inst.TitleLocked = true
-	}
 
 	instances = append(instances, inst)
 	if err := deps.save(storage, instances, groups); err != nil {
@@ -272,12 +269,15 @@ func importClaudeSession(profile string, opts importClaudeSessionOptions, deps i
 	return result, nil
 }
 
-func resolveImportClaudeProjectPath(explicitPath, transcriptCWD string, cwd func() (string, error)) (string, error) {
+func resolveImportClaudeProjectPath(explicitPath, transcriptCWD, metadataPath string, cwd func() (string, error)) (string, error) {
 	if strings.TrimSpace(explicitPath) != "" {
 		return resolveAddPath(explicitPath)
 	}
 	if strings.TrimSpace(transcriptCWD) != "" {
 		return strings.TrimSpace(transcriptCWD), nil
+	}
+	if strings.TrimSpace(metadataPath) != "" {
+		return strings.TrimSpace(metadataPath), nil
 	}
 	if cwd == nil {
 		cwd = os.Getwd
@@ -391,6 +391,7 @@ func claudeImportCandidateJSON(candidates []session.ClaudeImportCandidate) []map
 			"session_id": c.SessionID,
 			"name":       c.Name,
 			"cwd":        c.CWD,
+			"path":       c.Path,
 			"updated_at": c.UpdatedAt,
 		})
 	}

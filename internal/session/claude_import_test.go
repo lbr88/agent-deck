@@ -63,6 +63,9 @@ func TestListClaudeImportCandidates_MetadataOnly(t *testing.T) {
 	if got.CWD != cwd {
 		t.Errorf("CWD = %q, want %q", got.CWD, cwd)
 	}
+	if got.Path != "" {
+		t.Errorf("Path = %q, want empty when metadata path absent", got.Path)
+	}
 	if got.Name != "Alpha plan" {
 		t.Errorf("Name = %q, want Alpha plan", got.Name)
 	}
@@ -74,6 +77,33 @@ func TestListClaudeImportCandidates_MetadataOnly(t *testing.T) {
 	}
 	if strings.Contains(strings.Join([]string{got.SessionID, got.Name, got.CWD, got.FilePath}, "\n"), "PRIVATE_TRANSCRIPT_CONTENT") {
 		t.Fatalf("candidate exposed transcript content: %#v", got)
+	}
+}
+
+func TestListClaudeImportCandidates_CapturesMetadataPathFallback(t *testing.T) {
+	configDir := t.TempDir()
+	projectDir := filepath.Join(configDir, "projects", "fallback-project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	transcriptPath := filepath.Join(projectDir, claudeImportIDBeta+".jsonl")
+	line := `{"sessionId":"` + claudeImportIDBeta + `","path":"/metadata/path","timestamp":"2026-06-30T10:00:00Z"}`
+	if err := os.WriteFile(transcriptPath, []byte(line), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	candidates, err := ListClaudeImportCandidates(configDir)
+	if err != nil {
+		t.Fatalf("ListClaudeImportCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if got := candidates[0].Path; got != "/metadata/path" {
+		t.Fatalf("Path = %q, want metadata path fallback", got)
+	}
+	if got := candidates[0].CWD; got != "" {
+		t.Fatalf("CWD = %q, want empty when only metadata path exists", got)
 	}
 }
 

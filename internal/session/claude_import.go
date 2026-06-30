@@ -18,6 +18,7 @@ type ClaudeImportCandidate struct {
 	SessionID string    `json:"session_id"`
 	Name      string    `json:"name,omitempty"`
 	CWD       string    `json:"cwd,omitempty"`
+	Path      string    `json:"path,omitempty"`
 	FilePath  string    `json:"file_path"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -60,6 +61,7 @@ func (e *ClaudeImportResolveError) Error() string {
 type claudeImportJSONLRecord struct {
 	SessionID string `json:"sessionId"`
 	CWD       string `json:"cwd"`
+	Path      string `json:"path"`
 }
 
 // ListClaudeImportCandidates scans configDir/projects for UUID-named Claude
@@ -112,6 +114,7 @@ func ListClaudeImportCandidates(configDir string) ([]ClaudeImportCandidate, erro
 			SessionID: sessionID,
 			Name:      ClaudeSessionNameIn(configDir, sessionID),
 			CWD:       strings.TrimSpace(meta.CWD),
+			Path:      strings.TrimSpace(meta.Path),
 			FilePath:  path,
 			UpdatedAt: info.ModTime(),
 		}
@@ -165,11 +168,14 @@ func parseClaudeImportJSONLMetadata(filePath string) (claudeImportJSONLRecord, e
 		if meta.CWD == "" && record.CWD != "" {
 			meta.CWD = record.CWD
 		}
-		if meta.SessionID != "" && meta.CWD != "" {
+		if meta.Path == "" && record.Path != "" {
+			meta.Path = record.Path
+		}
+		if meta.SessionID != "" && (meta.CWD != "" || meta.Path != "") {
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil && meta.SessionID == "" && meta.CWD == "" {
+	if err := scanner.Err(); err != nil && meta.SessionID == "" && meta.CWD == "" && meta.Path == "" {
 		return meta, err
 	}
 	return meta, nil
