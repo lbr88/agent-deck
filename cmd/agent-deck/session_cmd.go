@@ -248,6 +248,18 @@ func handleSessionImportOpenCode(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	if isDupe, existingInst := isDuplicateSession(instances, imported.Title, imported.ProjectPath); isDupe {
+		fmt.Printf("Session already exists with same title and path: %s (%s)\n", existingInst.Title, existingInst.ID)
+		return
+	}
+	if existingInst := findOpenCodeImportSessionIDConflict(instances, imported.OpenCodeSessionID); existingInst != nil {
+		out.Error(
+			fmt.Sprintf("OpenCode session %q is already imported by Agent Deck session %q (%s)", imported.OpenCodeSessionID, existingInst.Title, existingInst.ID),
+			ErrCodeAlreadyExists,
+		)
+		os.Exit(1)
+	}
+
 	instances = append(instances, imported)
 	groupTree = session.NewGroupTreeWithGroups(instances, groupsData)
 	if imported.GroupPath != "" {
@@ -293,6 +305,19 @@ func handleSessionImportOpenCode(profile string, args []string) {
 	}
 
 	out.Success(fmt.Sprintf("Imported OpenCode session: %s", imported.Title), result)
+}
+
+func findOpenCodeImportSessionIDConflict(instances []*session.Instance, importedSessionID string) *session.Instance {
+	importedSessionID = strings.TrimSpace(importedSessionID)
+	if importedSessionID == "" {
+		return nil
+	}
+	for _, inst := range instances {
+		if strings.TrimSpace(inst.OpenCodeSessionID) == importedSessionID {
+			return inst
+		}
+	}
+	return nil
 }
 
 // handleSessionStart starts a session's tmux process
