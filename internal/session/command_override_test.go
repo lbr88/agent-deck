@@ -384,7 +384,30 @@ func TestBuildCodexCommand_PassthroughKeepsAgentdeckEnv(t *testing.T) {
 	}
 }
 
-func TestBuildCodexCommand_ImportedCustomCodexCommandResumesSession(t *testing.T) {
+func TestBuildCodexCommand_ImportedBareCustomCodexCommandResumesSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	seedCodexRollout(t, home, sid)
+
+	command := "CODEX_HOME=" + shellescape.Quote(home) + " codex-nightly"
+	inst := &Instance{
+		ID:             "imported-codex",
+		Title:          "imported",
+		Tool:           "codex",
+		Command:        command,
+		CodexSessionID: sid,
+	}
+
+	got := inst.buildCodexCommand(inst.Command)
+
+	want := command + " resume " + sid
+	if !strings.Contains(got, want) {
+		t.Fatalf("imported Codex command must resume stored session; want %q in %q", want, got)
+	}
+}
+
+func TestBuildCodexCommand_ImportedCustomCodexCommandWithArgsPassesThrough(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", "")
 	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -401,9 +424,11 @@ func TestBuildCodexCommand_ImportedCustomCodexCommandResumesSession(t *testing.T
 
 	got := inst.buildCodexCommand(inst.Command)
 
-	want := command + " resume " + sid
-	if !strings.Contains(got, want) {
-		t.Fatalf("imported Codex command must resume stored session; want %q in %q", want, got)
+	if !strings.Contains(got, command) {
+		t.Fatalf("unsupported imported Codex command should pass through unchanged; want %q in %q", command, got)
+	}
+	if strings.Contains(got, " resume "+sid) {
+		t.Fatalf("unsupported imported Codex command must not append resume; got %q", got)
 	}
 }
 

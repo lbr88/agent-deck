@@ -40,6 +40,25 @@ func TestListCodexIndexSortsLatestFirst(t *testing.T) {
 	}
 }
 
+func TestListCodexIndexSkipsMalformedSessionIDs(t *testing.T) {
+	home := t.TempDir()
+	validID := "22222222-2222-2222-2222-222222222222"
+	writeCodexIndex(t, home,
+		`{"id":"not-a-uuid","thread_name":"bad plain","updated_at":"2026-06-30T10:00:00Z"}`,
+		`{"id":"bad*id","thread_name":"bad glob","updated_at":"2026-06-30T11:00:00Z"}`,
+		`{"id":"bad?[id]","thread_name":"bad glob chars","updated_at":"2026-06-30T12:00:00Z"}`,
+		`{"id":"`+validID+`","thread_name":"valid","updated_at":"2026-06-30T13:00:00Z"}`,
+	)
+
+	got, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != validID {
+		t.Fatalf("entries = %#v, want only valid ID %s", got, validID)
+	}
+}
+
 func TestListCodexIndexMissingFileReturnsEmpty(t *testing.T) {
 	got, err := ListCodexIndex(t.TempDir())
 	if err != nil {
@@ -127,6 +146,18 @@ func TestResolveCodexIndexTargetMissingRollout(t *testing.T) {
 	}
 }
 
+func TestResolveCodexIndexTargetSkipsMalformedIDsBeforeNameResolution(t *testing.T) {
+	home := t.TempDir()
+	poisonedID := "bad*id"
+	writeCodexIndex(t, home, `{"id":"`+poisonedID+`","thread_name":"poisoned name","updated_at":"2026-06-30T10:00:00Z"}`)
+	writeCodexRollout(t, home, poisonedID)
+
+	_, err := ResolveCodexIndexTarget(home, "poisoned name")
+	if !errors.Is(err, ErrCodexSessionNotFound) {
+		t.Fatalf("err = %v, want ErrCodexSessionNotFound", err)
+	}
+}
+
 func TestResolveCodexIndexTargetUnknown(t *testing.T) {
 	_, err := ResolveCodexIndexTarget(t.TempDir(), "missing")
 	if !errors.Is(err, ErrCodexSessionNotFound) {
@@ -143,6 +174,16 @@ func TestCodexRolloutExists(t *testing.T) {
 	writeCodexRollout(t, home, id)
 	if !CodexRolloutExists(home, id) {
 		t.Fatal("rollout should exist")
+	}
+}
+
+func TestCodexRolloutExistsRejectsMalformedSessionID(t *testing.T) {
+	home := t.TempDir()
+	poisonedID := "bad*id"
+	writeCodexRollout(t, home, poisonedID)
+
+	if CodexRolloutExists(home, poisonedID) {
+		t.Fatal("malformed Codex session ID with glob metacharacters must not match rollout files")
 	}
 }
 

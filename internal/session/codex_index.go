@@ -92,7 +92,7 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 			return nil, fmt.Errorf("parse %s line %d updated_at: %w", path, lineNo, err)
 		}
 		id := strings.ToLower(strings.TrimSpace(raw.ID))
-		if id == "" {
+		if !isCodexSessionUUID(id) {
 			continue
 		}
 		entry := CodexIndexEntry{
@@ -116,6 +116,10 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 		return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
 	})
 	return entries, nil
+}
+
+func isCodexSessionUUID(id string) bool {
+	return codexIndexUUIDPattern.MatchString(strings.TrimSpace(id))
 }
 
 // ResolveCodexIndexTarget resolves an import target as a Codex UUID first, then

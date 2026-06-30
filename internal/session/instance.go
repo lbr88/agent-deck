@@ -1423,7 +1423,8 @@ func IsSupportedCodexLaunchCommand(command string) bool {
 		base = strings.TrimSuffix(base, ".exe")
 		base = strings.TrimSuffix(base, ".EXE")
 		base = strings.ToLower(base)
-		return base == "codex" || strings.HasPrefix(base, "codex-") || strings.HasPrefix(base, "codex_")
+		supported := base == "codex" || strings.HasPrefix(base, "codex-") || strings.HasPrefix(base, "codex_")
+		return supported && strings.TrimSpace(remainder) == ""
 	}
 	return false
 }
@@ -1704,8 +1705,8 @@ func (i *Instance) buildCopilotCommand(baseCommand string) string {
 //
 // Codex layout: codexHome/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 func codexRolloutExistsInHome(sessionID, codexHome string) bool {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if !isCodexSessionUUID(sessionID) {
 		return false
 	}
 	pattern := filepath.Join(codexHome, "sessions", "*", "*", "*",

@@ -39,7 +39,7 @@ func handleSessionImportCodex(profile string, args []string) {
 		resolvedCommand = "codex"
 	}
 	if !session.IsSupportedCodexLaunchCommand(resolvedCommand) {
-		out.Error(fmt.Sprintf("unsupported Codex command %q: use optional env assignments followed by codex or codex-*", resolvedCommand), ErrCodeInvalidOperation)
+		out.Error(fmt.Sprintf("unsupported Codex command %q: use optional env assignments followed by codex, codex-*, or codex_*", resolvedCommand), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 

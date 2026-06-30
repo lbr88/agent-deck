@@ -182,6 +182,33 @@ func TestHandleSessionImportCodexRejectsMissingRollout(t *testing.T) {
 	}
 }
 
+func TestHandleSessionImportCodexRejectsMalformedIndexID(t *testing.T) {
+	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "malformed-index-id" {
+		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"poisoned"})
+		return
+	}
+
+	profile := codexImportTestProfile(t)
+	home := t.TempDir()
+	id := "bad*id"
+	writeCodexIndexForCLI(t, home, id, "poisoned", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForCLI(t, home, id)
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestHandleSessionImportCodexRejectsMalformedIndexID")
+	cmd.Env = append(os.Environ(),
+		"AGENT_DECK_IMPORT_CODEX_HELPER=malformed-index-id",
+		"AGENT_DECK_IMPORT_CODEX_PROFILE="+profile,
+		"CODEX_HOME="+home,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("malformed-index-id import unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "codex session not found") {
+		t.Fatalf("output %q does not mention unknown Codex session", output)
+	}
+}
+
 func TestHandleSessionImportCodexRejectsUnsupportedCommand(t *testing.T) {
 	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "unsupported-command" {
 		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"cmd", "--command", "echo codex"})

@@ -55,6 +55,41 @@ func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 }
 
+func TestHomeCodexImportHotkeySkipsMalformedIndexIDs(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	validID := "88888888-8888-8888-8888-888888888888"
+	poisonedID := "bad*id"
+	writeCodexIndexForHomeImport(t, codexHome, validID, "valid saved codex", "2026-06-30T10:00:00Z")
+	appendCodexIndexForHomeImport(t, codexHome, poisonedID, "poisoned saved codex", "2026-06-30T11:00:00Z")
+	writeCodexRolloutForHomeImport(t, codexHome, validID)
+	writeCodexRolloutForHomeImport(t, codexHome, poisonedID)
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if got := h.importSourceDialog.CodexCount(); got != 1 {
+		t.Fatalf("codex count = %d, want 1 valid entry", got)
+	}
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if got := len(h.codexImportDialog.entries); got != 1 {
+		t.Fatalf("codex import entries = %d, want 1 valid entry", got)
+	}
+	if h.codexImportDialog.entries[0].ID != validID {
+		t.Fatalf("listed Codex import ID = %q, want %q", h.codexImportDialog.entries[0].ID, validID)
+	}
+}
+
 func TestHomeImportHotkeyKeepsTmuxSourceWhenCodexIndexFails(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -3929,6 +3964,19 @@ func writeCodexIndexForHomeImport(t *testing.T, home, id, threadName, updatedAt 
 	line := `{"id":"` + id + `","thread_name":"` + threadName + `","updated_at":"` + updatedAt + `"}` + "\n"
 	if err := os.WriteFile(filepath.Join(home, "session_index.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatalf("write codex index: %v", err)
+	}
+}
+
+func appendCodexIndexForHomeImport(t *testing.T, home, id, threadName, updatedAt string) {
+	t.Helper()
+	line := `{"id":"` + id + `","thread_name":"` + threadName + `","updated_at":"` + updatedAt + `"}` + "\n"
+	f, err := os.OpenFile(filepath.Join(home, "session_index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open codex index: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		t.Fatalf("append codex index: %v", err)
 	}
 }
 
