@@ -25,7 +25,7 @@ type fakeMutator struct {
 	unarchiveSessionFn func(id string) error
 	undoDeleteFn       func() (string, error)
 	forkSessionFn      func(id string) (string, error)
-	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, error)
+	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, string, error)
 	createGroupFn      func(name, parentPath string) (string, error)
 	renameGroupFn      func(groupPath, newName string) error
 	deleteGroupFn      func(groupPath string) error
@@ -102,9 +102,9 @@ func (f *fakeMutator) ForkSession(id string) (string, error) {
 	return f.forkSessionFn(id)
 }
 
-func (f *fakeMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, error) {
+func (f *fakeMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, string, error) {
 	if f.updateSessionFn == nil {
-		return nil, false, fmt.Errorf("updateSession not configured")
+		return nil, false, "", fmt.Errorf("updateSession not configured")
 	}
 	return f.updateSessionFn(id, updates)
 }
@@ -790,10 +790,10 @@ func TestSessionPatchUpdatesTitle(t *testing.T) {
 	var gotID string
 	var gotUpdates map[string]string
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
 			gotID = id
 			gotUpdates = updates
-			return []string{"title"}, false, nil
+			return []string{"title"}, false, "", nil
 		},
 	}
 
@@ -826,7 +826,7 @@ func TestSessionPatchForwardsAllSupportedFields(t *testing.T) {
 
 	var gotUpdates map[string]string
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
 			gotUpdates = updates
 			// Echo back what we received as "changed" so the assertion can
 			// verify field-name canonicalization (api → session.Field*).
@@ -834,7 +834,7 @@ func TestSessionPatchForwardsAllSupportedFields(t *testing.T) {
 			for k := range updates {
 				fields = append(fields, k)
 			}
-			return fields, true, nil
+			return fields, true, "", nil
 		},
 	}
 
@@ -879,6 +879,32 @@ func TestSessionPatchForwardsAllSupportedFields(t *testing.T) {
 	}
 }
 
+func TestSessionPatchIncludesNonfatalWarningInResponse(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeMutator{
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
+			return []string{session.FieldTitle}, false, "Claude name sync failed: claude session metadata not found", nil
+		},
+	}
+
+	body := strings.NewReader(`{"title":"x"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/sess-1", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"warning":"Claude name sync failed: claude session metadata not found"`) {
+		t.Fatalf("expected warning in response, got: %s", rr.Body.String())
+	}
+}
+
 func TestSessionPatchEmptyBodyRejected(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -886,9 +912,9 @@ func TestSessionPatchEmptyBodyRejected(t *testing.T) {
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
 			t.Fatal("mutator must not be called with no updates")
-			return nil, false, nil
+			return nil, false, "", nil
 		},
 	}
 
@@ -910,9 +936,9 @@ func TestSessionPatchEmptyTitleRejected(t *testing.T) {
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
 			t.Fatal("mutator must not be called for invalid input")
-			return nil, false, nil
+			return nil, false, "", nil
 		},
 	}
 
@@ -956,8 +982,8 @@ func TestSessionPatchMutationErrorReturns400(t *testing.T) {
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
-			return nil, false, &session.MutationError{Field: session.FieldColor, Msg: "invalid color \"bogus\""}
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
+			return nil, false, "", &session.MutationError{Field: session.FieldColor, Msg: "invalid color \"bogus\""}
 		},
 	}
 
@@ -982,8 +1008,8 @@ func TestSessionPatchNotFoundReturns404(t *testing.T) {
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
-			return nil, false, fmt.Errorf("session not found: %s", id)
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
+			return nil, false, "", fmt.Errorf("session not found: %s", id)
 		},
 	}
 
@@ -1042,8 +1068,8 @@ func TestSessionPatchNotifiesSSE(t *testing.T) {
 	})
 	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
-			return []string{"title"}, false, nil
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
+			return []string{"title"}, false, "", nil
 		},
 	}
 
@@ -1079,9 +1105,9 @@ func TestSessionPatchUnicodeAndLongTitle(t *testing.T) {
 	const newTitle = "🐙 重命名 — long unicode title with special chars: <>&\"'"
 	var gotTitle string
 	srv.mutator = &fakeMutator{
-		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, string, error) {
 			gotTitle = updates[session.FieldTitle]
-			return []string{session.FieldTitle}, false, nil
+			return []string{session.FieldTitle}, false, "", nil
 		},
 	}
 

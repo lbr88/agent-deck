@@ -3242,13 +3242,12 @@ func TestBuildClaudeExtraFlags_NilOpts(t *testing.T) {
 	}
 }
 
-func TestBuildClaudeExtraFlags_NameForLockedTitle(t *testing.T) {
+func TestBuildClaudeExtraFlags_NoNameForLockedTitle(t *testing.T) {
 	inst := &Instance{Tool: "claude", Title: "Agent Deck Rename", TitleLocked: true, ClaudeSessionID: "sid-name"}
 	flags := inst.buildClaudeExtraFlags(nil)
 
-	want := "--name " + shellescape.Quote("Agent Deck Rename")
-	if !strings.Contains(flags, want) {
-		t.Fatalf("expected %q in flags, got %q", want, flags)
+	if strings.Contains(flags, "--name") {
+		t.Fatalf("locked title should not emit --name at launch, got %q", flags)
 	}
 }
 

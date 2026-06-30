@@ -322,7 +322,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 
-	changed, restartRequired, err := s.mutator.UpdateSession(sessionID, updates)
+	changed, restartRequired, warning, err := s.mutator.UpdateSession(sessionID, updates)
 	if err != nil {
 		// session.MutationError signals client-side bad input; "not found"
 		// signals an unknown id. Everything else is a 500.
@@ -345,6 +345,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request, sess
 		SessionID:       sessionID,
 		UpdatedFields:   changed,
 		RestartRequired: restartRequired,
+		Warning:         warning,
 	})
 }
 

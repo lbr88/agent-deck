@@ -64,6 +64,7 @@ type UpdateSessionResponse struct {
 	SessionID       string   `json:"sessionId"`
 	UpdatedFields   []string `json:"updatedFields"`
 	RestartRequired bool     `json:"restartRequired"`
+	Warning         string   `json:"warning,omitempty"`
 }
 
 // SessionActionResponse is returned by session action endpoints.

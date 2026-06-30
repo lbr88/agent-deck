@@ -552,12 +552,12 @@ func (s *parityStore) DeleteSession(id string) error {
 	return nil
 }
 
-func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]string, bool, error) {
+func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]string, bool, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
 	if !ok {
-		return nil, false, errNotFound(id)
+		return nil, false, "", errNotFound(id)
 	}
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
@@ -575,7 +575,7 @@ func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]str
 			session.FieldSkipPermissions, session.FieldAutoMode:
 			oldValue = value
 		default:
-			return nil, false, parityErr("invalid field: " + field)
+			return nil, false, "", parityErr("invalid field: " + field)
 		}
 		if oldValue == value {
 			continue
@@ -585,7 +585,7 @@ func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]str
 			restartRequired = true
 		}
 	}
-	return changed, restartRequired, nil
+	return changed, restartRequired, "", nil
 }
 
 func (s *parityStore) ForkSession(parentID string) (string, error) {

@@ -1147,15 +1147,6 @@ func (i *Instance) buildClaudeExtraFlags(opts *ClaudeOptions) string {
 		}
 	}
 
-	// A TitleLocked title is explicit user intent in Agent Deck. Pass it to
-	// Claude on future starts/resumes so a metadata file that did not exist at
-	// rename time can still converge when Claude next launches.
-	if i.TitleLocked && strings.TrimSpace(i.ClaudeSessionID) != "" {
-		if strings.TrimSpace(i.Title) != "" {
-			flags = append(flags, "--name "+shellescape.Quote(i.Title))
-		}
-	}
-
 	// Launch model resolution (#1431). An explicit per-session opts.Model
 	// wins; otherwise fall back to [claude].default_model. The fallback is the
 	// load-bearing fix: a session that persisted ANY other Claude option

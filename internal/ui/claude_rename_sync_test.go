@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,8 +92,42 @@ func TestWebMutatorTitleUpdateSyncsClaudeMetadataAfterSave(t *testing.T) {
 	}
 
 	m := NewWebMutator(h)
-	changed, _, err := m.UpdateSession("web-sync-001", map[string]string{
+	changed, _, warning, err := m.UpdateSession("web-sync-001", map[string]string{
 		session.FieldTitle: "new web name",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+	if warning != "" {
+		t.Fatalf("warning = %q, want empty", warning)
+	}
+	if len(changed) != 1 || changed[0] != session.FieldTitle {
+		t.Fatalf("changed fields = %v, want [title]", changed)
+	}
+	if got := session.ClaudeSessionNameIn(filepath.Join(homeDir, ".claude"), "sid-web"); got != "new web name" {
+		t.Fatalf("Claude metadata name = %q, want new web name", got)
+	}
+}
+
+func TestWebMutatorTitleUpdateReturnsClaudeRenameWarningWhenMetadataMissing(t *testing.T) {
+	h, storage := newHeadlessHomeForTest(t, "_test_claude_rename_sync_web_warning")
+	inst := &session.Instance{
+		ID:              "web-sync-warning-001",
+		Title:           "before",
+		ProjectPath:     "/tmp/web-sync-warning-project",
+		GroupPath:       session.DefaultGroupPath,
+		Tool:            "claude",
+		ClaudeSessionID: "sid-web-warning",
+		Status:          session.StatusStopped,
+		CreatedAt:       time.Now(),
+	}
+	if err := storage.SaveWithGroups([]*session.Instance{inst}, session.NewGroupTree([]*session.Instance{inst})); err != nil {
+		t.Fatalf("seed SaveWithGroups: %v", err)
+	}
+
+	m := NewWebMutator(h)
+	changed, _, warning, err := m.UpdateSession("web-sync-warning-001", map[string]string{
+		session.FieldTitle: "new web warning name",
 	})
 	if err != nil {
 		t.Fatalf("UpdateSession: %v", err)
@@ -100,8 +135,8 @@ func TestWebMutatorTitleUpdateSyncsClaudeMetadataAfterSave(t *testing.T) {
 	if len(changed) != 1 || changed[0] != session.FieldTitle {
 		t.Fatalf("changed fields = %v, want [title]", changed)
 	}
-	if got := session.ClaudeSessionNameIn(filepath.Join(homeDir, ".claude"), "sid-web"); got != "new web name" {
-		t.Fatalf("Claude metadata name = %q, want new web name", got)
+	if !strings.Contains(warning, "Claude name sync failed") {
+		t.Fatalf("warning = %q, want Claude name sync warning", warning)
 	}
 }
 

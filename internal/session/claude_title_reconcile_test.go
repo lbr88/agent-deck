@@ -257,6 +257,68 @@ func TestSyncClaudeSessionNameIn_MissingMetadataReturnsWarningError(t *testing.T
 	}
 }
 
+func TestClaudeSessionNameIn_MalformedFreshestMatchDoesNotFallBackToStaleName(t *testing.T) {
+	home := t.TempDir()
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-bad-read", "name": "stale old name", "updatedAt": int64(1000),
+	})
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.WriteFile(filepath.Join(dir, "2222.json"), []byte(`{"sessionId":"sid-bad-read","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed session file: %v", err)
+	}
+
+	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-bad-read"); got != "" {
+		t.Fatalf("ClaudeSessionNameIn = %q, want empty when freshest matching metadata is malformed", got)
+	}
+
+	best, err := freshestClaudeSessionMetaIn(filepath.Join(home, ".claude"), "sid-bad-read")
+	if err == nil {
+		t.Fatalf("freshestClaudeSessionMetaIn unexpectedly returned %+v for malformed freshest match", best)
+	}
+	if errors.Is(err, ErrClaudeSessionMetadataNotFound) {
+		t.Fatalf("freshestClaudeSessionMetaIn error = %v, want actionable malformed/read error", err)
+	}
+}
+
+func TestSyncClaudeSessionNameIn_MalformedFreshestMatchReturnsActionableErrorAndLeavesStaleFileUntouched(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-malformed-sync",
+		"name":      "old stale",
+		"updatedAt": int64(1000),
+	})
+	dir := filepath.Join(claudeDir, "sessions")
+	freshPath := filepath.Join(dir, "2222.json")
+	if err := os.WriteFile(freshPath, []byte(`{"sessionId":"sid-malformed-sync","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed session file: %v", err)
+	}
+
+	beforeFresh, err := os.ReadFile(freshPath)
+	if err != nil {
+		t.Fatalf("read malformed session file before sync: %v", err)
+	}
+	if err := SyncClaudeSessionNameIn(claudeDir, "sid-malformed-sync", "Agent Deck Rename"); err == nil {
+		t.Fatal("SyncClaudeSessionNameIn unexpectedly succeeded with malformed freshest matching metadata")
+	} else if errors.Is(err, ErrClaudeSessionMetadataNotFound) {
+		t.Fatalf("SyncClaudeSessionNameIn error = %v, want actionable malformed/read error", err)
+	}
+
+	var stale map[string]any
+	readClaudeSessionMetaFile(t, home, "1111.json", &stale)
+	if stale["name"] != "old stale" {
+		t.Fatalf("stale metadata name = %q, want unchanged old stale", stale["name"])
+	}
+
+	afterFresh, err := os.ReadFile(freshPath)
+	if err != nil {
+		t.Fatalf("read malformed session file after sync: %v", err)
+	}
+	if string(afterFresh) != string(beforeFresh) {
+		t.Fatal("malformed freshest matching metadata should remain untouched on failed sync")
+	}
+}
+
 func TestSyncClaudeSessionNameForInstance_GatesToClaudeCompatibleWithSessionID(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -16,6 +16,11 @@ import (
 // entry matched the requested Claude session ID.
 var ErrClaudeSessionMetadataNotFound = errors.New("claude session metadata not found")
 
+// ErrClaudeSessionMetadataUnreadable means the freshest candidate Claude
+// metadata could not be read or parsed, so agent-deck cannot safely choose a
+// stale older match.
+var ErrClaudeSessionMetadataUnreadable = errors.New("claude session metadata unreadable")
+
 // claudeSessionMeta is the subset of ~/.claude/sessions/<PID>.json that
 // agent-deck reads for title sync (issue #572).
 type claudeSessionMeta struct {
@@ -29,6 +34,12 @@ type claudeSessionMetaCandidate struct {
 	data []byte
 	meta claudeSessionMeta
 	time int64
+}
+
+type claudeSessionMetaProblem struct {
+	path string
+	time int64
+	err  error
 }
 
 func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMetaCandidate, error) {
@@ -45,27 +56,43 @@ func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMet
 		return nil, fmt.Errorf("read Claude session metadata: %w", err)
 	}
 	var best *claudeSessionMetaCandidate
+	var newestProblem *claudeSessionMetaProblem
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		path := filepath.Join(claudeDir, "sessions", entry.Name())
+		var ts int64
+		if info, err := entry.Info(); err == nil {
+			ts = info.ModTime().UnixMilli()
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if newestProblem == nil || ts >= newestProblem.time {
+				newestProblem = &claudeSessionMetaProblem{
+					path: path,
+					time: ts,
+					err:  fmt.Errorf("read %s: %w", path, err),
+				}
+			}
 			continue
 		}
 		var meta claudeSessionMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
+			if newestProblem == nil || ts >= newestProblem.time {
+				newestProblem = &claudeSessionMetaProblem{
+					path: path,
+					time: ts,
+					err:  fmt.Errorf("decode %s: %w", path, err),
+				}
+			}
 			continue
 		}
 		if meta.SessionID != sessionID {
 			continue
 		}
-		var ts int64
 		if meta.UpdatedAt != nil {
 			ts = *meta.UpdatedAt
-		} else if info, err := entry.Info(); err == nil {
-			ts = info.ModTime().UnixMilli()
 		}
 		if best == nil || ts > best.time {
 			best = &claudeSessionMetaCandidate{
@@ -75,6 +102,9 @@ func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMet
 				time: ts,
 			}
 		}
+	}
+	if newestProblem != nil && (best == nil || newestProblem.time >= best.time) {
+		return nil, fmt.Errorf("%w: %v", ErrClaudeSessionMetadataUnreadable, newestProblem.err)
 	}
 	if best == nil {
 		return nil, ErrClaudeSessionMetadataNotFound
