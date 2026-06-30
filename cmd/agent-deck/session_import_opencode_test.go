@@ -57,46 +57,79 @@ func TestHandleSessionImportOpenCodeCreatesStoppedSession(t *testing.T) {
 	}
 }
 
-func TestHandleSessionImportOpenCodeSkipsExactDuplicate(t *testing.T) {
-	projectPath := t.TempDir()
+func TestHandleSessionImportOpenCodeRejectsExactDuplicateCLI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess CLI test skipped in short mode")
+	}
+	prepareOpenCodeImportCLITest(t)
+
+	home := t.TempDir()
+	projectPath := filepath.Join(home, "project")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	if stdout, stderr, code := runAgentDeck(t, home, "add", "-c", "opencode", "-t", "Existing OpenCode session", projectPath); code != 0 {
+		t.Fatalf("agent-deck add failed (exit %d)\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
 	fakeDir := installFakeOpenCodeSessionListForCLI(t, []map[string]interface{}{
 		{
-			"id":        "ses_cli_import123",
+			"id":        "ses_exact_duplicate123",
 			"title":     "Existing OpenCode session",
 			"directory": projectPath,
 			"created":   1768982195000,
 			"updated":   1768982200000,
 		},
 	})
-	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	profile := "import_opencode_dupe_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
-	storage, instances, groups, err := loadSessionData(profile)
-	if err != nil {
-		t.Fatalf("loadSessionData: %v", err)
+	stdout, stderr, code := runAgentDeckWithEnv(
+		t,
+		home,
+		[]string{"PATH=" + fakeDir + string(os.PathListSeparator) + os.Getenv("PATH")},
+		"session", "import-opencode", "Existing OpenCode session", "--quiet",
+	)
+	if code == 0 {
+		t.Fatalf("expected exact duplicate import to fail\nstdout: %s\nstderr: %s", stdout, stderr)
 	}
-	existing := session.NewInstanceWithGroupAndTool("Existing OpenCode session", projectPath, session.DefaultGroupPath, "opencode")
-	existing.Command = "opencode"
-	existing.Status = session.StatusStopped
-	existing.OpenCodeSessionID = "ses_cli_import123"
-	groupTree := session.NewGroupTreeWithGroups(append(instances, existing), groups)
-	if err := storage.InsertSessionAndVerify(existing, groupTree); err != nil {
-		t.Fatalf("seed duplicate session: %v", err)
+	if stdout != "" {
+		t.Fatalf("quiet duplicate import stdout = %q, want empty", stdout)
 	}
-
-	output := captureStdout(t, func() {
-		handleSessionImportOpenCode(profile, []string{"Existing OpenCode session", "--quiet"})
-	})
-	if !strings.Contains(output, "Session already exists with same title and path") {
-		t.Fatalf("duplicate import output = %q, want exact-duplicate message", output)
+	if !strings.Contains(stderr, "same title and path") {
+		t.Fatalf("duplicate import stderr = %q, want exact-duplicate message", stderr)
 	}
 
-	_, stored, _, err := loadSessionData(profile)
-	if err != nil {
-		t.Fatalf("reload sessions: %v", err)
+	stdout, stderr, code = runAgentDeckWithEnv(
+		t,
+		home,
+		[]string{"PATH=" + fakeDir + string(os.PathListSeparator) + os.Getenv("PATH")},
+		"session", "import-opencode", "Existing OpenCode session", "--json",
+	)
+	if code == 0 {
+		t.Fatalf("expected JSON exact duplicate import to fail\nstdout: %s\nstderr: %s", stdout, stderr)
 	}
-	if len(stored) != 1 {
-		t.Fatalf("stored sessions = %d, want 1", len(stored))
+	if stderr != "" {
+		t.Fatalf("JSON duplicate import stderr = %q, want empty", stderr)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("unmarshal duplicate JSON output: %v\nstdout: %s", err, stdout)
+	}
+	if payload["success"] != false || payload["code"] != ErrCodeAlreadyExists {
+		t.Fatalf("duplicate JSON payload = %#v, want success=false code=%s", payload, ErrCodeAlreadyExists)
+	}
+	errorMessage, ok := payload["error"].(string)
+	if !ok || !strings.Contains(errorMessage, "same title and path") {
+		t.Fatalf("duplicate JSON error = %q, want exact-duplicate message", payload["error"])
+	}
+
+	listJSON := readSessionsJSON(t, home)
+	var sessions []map[string]interface{}
+	if err := json.Unmarshal([]byte(listJSON), &sessions); err != nil {
+		t.Fatalf("unmarshal list JSON: %v\n%s", err, listJSON)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("stored sessions after failed exact duplicate imports = %d, want 1", len(sessions))
 	}
 }
 
@@ -104,18 +137,7 @@ func TestHandleSessionImportOpenCodeRejectsDuplicateOpenCodeSessionIDCLI(t *test
 	if testing.Short() {
 		t.Skip("subprocess CLI test skipped in short mode")
 	}
-	for _, dir := range []string{
-		"/var/tmp/agent-deck-go-cache",
-		"/var/tmp/agent-deck-go-mod",
-		"/var/tmp/agent-deck-go-tmp",
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	t.Setenv("GOCACHE", "/var/tmp/agent-deck-go-cache")
-	t.Setenv("GOMODCACHE", "/var/tmp/agent-deck-go-mod")
-	t.Setenv("GOTMPDIR", "/var/tmp/agent-deck-go-tmp")
+	prepareOpenCodeImportCLITest(t)
 
 	home := t.TempDir()
 	existingPath := filepath.Join(home, "existing")
@@ -199,6 +221,23 @@ func installFakeOpenCodeSessionListForCLI(t *testing.T, sessions []map[string]in
 		t.Fatalf("write fake opencode: %v", err)
 	}
 	return dir
+}
+
+func prepareOpenCodeImportCLITest(t *testing.T) {
+	t.Helper()
+
+	for _, dir := range []string{
+		"/var/tmp/agent-deck-go-cache",
+		"/var/tmp/agent-deck-go-mod",
+		"/var/tmp/agent-deck-go-tmp",
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	t.Setenv("GOCACHE", "/var/tmp/agent-deck-go-cache")
+	t.Setenv("GOMODCACHE", "/var/tmp/agent-deck-go-mod")
+	t.Setenv("GOTMPDIR", "/var/tmp/agent-deck-go-tmp")
 }
 
 func captureStdout(t *testing.T, fn func()) string {

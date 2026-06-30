@@ -249,8 +249,11 @@ func handleSessionImportOpenCode(profile string, args []string) {
 	}
 
 	if isDupe, existingInst := isDuplicateSession(instances, imported.Title, imported.ProjectPath); isDupe {
-		fmt.Printf("Session already exists with same title and path: %s (%s)\n", existingInst.Title, existingInst.ID)
-		return
+		out.Error(
+			fmt.Sprintf("session already exists with same title and path: %s (%s)", existingInst.Title, existingInst.ID),
+			ErrCodeAlreadyExists,
+		)
+		os.Exit(1)
 	}
 	if existingInst := findOpenCodeImportSessionIDConflict(instances, imported.OpenCodeSessionID); existingInst != nil {
 		out.Error(
