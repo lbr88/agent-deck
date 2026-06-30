@@ -280,6 +280,28 @@ func TestClaudeSessionNameIn_MalformedFreshestMatchDoesNotFallBackToStaleName(t 
 	}
 }
 
+func TestSyncClaudeSessionNameIn_IgnoresNewerMalformedUnrelatedMetadata(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-target",
+		"name":      "old target name",
+		"updatedAt": int64(1000),
+	})
+	dir := filepath.Join(claudeDir, "sessions")
+	if err := os.WriteFile(filepath.Join(dir, "2222.json"), []byte(`{"sessionId":"sid-other","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed unrelated session file: %v", err)
+	}
+
+	if err := SyncClaudeSessionNameIn(claudeDir, "sid-target", "Agent Deck Rename"); err != nil {
+		t.Fatalf("SyncClaudeSessionNameIn error = %v, want successful update despite unrelated malformed metadata", err)
+	}
+
+	if got := ClaudeSessionNameIn(claudeDir, "sid-target"); got != "Agent Deck Rename" {
+		t.Fatalf("ClaudeSessionNameIn = %q, want Agent Deck Rename", got)
+	}
+}
+
 func TestSyncClaudeSessionNameIn_MalformedFreshestMatchReturnsActionableErrorAndLeavesStaleFileUntouched(t *testing.T) {
 	home := t.TempDir()
 	claudeDir := filepath.Join(home, ".claude")

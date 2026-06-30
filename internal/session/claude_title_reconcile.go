@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,78 @@ type claudeSessionMetaProblem struct {
 	err  error
 }
 
+func claudeSessionIDFromPossiblyMalformedJSON(data []byte) (string, bool) {
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	tok, err := dec.Token()
+	if err != nil {
+		return "", false
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return "", false
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return "", false
+		}
+		if key != "sessionId" {
+			if err := skipJSONValue(dec); err != nil {
+				return "", false
+			}
+			continue
+		}
+		valueTok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		sessionID, ok := valueTok.(string)
+		if !ok {
+			return "", false
+		}
+		return sessionID, true
+	}
+	return "", false
+}
+
+func skipJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{', '[':
+		depth := 1
+		for depth > 0 {
+			tok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			if d, ok := tok.(json.Delim); ok {
+				switch d {
+				case '{', '[':
+					depth++
+				case '}', ']':
+					depth--
+				}
+			}
+		}
+		return nil
+	case '}', ']':
+		return io.ErrUnexpectedEOF
+	default:
+		return nil
+	}
+}
+
 func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMetaCandidate, error) {
 	claudeDir = strings.TrimSpace(claudeDir)
 	sessionID = strings.TrimSpace(sessionID)
@@ -68,18 +141,12 @@ func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMet
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			if newestProblem == nil || ts >= newestProblem.time {
-				newestProblem = &claudeSessionMetaProblem{
-					path: path,
-					time: ts,
-					err:  fmt.Errorf("read %s: %w", path, err),
-				}
-			}
 			continue
 		}
 		var meta claudeSessionMeta
 		if err := json.Unmarshal(data, &meta); err != nil {
-			if newestProblem == nil || ts >= newestProblem.time {
+			if probedSessionID, ok := claudeSessionIDFromPossiblyMalformedJSON(data); ok && probedSessionID == sessionID &&
+				(newestProblem == nil || ts >= newestProblem.time) {
 				newestProblem = &claudeSessionMetaProblem{
 					path: path,
 					time: ts,
