@@ -1454,7 +1454,9 @@ func handleSessionSet(profile string, args []string) {
 		os.Exit(1)
 	}
 	if postCommit != nil {
-		postCommit()
+		if err := postCommit(); err != nil {
+			warnPostCommitError(err)
+		}
 	}
 
 	// Output success

@@ -77,6 +77,21 @@ describe('apiFetch', () => {
     expect(Toast.addToast).toHaveBeenCalledWith('mutations disabled')
   })
 
+  it('surfaces nonfatal mutation warnings as info toasts', async () => {
+    const { apiFetch } = await import(apiModulePath)
+    const Toast = await import('../../../internal/web/static/app/Toast.js')
+    Toast.addToast.mockClear()
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ sessionId: 'sess-1', warnings: ['Codex session name sync failed'] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const data = await apiFetch('PATCH', '/api/sessions/sess-1', { title: 'renamed' })
+    expect(data.warnings).toEqual(['Codex session name sync failed'])
+    expect(Toast.addToast).toHaveBeenCalledWith('Codex session name sync failed', 'info')
+  })
+
   it('does NOT toast for failing GET (background reads)', async () => {
     const { apiFetch } = await import(apiModulePath)
     const Toast = await import('../../../internal/web/static/app/Toast.js')

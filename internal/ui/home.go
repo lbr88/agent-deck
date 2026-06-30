@@ -9384,7 +9384,7 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		titleChanged := false
 		hadRestartRequired := false
-		var postCommits []func()
+		var postCommits []func() error
 		h.instancesMu.Lock()
 		for _, c := range orderedChanges {
 			_, postCommit, err := session.SetField(inst, c.Field, c.Value, nil)
@@ -9415,11 +9415,19 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// forceSaveInstances bypasses the isReloading no-op in
 		// saveInstances. Title-only loss is caught by pendingTitleChanges
 		// re-application; non-Title fields have no such net.
-		h.forceSaveInstances()
+		if !h.forceSaveInstances() {
+			return h, nil
+		}
 		// postCommits run AFTER unlocking and saving so slow tmux/Codex
 		// side effects don't stall background readers or precede persistence.
+		var postCommitErr error
 		for _, fn := range postCommits {
-			fn()
+			if err := fn(); err != nil {
+				postCommitErr = errors.Join(postCommitErr, err)
+			}
+		}
+		if postCommitErr != nil {
+			h.setError(fmt.Errorf("saved, but %w", postCommitErr))
 		}
 
 		h.editSessionDialog.Hide()
@@ -9654,9 +9662,13 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// SetField so the rename also sets TitleLocked — a direct
 					// Title assignment would be reverted by the #572
 					// Claude-name sync on the next hook event.
+					var postCommit func() error
 					if inst := h.getInstanceByID(sessionID); inst != nil {
-						if _, _, err := session.SetField(inst, session.FieldTitle, newName, nil); err != nil {
+						var err error
+						_, postCommit, err = session.SetField(inst, session.FieldTitle, newName, nil)
+						if err != nil {
 							h.setError(err)
+							postCommit = nil
 						}
 					}
 					// Store pending title change so it survives reload races.
@@ -9667,7 +9679,11 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// Invalidate preview cache since title changed
 					h.invalidatePreviewCache(sessionID)
 					h.rebuildFlatItems()
-					h.saveInstances()
+					if h.saveInstances() && postCommit != nil {
+						if err := postCommit(); err != nil {
+							h.setError(fmt.Errorf("saved, but %w", err))
+						}
+					}
 				}
 			}
 		}
@@ -9760,20 +9776,20 @@ func (h *Home) handleForkDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // saveInstances saves instances to storage
-func (h *Home) saveInstances() {
-	h.saveInstancesWithForce(false)
+func (h *Home) saveInstances() bool {
+	return h.saveInstancesWithForce(false)
 }
 
 // forceSaveInstances saves instances regardless of isReloading flag.
 // Use this for critical updates that MUST persist (e.g., OpenCode detection results)
 // that would otherwise be lost due to race conditions with storage watcher reloads.
-func (h *Home) forceSaveInstances() {
-	h.saveInstancesWithForce(true)
+func (h *Home) forceSaveInstances() bool {
+	return h.saveInstancesWithForce(true)
 }
 
 // saveInstancesWithForce is the internal save implementation.
 // force=true bypasses the isReloading check for critical updates.
-func (h *Home) saveInstancesWithForce(force bool) {
+func (h *Home) saveInstancesWithForce(force bool) bool {
 	// Skip saving during reload to avoid overwriting external changes (CLI)
 	// Unless force=true for critical updates like detection results
 	h.reloadMu.Lock()
@@ -9782,7 +9798,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 
 	if reloading && !force {
 		uiLog.Debug("save_skip_during_reload", slog.Bool("force", force))
-		return
+		return false
 	}
 	if force && reloading {
 		uiLog.Debug("save_force_during_reload")
@@ -9808,7 +9824,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 				if h.storageWatcher != nil {
 					h.storageWatcher.TriggerReload()
 				}
-				return
+				return false
 			}
 		}
 	}
@@ -9823,7 +9839,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 				slog.String("profile", h.profile),
 				slog.String("error", err.Error()),
 			)
-			return
+			return false
 		}
 		if h.storage.Path() != expectedPath {
 			uiLog.Error(
@@ -9840,7 +9856,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 					h.storage.Path(),
 				),
 			)
-			return
+			return false
 		}
 
 		// Take snapshot under lock for defensive programming
@@ -9865,7 +9881,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 			// Check if storage file exists and has data before overwriting with empty
 			if info, err := os.Stat(h.storage.Path()); err == nil && info.Size() > 100 {
 				uiLog.Warn("save_refusing_empty_overwrite", slog.Int64("file_bytes", info.Size()))
-				return
+				return false
 			}
 		}
 
@@ -9881,6 +9897,7 @@ func (h *Home) saveInstancesWithForce(force bool) {
 		// Save both instances and groups (including empty ones)
 		if err := h.storage.SaveWithGroups(instancesCopy, groupTreeCopy); err != nil {
 			h.setError(fmt.Errorf("failed to save: %w", err))
+			return false
 		} else {
 			// CRITICAL FIX: Update lastLoadMtime after successful save.
 			// Without this, subsequent saves incorrectly detect the TUI's own previous
@@ -9896,8 +9913,10 @@ func (h *Home) saveInstancesWithForce(force bool) {
 			if len(h.pendingTitleChanges) > 0 {
 				h.pendingTitleChanges = make(map[string]string)
 			}
+			return true
 		}
 	}
+	return false
 }
 
 // saveGroupState saves only group expanded/collapsed state to SQLite.

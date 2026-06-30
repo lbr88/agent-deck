@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -440,7 +441,7 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
-	var postCommits []func()
+	var postCommits []func() error
 
 	m.h.instancesMu.Lock()
 	for field, value := range updates {
@@ -480,8 +481,14 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
 		return nil, false, fmt.Errorf("save session: %w", err)
 	}
+	var postCommitErr error
 	for _, fn := range postCommits {
-		fn()
+		if err := fn(); err != nil {
+			postCommitErr = errors.Join(postCommitErr, err)
+		}
+	}
+	if postCommitErr != nil {
+		return changed, restartRequired, session.NewNonFatalWarning("post-save sync failed", postCommitErr)
 	}
 	return changed, restartRequired, nil
 }

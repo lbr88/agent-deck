@@ -69,6 +69,33 @@ func TestSetFieldTitleCodexReturnsPostCommitIndexSync(t *testing.T) {
 	}
 }
 
+func TestSetFieldTitleCodexPostCommitReturnsSyncError(t *testing.T) {
+	homeFile := filepath.Join(t.TempDir(), "codex-home-file")
+	if err := os.WriteFile(homeFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write codex home file: %v", err)
+	}
+	t.Setenv("CODEX_HOME", homeFile)
+
+	inst := NewInstanceWithTool("old", t.TempDir(), "codex")
+	inst.CodexSessionID = "66666666-6666-6666-6666-666666666666"
+
+	_, postCommit, err := SetField(inst, FieldTitle, "new title", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postCommit == nil {
+		t.Fatal("codex title rename should return postCommit")
+	}
+
+	err = postCommit()
+	if err == nil {
+		t.Fatal("postCommit error = nil, want Codex sync failure")
+	}
+	if !strings.Contains(err.Error(), "Codex session name") {
+		t.Fatalf("postCommit error = %v, want Codex session name context", err)
+	}
+}
+
 func TestSetField_Color_Valid(t *testing.T) {
 	cases := []struct {
 		name  string

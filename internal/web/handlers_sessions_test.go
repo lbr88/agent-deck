@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -814,6 +815,36 @@ func TestSessionPatchUpdatesTitle(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"updatedFields":["title"]`) {
 		t.Errorf("expected updatedFields in response, got: %s", rr.Body.String())
+	}
+}
+
+func TestSessionPatchSurfacesNonFatalWarnings(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+
+	srv.mutator = &fakeMutator{
+		updateSessionFn: func(id string, updates map[string]string) ([]string, bool, error) {
+			return []string{"title"}, false, session.NewNonFatalWarning("post-save sync failed", errors.New("Codex session name sync failed"))
+		},
+	}
+
+	body := strings.NewReader(`{"title":"renamed"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/sess-001", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected warning response to stay HTTP %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"updatedFields":["title"]`) {
+		t.Errorf("expected updatedFields in response, got: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"warnings":["`) || !strings.Contains(rr.Body.String(), "Codex session name") {
+		t.Errorf("expected warnings in response, got: %s", rr.Body.String())
 	}
 }
 
