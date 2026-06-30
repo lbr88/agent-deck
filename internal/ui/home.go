@@ -226,36 +226,40 @@ type Home struct {
 	headless bool
 
 	// Components
-	search               *Search
-	globalSearch         *GlobalSearch              // Global session search across all Claude conversations
-	globalSearchIndex    *session.GlobalSearchIndex // Search index (nil if disabled)
-	newDialog            *NewDialog
-	pendingRemoteName    string                // #1353: remote target for the open new-session dialog ("" = local)
-	groupDialog          *GroupDialog          // For creating/renaming groups
-	forkDialog           *ForkDialog           // For forking sessions
-	confirmDialog        *ConfirmDialog        // For confirming destructive actions
-	helpOverlay          *HelpOverlay          // For showing keyboard shortcuts
-	mcpDialog            *MCPDialog            // For managing MCPs
-	pluginDialog         *PluginDialog         // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
-	editPathsDialog      *EditPathsDialog      // For editing multi-repo paths
-	editSessionDialog    *EditSessionDialog    // For editing session settings (title/color/notes/command/...)
-	skillDialog          *SkillDialog          // For managing project skills
-	setupWizard          *SetupWizard          // For first-run setup
-	settingsPanel        *SettingsPanel        // For editing settings
-	analyticsPanel       *AnalyticsPanel       // For displaying session analytics
-	geminiModelDialog    *GeminiModelDialog    // For selecting Gemini model
-	promptInputDialog    *PromptInputDialog    // For prompting the highlighted session from the list without attaching (#1410)
-	sessionPickerDialog  *SessionPickerDialog  // For sending output to another session
-	codeBlockDialog      *CodeBlockDialog      // For copying a fenced code block from session output (#1412)
-	sessionSwitcher      *SessionSwitcher      // In-attach session switcher (Ctrl+Tab / Ctrl+S)
-	worktreeFinishDialog *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
-	feedbackDialog       *FeedbackDialog       // For in-app feedback popup (Phase 2)
-	zoxidePicker         *ZoxidePicker         // Quick-open picker backed by the zoxide DB
-	feedbackState        *feedback.State       // Loaded at first show, avoids repeated disk I/O
-	feedbackSender       *feedback.Sender      // Sender constructed once in NewHome (Phase 3, per D-05)
-	watcherPanel         *WatcherPanel         // For showing watcher status and events
-	toolVisibilityPanel  *ToolVisibilityPanel  // Edits [ui].hidden_tools
-	watcherEngine        *watcher.Engine       // nil until Init (D-07: lifecycle tied to TUI startup)
+	search                *Search
+	globalSearch          *GlobalSearch              // Global session search across all Claude conversations
+	globalSearchIndex     *session.GlobalSearchIndex // Search index (nil if disabled)
+	newDialog             *NewDialog
+	pendingRemoteName     string                // #1353: remote target for the open new-session dialog ("" = local)
+	groupDialog           *GroupDialog          // For creating/renaming groups
+	forkDialog            *ForkDialog           // For forking sessions
+	confirmDialog         *ConfirmDialog        // For confirming destructive actions
+	helpOverlay           *HelpOverlay          // For showing keyboard shortcuts
+	mcpDialog             *MCPDialog            // For managing MCPs
+	pluginDialog          *PluginDialog         // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
+	editPathsDialog       *EditPathsDialog      // For editing multi-repo paths
+	editSessionDialog     *EditSessionDialog    // For editing session settings (title/color/notes/command/...)
+	skillDialog           *SkillDialog          // For managing project skills
+	setupWizard           *SetupWizard          // For first-run setup
+	settingsPanel         *SettingsPanel        // For editing settings
+	analyticsPanel        *AnalyticsPanel       // For displaying session analytics
+	geminiModelDialog     *GeminiModelDialog    // For selecting Gemini model
+	promptInputDialog     *PromptInputDialog    // For prompting the highlighted session from the list without attaching (#1410)
+	sessionPickerDialog   *SessionPickerDialog  // For sending output to another session
+	codeBlockDialog       *CodeBlockDialog      // For copying a fenced code block from session output (#1412)
+	sessionSwitcher       *SessionSwitcher      // In-attach session switcher (Ctrl+Tab / Ctrl+S)
+	worktreeFinishDialog  *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
+	feedbackDialog        *FeedbackDialog       // For in-app feedback popup (Phase 2)
+	zoxidePicker          *ZoxidePicker         // Quick-open picker backed by the zoxide DB
+	importSourceDialog    *ImportSourceDialog   // Chooses between existing tmux and saved OpenCode imports
+	openCodeImportDialog  *OpenCodeImportDialog // Picks a saved OpenCode session to import
+	openCodeImportEntries []session.OpenCodeImportEntry
+	openCodeImportErr     error
+	feedbackState         *feedback.State      // Loaded at first show, avoids repeated disk I/O
+	feedbackSender        *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
+	watcherPanel          *WatcherPanel        // For showing watcher status and events
+	toolVisibilityPanel   *ToolVisibilityPanel // Edits [ui].hidden_tools
+	watcherEngine         *watcher.Engine      // nil until Init (D-07: lifecycle tied to TUI startup)
 
 	// Configurable hotkeys
 	hotkeys        map[string]string // action -> configured key
@@ -866,6 +870,11 @@ type sessionCreatedMsg struct {
 	tempID   string // matches creatingSessions key for placeholder removal
 }
 
+type openCodeImportEntriesLoadedMsg struct {
+	entries []session.OpenCodeImportEntry
+	err     error
+}
+
 type sessionForkedMsg struct {
 	instance *session.Instance
 	sourceID string // ID of the source session that was forked (for cleanup)
@@ -1103,6 +1112,8 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		worktreeFinishDialog:      NewWorktreeFinishDialog(),
 		feedbackDialog:            NewFeedbackDialog(),
 		zoxidePicker:              NewZoxidePicker(),
+		importSourceDialog:        NewImportSourceDialog(),
+		openCodeImportDialog:      NewOpenCodeImportDialog(),
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -4534,6 +4545,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, h.fetchPreview(inst, key, winIdx)
 
+	case openCodeImportEntriesLoadedMsg:
+		h.openCodeImportErr = msg.err
+		if msg.err != nil {
+			h.openCodeImportEntries = nil
+		} else {
+			h.openCodeImportEntries = msg.entries
+		}
+		h.importSourceDialog.Show(len(h.openCodeImportEntries))
+		h.importSourceDialog.SetSize(h.width, h.height)
+		return h, nil
+
 	case loadSessionsMsg:
 		// Clear loading indicators and store file mtime for external change detection
 		h.reloadMu.Lock()
@@ -6218,6 +6240,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d, cmd := h.promptInputDialog.Update(msg)
 			h.promptInputDialog = d
 			return h, cmd
+		}
+		if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+			return h.handleImportSourceDialogKey(msg)
+		}
+		if h.openCodeImportDialog != nil && h.openCodeImportDialog.IsVisible() {
+			return h.handleOpenCodeImportDialogKey(msg)
 		}
 		if h.sessionSwitcher.IsVisible() {
 			return h.handleSessionSwitcherKey(msg)
@@ -8106,7 +8134,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "i":
-		return h, h.importSessions
+		return h, h.openImportDialog
 
 	case "I":
 		// Enter insert mode (#1069 feature 1): subsequent keystrokes are
@@ -11956,6 +11984,73 @@ func (r remoteAttachCmd) SetStdin(reader io.Reader)  {}
 func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
+func (h *Home) openImportDialog() tea.Msg {
+	entries, err := session.ListOpenCodeImportEntries(h.ctx, "")
+	if err != nil {
+		return openCodeImportEntriesLoadedMsg{err: err}
+	}
+	return openCodeImportEntriesLoadedMsg{entries: entries}
+}
+
+func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.importSourceDialog, cmd = h.importSourceDialog.Update(msg)
+	source, ok := h.importSourceDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+
+	h.importSourceDialog.Hide()
+	switch source {
+	case importSourceTmux:
+		return h, h.importSessions
+	case importSourceOpenCode:
+		if h.openCodeImportErr != nil {
+			h.setError(fmt.Errorf("failed to load saved OpenCode sessions: %w", h.openCodeImportErr))
+			return h, nil
+		}
+		if len(h.openCodeImportEntries) == 0 {
+			h.setError(fmt.Errorf("no saved OpenCode sessions found"))
+			return h, nil
+		}
+		h.openCodeImportDialog.Show(h.openCodeImportEntries)
+		h.openCodeImportDialog.SetSize(h.width, h.height)
+		return h, nil
+	default:
+		return h, nil
+	}
+}
+
+func (h *Home) handleOpenCodeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.openCodeImportDialog, cmd = h.openCodeImportDialog.Update(msg)
+	entry, ok := h.openCodeImportDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+	h.openCodeImportDialog.Hide()
+	return h, h.createSessionFromOpenCodeImport(entry)
+}
+
+func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry) tea.Cmd {
+	return func() tea.Msg {
+		inst, err := session.NewOpenCodeImportedInstance(entry, session.OpenCodeImportOptions{
+			GroupPath:           h.resolveNewSessionGroup(),
+			FallbackProjectPath: currentWorkingDirOrDot(),
+		})
+		if err != nil {
+			return sessionCreatedMsg{err: err}
+		}
+		if existingInst := findOpenCodeImportSessionIDConflict(h.instances, inst.OpenCodeSessionID); existingInst != nil {
+			return sessionCreatedMsg{err: fmt.Errorf("OpenCode session %q is already imported by Agent Deck session %q (%s)", inst.OpenCodeSessionID, existingInst.Title, existingInst.ID)}
+		}
+		if isDupe, existingInst := isExactDuplicateImport(h.instances, inst.Title, inst.ProjectPath); isDupe {
+			return sessionCreatedMsg{err: fmt.Errorf("session already exists with same title and path: %s (%s)", existingInst.Title, existingInst.ID)}
+		}
+		return sessionCreatedMsg{instance: inst}
+	}
+}
+
 // importSessions imports existing tmux sessions
 func (h *Home) importSessions() tea.Msg {
 	discovered, err := session.DiscoverExistingTmuxSessions(h.instances)
@@ -11977,6 +12072,48 @@ func (h *Home) importSessions() tea.Msg {
 	h.saveInstances()
 	state := h.preserveState()
 	return loadSessionsMsg{instances: instancesCopy, restoreState: &state}
+}
+
+func currentWorkingDirOrDot() string {
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		return cwd
+	}
+	return "."
+}
+
+func findOpenCodeImportSessionIDConflict(instances []*session.Instance, importedSessionID string) *session.Instance {
+	importedSessionID = strings.TrimSpace(importedSessionID)
+	if importedSessionID == "" {
+		return nil
+	}
+	for _, inst := range instances {
+		if strings.TrimSpace(inst.OpenCodeSessionID) == importedSessionID {
+			return inst
+		}
+	}
+	return nil
+}
+
+func isExactDuplicateImport(instances []*session.Instance, title, projectPath string) (bool, *session.Instance) {
+	title = strings.TrimSpace(title)
+	projectPath = canonicalImportPath(projectPath)
+	for _, inst := range instances {
+		if strings.TrimSpace(inst.Title) == title && canonicalImportPath(inst.ProjectPath) == projectPath {
+			return true, inst
+		}
+	}
+	return false, nil
+}
+
+func canonicalImportPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
 }
 
 // countSessionStatuses counts sessions by status for the logo display
@@ -12211,6 +12348,12 @@ func (h *Home) updateSizes() {
 	h.groupDialog.SetSize(h.width, h.height)
 	h.confirmDialog.SetSize(h.width, h.height)
 	h.geminiModelDialog.SetSize(h.width, h.height)
+	if h.importSourceDialog != nil {
+		h.importSourceDialog.SetSize(h.width, h.height)
+	}
+	if h.openCodeImportDialog != nil {
+		h.openCodeImportDialog.SetSize(h.width, h.height)
+	}
 	if h.sessionSwitcher != nil {
 		// The switcher is a centered full-screen overlay; keep it sized so a
 		// resize while it is open (notably from the overview, where it can stay
@@ -12323,6 +12466,12 @@ func (h *Home) View() string {
 	}
 	if h.geminiModelDialog.IsVisible() {
 		return h.geminiModelDialog.View()
+	}
+	if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+		return h.importSourceDialog.View()
+	}
+	if h.openCodeImportDialog != nil && h.openCodeImportDialog.IsVisible() {
+		return h.openCodeImportDialog.View()
 	}
 	if h.sessionSwitcher.IsVisible() {
 		return h.sessionSwitcher.View()

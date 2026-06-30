@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -143,23 +142,4 @@ func TestImportOpenCodeSessionQueriesFakeCLI(t *testing.T) {
 	if inst.ProjectPath != projectPath {
 		t.Fatalf("ProjectPath = %q, want %q", inst.ProjectPath, projectPath)
 	}
-}
-
-func installFakeOpenCodeSessionList(t *testing.T, payload string) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "opencode")
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"session\" ] && [ \"$2\" = \"list\" ] && [ \"$3\" = \"--format\" ] && [ \"$4\" = \"json\" ]; then\n" +
-		"cat <<'JSON'\n" +
-		payload + "\n" +
-		"JSON\n" +
-		"exit 0\n" +
-		"fi\n" +
-		"exit 64\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake opencode: %v", err)
-	}
-	return dir
 }

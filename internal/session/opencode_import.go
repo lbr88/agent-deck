@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// OpenCodeImportEntry is the metadata Agent Deck exposes for importing an
+// existing saved OpenCode session without reading transcript content.
+type OpenCodeImportEntry struct {
+	ID        string
+	Title     string
+	Directory string
+	Path      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 // OpenCodeImportOptions controls how an existing OpenCode session is converted
 // into an Agent Deck session row.
 type OpenCodeImportOptions struct {
@@ -33,6 +44,33 @@ func ImportOpenCodeSession(ctx context.Context, target string, opts OpenCodeImpo
 		return nil, err
 	}
 	return newOpenCodeImportedInstance(match, opts)
+}
+
+// ListOpenCodeImportEntries returns saved OpenCode sessions using metadata from
+// `opencode session list --format json` only.
+func ListOpenCodeImportEntries(ctx context.Context, commandDir string) ([]OpenCodeImportEntry, error) {
+	sessions, err := listOpenCodeSessions(ctx, commandDir)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]OpenCodeImportEntry, 0, len(sessions))
+	for _, meta := range sessions {
+		entries = append(entries, openCodeImportEntryFromMetadata(meta))
+	}
+	return entries, nil
+}
+
+// NewOpenCodeImportedInstance builds a stopped Agent Deck session from saved
+// OpenCode session metadata.
+func NewOpenCodeImportedInstance(entry OpenCodeImportEntry, opts OpenCodeImportOptions) (*Instance, error) {
+	return newOpenCodeImportedInstance(openCodeSessionMetadata{
+		ID:        entry.ID,
+		Title:     entry.Title,
+		Directory: entry.Directory,
+		Path:      entry.Path,
+		Created:   entry.CreatedAt.UnixMilli(),
+		Updated:   entry.UpdatedAt.UnixMilli(),
+	}, opts)
 }
 
 func listOpenCodeSessions(ctx context.Context, commandDir string) ([]openCodeSessionMetadata, error) {
@@ -149,4 +187,20 @@ func shortOpenCodeSessionID(id string) string {
 		return id[:12]
 	}
 	return id
+}
+
+func openCodeImportEntryFromMetadata(meta openCodeSessionMetadata) OpenCodeImportEntry {
+	entry := OpenCodeImportEntry{
+		ID:        strings.TrimSpace(meta.ID),
+		Title:     strings.TrimSpace(meta.Title),
+		Directory: strings.TrimSpace(meta.Directory),
+		Path:      strings.TrimSpace(meta.Path),
+	}
+	if meta.Created > 0 {
+		entry.CreatedAt = time.UnixMilli(meta.Created)
+	}
+	if meta.Updated > 0 {
+		entry.UpdatedAt = time.UnixMilli(meta.Updated)
+	}
+	return entry
 }
