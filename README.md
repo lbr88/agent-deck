@@ -70,6 +70,7 @@ See [Troubleshooting](skills/agent-deck/references/troubleshooting.md#uninstalli
 ```bash
 agent-deck                        # Launch TUI
 agent-deck add . -c claude        # Add current dir with Claude
+agent-deck session import-codex <id-or-name> # Import an existing saved Codex session
 agent-deck session fork my-proj   # Fork a supported session
 agent-deck session remove my-proj # Remove stopped/errored session from registry (transcripts preserved)
 agent-deck mcp attach my-proj exa # Attach MCP to session
@@ -85,6 +86,7 @@ agent-deck web                    # Start web UI on http://127.0.0.1:8420
 |-----|--------|
 | `Enter` | Attach to session |
 | `n` | New session |
+| `i` | Import existing tmux or saved Codex session |
 | `f` / `F` | Fork (quick / dialog) |
 | `A` / `Shift+U` | Archive / unarchive session |
 | `^` | Show archived sessions |
@@ -439,6 +441,10 @@ branch_prefix       = "fork/" # auto branch name = <branch_prefix><sanitized-tit
 > **Web/API fork** (`POST /api/sessions/{id}/fork`) is plain tool-native fork — it does **not** apply `[fork]` worktree/state/Docker defaults (those are TUI quick-fork/dialog scope).
 > **Codex** forking requires a codex CLI with `codex fork <session-id>` support.
 
+### Import Codex Sessions
+
+Bring a Codex conversation that was started outside Agent Deck into the registry with `agent-deck session import-codex <session-id-or-name>`. The import validates that Codex has a matching rollout file, creates a stopped Codex-compatible Agent Deck session, and resumes it later through the normal `codex resume <session-id>` path. In the TUI, press `i`, choose **Saved Codex sessions**, and select the session to import.
+
 ### Archive Sessions
 
 Done with a session but not ready to delete it? Archive it. Archiving stops the tmux process and hides the session from the default list — the conversation, metadata, worktree, and parent linkage are all preserved.
@@ -660,7 +666,7 @@ Agent Deck works with any terminal-based AI tool:
 | **Claude Code** | Full (status, MCP, fork, resume) |
 | **Gemini CLI** | Full (status, MCP, resume) |
 | **OpenCode** | Status detection, organization, fork |
-| **Codex** | Status detection, organization, conductor, fork |
+| **Codex** | Status detection, organization, conductor, import, fork |
 | **Copilot** | Organization, launch |
 | **Crush** (charmbracelet/crush) | Status detection, organization, launch |
 | **Cursor** (terminal) | Status detection, organization |
