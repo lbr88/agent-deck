@@ -47,6 +47,8 @@ func handleSession(profile string, args []string) {
 		handleSessionRevive(profile, args[1:])
 	case "fork":
 		handleSessionFork(profile, args[1:])
+	case "import-codex":
+		handleSessionImportCodex(profile, args[1:])
 	case "attach":
 		handleSessionAttach(profile, args[1:])
 	case "show":
@@ -102,6 +104,7 @@ func printSessionHelp() {
 	fmt.Println("  restart [id] [--all]    Restart session (Claude: reload MCPs)")
 	fmt.Println("  revive [--all|--name]   Rebuild dead control pipes for errored sessions")
 	fmt.Println("  fork <id>               Fork Claude, OpenCode, Pi, or Codex session with context")
+	fmt.Println("  import-codex <id|name>  Import an existing saved Codex session")
 	fmt.Println("  attach <id>             Attach to session interactively")
 	fmt.Println("  show [id]               Show session details (auto-detect current if no id)")
 	fmt.Println("  current                 Show current session and profile (auto-detect)")

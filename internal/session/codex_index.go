@@ -28,10 +28,37 @@ var (
 	codexIndexUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
+// CodexSessionAmbiguousError includes the candidate sessions for an ambiguous
+// name lookup so callers can prompt the user to retry by UUID.
+type CodexSessionAmbiguousError struct {
+	Target  string
+	Matches []CodexIndexEntry
+}
+
+func (e *CodexSessionAmbiguousError) Error() string {
+	return fmt.Sprintf("%v: %q matches %d sessions", ErrCodexSessionAmbiguous, e.Target, len(e.Matches))
+}
+
+func (e *CodexSessionAmbiguousError) Unwrap() error {
+	return ErrCodexSessionAmbiguous
+}
+
 type codexIndexLine struct {
 	ID         string `json:"id"`
 	ThreadName string `json:"thread_name"`
 	UpdatedAt  string `json:"updated_at"`
+}
+
+// GetCodexHomeDir returns the effective Codex home using Agent Deck's normal
+// CODEX_HOME/profile/default resolution rules.
+func GetCodexHomeDir() string {
+	return getCodexHomeDir()
+}
+
+// GetCodexHomeDirForCommand also honors an inline CODEX_HOME assignment in a
+// Codex command override.
+func GetCodexHomeDirForCommand(command string) string {
+	return getCodexHomeDirForCommand(command)
 }
 
 // ListCodexIndex reads CODEX_HOME/session_index.jsonl and returns the latest
@@ -135,7 +162,7 @@ func ResolveCodexIndexTarget(codexHome, target string) (CodexIndexEntry, error) 
 		}
 		return matches[0], nil
 	default:
-		return CodexIndexEntry{}, ErrCodexSessionAmbiguous
+		return CodexIndexEntry{}, &CodexSessionAmbiguousError{Target: target, Matches: matches}
 	}
 }
 
