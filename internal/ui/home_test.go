@@ -90,6 +90,29 @@ func TestHomeCodexImportHotkeySkipsMalformedIndexIDs(t *testing.T) {
 	}
 }
 
+func TestHomeCodexImportHotkeyUsesConfiguredCodexCommandHome(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	configuredCodexHome := filepath.Join(homeDir, "configured-codex-home")
+	t.Setenv("CODEX_HOME", filepath.Join(homeDir, "wrong-codex-home"))
+	writeXDGTestConfig(t, homeDir, "[codex]\ncommand = \"CODEX_HOME="+configuredCodexHome+" codex\"\n")
+
+	id := "77777777-7777-7777-7777-777777777777"
+	writeCodexIndexForHomeImport(t, configuredCodexHome, id, "configured saved codex", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForHomeImport(t, configuredCodexHome, id)
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if got := h.importSourceDialog.CodexCount(); got != 1 {
+		t.Fatalf("codex count = %d, want 1 from configured Codex command home", got)
+	}
+}
+
 func TestHomeImportHotkeyKeepsTmuxSourceWhenCodexIndexFails(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")

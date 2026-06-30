@@ -100,6 +100,43 @@ func TestHandleSessionImportCodexUsesCommandCodexHome(t *testing.T) {
 	}
 }
 
+func TestHandleSessionImportCodexDefaultUsesConfiguredCodexCommandHome(t *testing.T) {
+	profile := codexImportTestProfile(t)
+	configHome := t.TempDir()
+	codexHome := filepath.Join(configHome, "codex-home")
+	t.Setenv("HOME", configHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(configHome, ".config"))
+	t.Setenv("CODEX_HOME", t.TempDir())
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	configPath := filepath.Join(configHome, ".config", "agent-deck", session.UserConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("[codex]\ncommand = \"CODEX_HOME="+codexHome+" codex\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	session.ClearUserConfigCache()
+
+	id := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	writeCodexIndexForCLI(t, codexHome, id, "configured home", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForCLI(t, codexHome, id)
+
+	handleSessionImportCodex(profile, []string{id, "--path", t.TempDir(), "--quiet"})
+
+	_, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances=%d, want 1", len(instances))
+	}
+	if got := instances[0].CodexSessionID; got != id {
+		t.Fatalf("CodexSessionID = %q, want %q", got, id)
+	}
+}
+
 func TestHandleSessionImportCodexRejectsAmbiguousName(t *testing.T) {
 	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "ambiguous" {
 		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"same name"})
@@ -236,6 +273,23 @@ func TestHandleSessionImportCodexRejectsUnsupportedCommand(t *testing.T) {
 	}
 }
 
+func TestHandleSessionImportCodexStartPersistsBeforeStart(t *testing.T) {
+	body := mustExtractHandleSessionImportCodex(t)
+	folded := foldSpaces(body)
+
+	saveIdx := strings.Index(folded, "saveSessionData(storage, instances, groups)")
+	if saveIdx < 0 {
+		t.Fatalf("handleSessionImportCodex must save the imported stopped session; folded body:\n%s", folded)
+	}
+	startIdx := strings.Index(folded, "inst.Start()")
+	if startIdx < 0 {
+		t.Fatalf("handleSessionImportCodex must start the imported session when --start is set; folded body:\n%s", folded)
+	}
+	if saveIdx > startIdx {
+		t.Fatalf("handleSessionImportCodex must save before inst.Start() to avoid unmanaged tmux sessions; save idx %d > start idx %d; folded body:\n%s", saveIdx, startIdx, folded)
+	}
+}
+
 func codexImportTestProfile(t *testing.T) string {
 	t.Helper()
 	name := strings.ToLower(t.Name())
@@ -301,4 +355,17 @@ func captureStdoutForCodexImport(t *testing.T, fn func()) string {
 		t.Fatalf("read stdout pipe: %v", err)
 	}
 	return string(out)
+}
+
+func mustExtractHandleSessionImportCodex(t *testing.T) string {
+	t.Helper()
+	src, err := os.ReadFile("session_import_codex.go")
+	if err != nil {
+		t.Fatalf("read session_import_codex.go: %v", err)
+	}
+	body := extractFuncBody(string(src), "handleSessionImportCodex")
+	if body == "" {
+		t.Fatalf("could not extract handleSessionImportCodex body")
+	}
+	return body
 }

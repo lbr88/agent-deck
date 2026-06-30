@@ -11985,7 +11985,7 @@ func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
-	codexHome := session.GetCodexHomeDir()
+	codexHome := defaultCodexImportHome()
 	entries, err := session.ListCodexIndex(codexHome)
 	if err != nil {
 		return codexImportEntriesLoadedMsg{err: err}
@@ -11993,6 +11993,10 @@ func (h *Home) openImportDialog() tea.Msg {
 	return codexImportEntriesLoadedMsg{
 		entries: codexImportEntriesWithRollout(codexHome, entries),
 	}
+}
+
+func defaultCodexImportHome() string {
+	return session.GetCodexHomeDirForCommand(session.GetCodexCommand())
 }
 
 func codexImportEntriesWithRollout(codexHome string, entries []session.CodexIndexEntry) []session.CodexIndexEntry {
@@ -12050,7 +12054,7 @@ func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.C
 		if strings.TrimSpace(entry.ID) == "" {
 			return sessionCreatedMsg{err: session.ErrCodexSessionNotFound}
 		}
-		if !session.CodexRolloutExists(session.GetCodexHomeDir(), entry.ID) {
+		if !session.CodexRolloutExists(defaultCodexImportHome(), entry.ID) {
 			return sessionCreatedMsg{err: fmt.Errorf("%w: %s", session.ErrCodexRolloutMissing, entry.ID)}
 		}
 		title := strings.TrimSpace(entry.ThreadName)

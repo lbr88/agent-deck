@@ -35,16 +35,21 @@ func handleSessionImportCodex(profile string, args []string) {
 	}
 
 	resolvedCommand := mergeFlags(*command, *commandShort)
-	if strings.TrimSpace(resolvedCommand) == "" {
+	commandSpecified := strings.TrimSpace(resolvedCommand) != ""
+	if !commandSpecified {
 		resolvedCommand = "codex"
 	}
-	if !session.IsSupportedCodexLaunchCommand(resolvedCommand) {
-		out.Error(fmt.Sprintf("unsupported Codex command %q: use optional env assignments followed by codex, codex-*, or codex_*", resolvedCommand), ErrCodeInvalidOperation)
+	lookupCommand := resolvedCommand
+	if !commandSpecified {
+		lookupCommand = session.GetCodexCommand()
+	}
+	if !session.IsSupportedCodexLaunchCommand(lookupCommand) {
+		out.Error(fmt.Sprintf("unsupported Codex command %q: use optional env assignments followed by codex, codex-*, or codex_*", lookupCommand), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 
 	target := fs.Arg(0)
-	codexHome := session.GetCodexHomeDirForCommand(resolvedCommand)
+	codexHome := session.GetCodexHomeDirForCommand(lookupCommand)
 	entry, err := session.ResolveCodexIndexTarget(codexHome, target)
 	if err != nil {
 		out.Error(formatCodexImportResolveError(err), ErrCodeInvalidOperation)
@@ -81,13 +86,6 @@ func handleSessionImportCodex(profile string, args []string) {
 	inst.CodexDetectedAt = entry.UpdatedAt
 	inst.Status = session.StatusStopped
 
-	if *start {
-		if err := inst.Start(); err != nil {
-			out.Error(fmt.Sprintf("failed to start imported codex session: %v", err), ErrCodeInvalidOperation)
-			os.Exit(1)
-		}
-	}
-
 	storage, instances, groups, err := loadSessionData(profile)
 	if err != nil {
 		out.Error(err.Error(), ErrCodeNotFound)
@@ -97,6 +95,16 @@ func handleSessionImportCodex(profile string, args []string) {
 	if err := saveSessionData(storage, instances, groups); err != nil {
 		out.Error(fmt.Sprintf("failed to save imported session: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+	if *start {
+		if err := inst.Start(); err != nil {
+			out.Error(fmt.Sprintf("failed to start imported codex session: %v", err), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
+		if err := saveSessionData(storage, instances, groups); err != nil {
+			out.Error(fmt.Sprintf("failed to save started imported session: %v", err), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
 	}
 
 	out.Success("Imported Codex session: "+inst.Title, map[string]interface{}{
