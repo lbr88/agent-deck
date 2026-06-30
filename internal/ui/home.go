@@ -251,11 +251,15 @@ type Home struct {
 	worktreeFinishDialog *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
 	feedbackDialog       *FeedbackDialog       // For in-app feedback popup (Phase 2)
 	zoxidePicker         *ZoxidePicker         // Quick-open picker backed by the zoxide DB
-	feedbackState        *feedback.State       // Loaded at first show, avoids repeated disk I/O
-	feedbackSender       *feedback.Sender      // Sender constructed once in NewHome (Phase 3, per D-05)
-	watcherPanel         *WatcherPanel         // For showing watcher status and events
-	toolVisibilityPanel  *ToolVisibilityPanel  // Edits [ui].hidden_tools
-	watcherEngine        *watcher.Engine       // nil until Init (D-07: lifecycle tied to TUI startup)
+	importSourceDialog   *ImportSourceDialog   // Chooses between existing tmux and saved Claude imports
+	claudeImportDialog   *ClaudeImportDialog   // Picks a saved Claude session to import
+	claudeImportEntries  []session.ClaudeImportCandidate
+	claudeImportErr      error
+	feedbackState        *feedback.State      // Loaded at first show, avoids repeated disk I/O
+	feedbackSender       *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
+	watcherPanel         *WatcherPanel        // For showing watcher status and events
+	toolVisibilityPanel  *ToolVisibilityPanel // Edits [ui].hidden_tools
+	watcherEngine        *watcher.Engine      // nil until Init (D-07: lifecycle tied to TUI startup)
 
 	// Configurable hotkeys
 	hotkeys        map[string]string // action -> configured key
@@ -912,6 +916,11 @@ type updateCheckMsg struct {
 	info *update.UpdateInfo
 }
 
+type claudeImportEntriesLoadedMsg struct {
+	entries []session.ClaudeImportCandidate
+	err     error
+}
+
 type (
 	tickMsg        time.Time
 	quitMsg        bool
@@ -1103,6 +1112,8 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		worktreeFinishDialog:      NewWorktreeFinishDialog(),
 		feedbackDialog:            NewFeedbackDialog(),
 		zoxidePicker:              NewZoxidePicker(),
+		importSourceDialog:        NewImportSourceDialog(),
+		claudeImportDialog:        NewClaudeImportDialog(),
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -6052,6 +6063,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case claudeImportEntriesLoadedMsg:
+		h.claudeImportEntries = append(h.claudeImportEntries[:0], msg.entries...)
+		h.claudeImportErr = msg.err
+		h.importSourceDialog.Show(len(h.claudeImportEntries))
+		h.importSourceDialog.SetSize(h.width, h.height)
+		return h, nil
+
 	case tea.KeyMsg:
 		// Track user activity for adaptive status updates
 		h.lastUserInputTime = time.Now()
@@ -6181,6 +6199,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.globalSearch.IsVisible() {
 			return h.handleGlobalSearchKey(msg)
+		}
+		if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+			return h.handleImportSourceDialogKey(msg)
+		}
+		if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
+			return h.handleClaudeImportDialogKey(msg)
 		}
 		if h.newDialog.IsVisible() {
 			return h.handleNewDialogKey(msg)
@@ -8106,7 +8130,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "i":
-		return h, h.importSessions
+		return h, h.openImportDialog
 
 	case "I":
 		// Enter insert mode (#1069 feature 1): subsequent keystrokes are
@@ -11956,6 +11980,91 @@ func (r remoteAttachCmd) SetStdin(reader io.Reader)  {}
 func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
+func (h *Home) openImportDialog() tea.Msg {
+	configDir := session.GetClaudeConfigDirForInstance(&session.Instance{
+		Tool:      "claude",
+		GroupPath: h.resolveNewSessionGroup(),
+	})
+	entries, err := session.ListClaudeImportCandidates(configDir)
+	if err != nil {
+		return claudeImportEntriesLoadedMsg{err: err}
+	}
+	return claudeImportEntriesLoadedMsg{entries: entries}
+}
+
+func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.importSourceDialog, cmd = h.importSourceDialog.Update(msg)
+	source, ok := h.importSourceDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+
+	h.importSourceDialog.Hide()
+	switch source {
+	case importSourceTmux:
+		return h, h.importSessions
+	case importSourceClaude:
+		if h.claudeImportErr != nil {
+			h.setError(fmt.Errorf("failed to load saved Claude sessions: %w", h.claudeImportErr))
+			return h, nil
+		}
+		if len(h.claudeImportEntries) == 0 {
+			h.setError(fmt.Errorf("no saved Claude sessions found"))
+			return h, nil
+		}
+		h.claudeImportDialog.Show(h.claudeImportEntries)
+		h.claudeImportDialog.SetSize(h.width, h.height)
+		return h, nil
+	default:
+		return h, nil
+	}
+}
+
+func (h *Home) handleClaudeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.claudeImportDialog, cmd = h.claudeImportDialog.Update(msg)
+	entry, ok := h.claudeImportDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+	h.claudeImportDialog.Hide()
+	return h, h.createSessionFromClaudeImport(entry)
+}
+
+func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate) tea.Cmd {
+	return func() tea.Msg {
+		sessionID := strings.TrimSpace(entry.SessionID)
+		if sessionID == "" {
+			return sessionCreatedMsg{err: fmt.Errorf("Claude session id is required")}
+		}
+
+		title := strings.TrimSpace(entry.Name)
+		if title == "" {
+			title = shortClaudeImportID(sessionID)
+		}
+
+		projectPath := strings.TrimSpace(entry.CWD)
+		if projectPath == "" {
+			projectPath = strings.TrimSpace(entry.Path)
+		}
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return sessionCreatedMsg{err: err}
+			}
+			projectPath = cwd
+		}
+
+		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "claude")
+		inst.Command = "claude"
+		inst.ClaudeSessionID = sessionID
+		inst.ClaudeDetectedAt = entry.UpdatedAt
+		inst.Status = session.StatusStopped
+		return sessionCreatedMsg{instance: inst}
+	}
+}
+
 // importSessions imports existing tmux sessions
 func (h *Home) importSessions() tea.Msg {
 	discovered, err := session.DiscoverExistingTmuxSessions(h.instances)
@@ -12207,6 +12316,12 @@ func (h *Home) renderFilterBar() string {
 // updateSizes updates component sizes
 func (h *Home) updateSizes() {
 	h.search.SetSize(h.width, h.height)
+	if h.importSourceDialog != nil {
+		h.importSourceDialog.SetSize(h.width, h.height)
+	}
+	if h.claudeImportDialog != nil {
+		h.claudeImportDialog.SetSize(h.width, h.height)
+	}
 	h.newDialog.SetSize(h.width, h.height)
 	h.groupDialog.SetSize(h.width, h.height)
 	h.confirmDialog.SetSize(h.width, h.height)
@@ -12293,6 +12408,12 @@ func (h *Home) View() string {
 	}
 	if h.globalSearch.IsVisible() {
 		return h.globalSearch.View()
+	}
+	if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+		return h.importSourceDialog.View()
+	}
+	if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
+		return h.claudeImportDialog.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
@@ -14229,7 +14350,7 @@ func (h *Home) renderSessionList(width, height int) string {
 			hints = append(hints, fmt.Sprintf("Press %s to create a new session", key))
 		}
 		if key := h.actionKey(hotkeyImport); key != "" {
-			hints = append(hints, fmt.Sprintf("Press %s to import existing tmux sessions", key))
+			hints = append(hints, fmt.Sprintf("Press %s to import existing sessions", key))
 		}
 		if key := h.actionKey(hotkeyCreateGroup); key != "" {
 			hints = append(hints, fmt.Sprintf("Press %s to create a group", key))
@@ -15634,7 +15755,7 @@ func (h *Home) renderPreviewPane(width, height int) string {
 				hints = append(hints, fmt.Sprintf("Press %s to create your first session", key))
 			}
 			if key := h.actionKey(hotkeyImport); key != "" {
-				hints = append(hints, fmt.Sprintf("Press %s to import tmux sessions", key))
+				hints = append(hints, fmt.Sprintf("Press %s to import sessions", key))
 			}
 			if len(hints) == 0 {
 				hints = append(hints, "Create or import sessions to get started")

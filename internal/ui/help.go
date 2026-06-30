@@ -316,7 +316,7 @@ func (h *HelpOverlay) View() string {
 			items: [][2]string{
 				{settingsKey, "Settings"},
 				{reloadKey, "Reload from disk"},
-				{importKey, "Import tmux sessions"},
+				{importKey, "Import sessions"},
 				{"Ctrl+Q", "Detach from session"},
 				{switchKey, "Switch session (here or attached)"},
 				{quitKey, "Quit"},
