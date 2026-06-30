@@ -254,6 +254,7 @@ type Home struct {
 	importSourceDialog   *ImportSourceDialog   // Chooses between existing tmux and saved Codex imports
 	codexImportDialog    *CodexImportDialog    // Picks a saved Codex session to import
 	codexImportEntries   []session.CodexIndexEntry
+	codexImportErr       error
 	feedbackState        *feedback.State      // Loaded at first show, avoids repeated disk I/O
 	feedbackSender       *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
 	watcherPanel         *WatcherPanel        // For showing watcher status and events
@@ -4545,12 +4546,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, h.fetchPreview(inst, key, winIdx)
 
 	case codexImportEntriesLoadedMsg:
+		h.codexImportErr = msg.err
 		if msg.err != nil {
-			h.setError(msg.err)
-			return h, nil
+			h.codexImportEntries = nil
+		} else {
+			h.codexImportEntries = msg.entries
 		}
-		h.codexImportEntries = msg.entries
-		h.importSourceDialog.Show(len(msg.entries))
+		h.importSourceDialog.Show(len(h.codexImportEntries))
 		h.importSourceDialog.SetSize(h.width, h.height)
 		return h, nil
 
@@ -12016,6 +12018,10 @@ func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case importSourceTmux:
 		return h, h.importSessions
 	case importSourceCodex:
+		if h.codexImportErr != nil {
+			h.setError(fmt.Errorf("failed to load saved Codex sessions: %w", h.codexImportErr))
+			return h, nil
+		}
 		if len(h.codexImportEntries) == 0 {
 			h.setError(fmt.Errorf("no saved Codex sessions found"))
 			return h, nil

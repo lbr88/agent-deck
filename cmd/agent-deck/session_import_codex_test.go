@@ -133,6 +133,82 @@ func TestHandleSessionImportCodexRejectsAmbiguousName(t *testing.T) {
 	}
 }
 
+func TestHandleSessionImportCodexRejectsUnknownTarget(t *testing.T) {
+	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "unknown" {
+		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"missing"})
+		return
+	}
+
+	profile := codexImportTestProfile(t)
+	home := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestHandleSessionImportCodexRejectsUnknownTarget")
+	cmd.Env = append(os.Environ(),
+		"AGENT_DECK_IMPORT_CODEX_HELPER=unknown",
+		"AGENT_DECK_IMPORT_CODEX_PROFILE="+profile,
+		"CODEX_HOME="+home,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unknown import unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "codex session not found") {
+		t.Fatalf("output %q does not mention unknown Codex session", output)
+	}
+}
+
+func TestHandleSessionImportCodexRejectsMissingRollout(t *testing.T) {
+	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "missing-rollout" {
+		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"no rollout"})
+		return
+	}
+
+	profile := codexImportTestProfile(t)
+	home := t.TempDir()
+	id := "88888888-8888-8888-8888-888888888888"
+	writeCodexIndexForCLI(t, home, id, "no rollout", "2026-06-30T10:00:00Z")
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestHandleSessionImportCodexRejectsMissingRollout")
+	cmd.Env = append(os.Environ(),
+		"AGENT_DECK_IMPORT_CODEX_HELPER=missing-rollout",
+		"AGENT_DECK_IMPORT_CODEX_PROFILE="+profile,
+		"CODEX_HOME="+home,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("missing-rollout import unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "codex rollout file missing") {
+		t.Fatalf("output %q does not mention missing rollout", output)
+	}
+}
+
+func TestHandleSessionImportCodexRejectsUnsupportedCommand(t *testing.T) {
+	if os.Getenv("AGENT_DECK_IMPORT_CODEX_HELPER") == "unsupported-command" {
+		handleSessionImportCodex(os.Getenv("AGENT_DECK_IMPORT_CODEX_PROFILE"), []string{"cmd", "--command", "echo codex"})
+		return
+	}
+
+	profile := codexImportTestProfile(t)
+	home := t.TempDir()
+	id := "99999999-9999-9999-9999-999999999999"
+	writeCodexIndexForCLI(t, home, id, "cmd", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForCLI(t, home, id)
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestHandleSessionImportCodexRejectsUnsupportedCommand")
+	cmd.Env = append(os.Environ(),
+		"AGENT_DECK_IMPORT_CODEX_HELPER=unsupported-command",
+		"AGENT_DECK_IMPORT_CODEX_PROFILE="+profile,
+		"CODEX_HOME="+home,
+	)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unsupported command import unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "unsupported Codex command") {
+		t.Fatalf("output %q does not mention unsupported command", output)
+	}
+}
+
 func codexImportTestProfile(t *testing.T) string {
 	t.Helper()
 	name := strings.ToLower(t.Name())

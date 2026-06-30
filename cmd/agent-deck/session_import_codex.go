@@ -38,6 +38,10 @@ func handleSessionImportCodex(profile string, args []string) {
 	if strings.TrimSpace(resolvedCommand) == "" {
 		resolvedCommand = "codex"
 	}
+	if !session.IsSupportedCodexLaunchCommand(resolvedCommand) {
+		out.Error(fmt.Sprintf("unsupported Codex command %q: use optional env assignments followed by codex or codex-*", resolvedCommand), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
 
 	target := fs.Arg(0)
 	codexHome := session.GetCodexHomeDirForCommand(resolvedCommand)

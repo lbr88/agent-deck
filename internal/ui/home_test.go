@@ -55,6 +55,59 @@ func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 }
 
+func TestHomeImportHotkeyKeepsTmuxSourceWhenCodexIndexFails(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "session_index.jsonl"), []byte("not-json\n"), 0o644); err != nil {
+		t.Fatalf("write malformed codex index: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should still open import source chooser")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("tmux import source chooser should remain visible when Codex index fails")
+	}
+	if h.err != nil {
+		t.Fatalf("Codex index failure should not block tmux import before Codex is selected, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceCodexSelectionShowsDeferredIndexError(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "session_index.jsonl"), []byte("not-json\n"), 0o644); err != nil {
+		t.Fatalf("write malformed codex index: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "line 1") {
+		t.Fatalf("selecting Codex source should surface deferred index error, got %v", h.err)
+	}
+}
+
 func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")

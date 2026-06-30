@@ -1401,6 +1401,33 @@ func (i *Instance) resolveCodexCommand(baseCommand string) string {
 	return command
 }
 
+// IsSupportedCodexLaunchCommand reports whether command is a Codex CLI
+// invocation Agent Deck can safely turn into `... resume <session-id>`.
+// Supported forms are optional shell env assignments followed by codex or a
+// codex-* / codex_* executable name.
+func IsSupportedCodexLaunchCommand(command string) bool {
+	rest := strings.TrimSpace(command)
+	if rest == "" {
+		return false
+	}
+	for rest != "" {
+		token, remainder, ok := nextShellWord(rest)
+		if !ok {
+			return false
+		}
+		if isShellEnvAssignment(token) {
+			rest = strings.TrimLeft(remainder, " \t\r\n")
+			continue
+		}
+		base := filepath.Base(token)
+		base = strings.TrimSuffix(base, ".exe")
+		base = strings.TrimSuffix(base, ".EXE")
+		base = strings.ToLower(base)
+		return base == "codex" || strings.HasPrefix(base, "codex-") || strings.HasPrefix(base, "codex_")
+	}
+	return false
+}
+
 func codexHomeFromCommand(command string) string {
 	rest := strings.TrimSpace(command)
 	for rest != "" {
@@ -1509,7 +1536,9 @@ func (i *Instance) buildCodexCommand(baseCommand string) string {
 	// get the full treatment regardless of their command name.
 	trimmed := strings.TrimSpace(baseCommand)
 	if i.Tool == "codex" && trimmed != "codex" && trimmed != "" {
-		return envPrefix + trimmed
+		if i.CodexSessionID == "" || !IsSupportedCodexLaunchCommand(trimmed) {
+			return envPrefix + trimmed
+		}
 	}
 	if isCodexHomeExplicit() {
 		codexHome := strings.TrimSpace(getCodexHomeDir())

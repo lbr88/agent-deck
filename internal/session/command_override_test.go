@@ -384,6 +384,29 @@ func TestBuildCodexCommand_PassthroughKeepsAgentdeckEnv(t *testing.T) {
 	}
 }
 
+func TestBuildCodexCommand_ImportedCustomCodexCommandResumesSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", "")
+	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	seedCodexRollout(t, home, sid)
+
+	command := "CODEX_HOME=" + shellescape.Quote(home) + " codex-nightly --model gpt-5"
+	inst := &Instance{
+		ID:             "imported-codex",
+		Title:          "imported",
+		Tool:           "codex",
+		Command:        command,
+		CodexSessionID: sid,
+	}
+
+	got := inst.buildCodexCommand(inst.Command)
+
+	want := command + " resume " + sid
+	if !strings.Contains(got, want) {
+		t.Fatalf("imported Codex command must resume stored session; want %q in %q", want, got)
+	}
+}
+
 func TestBuildCodexCommand_BareNameUsesOverride(t *testing.T) {
 	cfg := &UserConfig{
 		Codex: CodexSettings{Command: "codex-nightly", YoloMode: true},
