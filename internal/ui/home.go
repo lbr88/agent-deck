@@ -654,13 +654,15 @@ type uiState struct {
 }
 
 type selectedItemIdentity struct {
-	groupPath       string
-	sessionID       string
-	windowSessionID string
-	windowIndex     int
-	remoteName      string
-	remoteSessionID string
-	remoteGroupPath string
+	groupPath             string
+	groupOccurrence       int
+	sessionID             string
+	windowSessionID       string
+	windowIndex           int
+	remoteName            string
+	remoteSessionID       string
+	remoteGroupPath       string
+	remoteGroupOccurrence int
 }
 
 func (h *Home) saveToolVisibilityConfig() error {
@@ -1839,6 +1841,11 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 	switch item.Type {
 	case session.ItemTypeGroup:
 		identity.groupPath = item.Path
+		for i := 0; i < h.cursor; i++ {
+			if h.flatItems[i].Type == session.ItemTypeGroup && h.flatItems[i].Path == item.Path {
+				identity.groupOccurrence++
+			}
+		}
 	case session.ItemTypeSession:
 		if item.Session != nil {
 			identity.sessionID = item.Session.ID
@@ -1849,6 +1856,11 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 	case session.ItemTypeRemoteGroup:
 		identity.remoteName = item.RemoteName
 		identity.remoteGroupPath = item.Path
+		for i := 0; i < h.cursor; i++ {
+			if h.flatItems[i].Type == session.ItemTypeRemoteGroup && h.flatItems[i].RemoteName == item.RemoteName && h.flatItems[i].Path == item.Path {
+				identity.remoteGroupOccurrence++
+			}
+		}
 	case session.ItemTypeRemoteSession:
 		if item.RemoteSession != nil {
 			identity.remoteName = item.RemoteName
@@ -1859,6 +1871,8 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 }
 
 func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
+	groupOccurrence := identity.groupOccurrence
+	remoteGroupOccurrence := identity.remoteGroupOccurrence
 	for i, item := range h.flatItems {
 		switch {
 		case identity.windowSessionID != "" && item.Type == session.ItemTypeWindow && item.WindowSessionID == identity.windowSessionID && item.WindowIndex == identity.windowIndex:
@@ -1868,12 +1882,20 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 			h.cursor = i
 			return true
 		case identity.groupPath != "" && item.Type == session.ItemTypeGroup && item.Path == identity.groupPath:
+			if groupOccurrence > 0 {
+				groupOccurrence--
+				continue
+			}
 			h.cursor = i
 			return true
 		case identity.remoteSessionID != "" && item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil && item.RemoteName == identity.remoteName && item.RemoteSession.ID == identity.remoteSessionID:
 			h.cursor = i
 			return true
 		case identity.remoteGroupPath != "" && item.Type == session.ItemTypeRemoteGroup && item.RemoteName == identity.remoteName && item.Path == identity.remoteGroupPath:
+			if remoteGroupOccurrence > 0 {
+				remoteGroupOccurrence--
+				continue
+			}
 			h.cursor = i
 			return true
 		}
@@ -5995,11 +6017,6 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var remoteFetchCmd tea.Cmd
 		var remoteLatencyCmd tea.Cmd
 
-		if h.groupViewMode != session.GroupViewNormal {
-			selectedBefore := h.captureSelectedItemIdentity()
-			h.rebuildFlatItemsPreservingSelection(selectedBefore)
-		}
-
 		// Auto-dismiss errors after 5 seconds
 		if h.err != nil && !h.errTime.IsZero() && time.Since(h.errTime) > 5*time.Second {
 			h.clearError()
@@ -6010,6 +6027,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		const navigationSettleTime = 700 * time.Millisecond
 		if h.isNavigating && time.Since(h.lastNavigationTime) > navigationSettleTime {
 			h.isNavigating = false
+		}
+
+		if h.groupViewMode != session.GroupViewNormal && !h.isNavigating {
+			selectedBefore := h.captureSelectedItemIdentity()
+			h.rebuildFlatItemsPreservingSelection(selectedBefore)
 		}
 
 		// PERFORMANCE: Skip background updates during rapid navigation

@@ -32,6 +32,16 @@ func sessionIndexByTitle(h *Home, title string) int {
 	return -1
 }
 
+func groupIndexesByPath(h *Home, path string) []int {
+	var indexes []int
+	for i, it := range h.flatItems {
+		if it.Type == session.ItemTypeGroup && it.Path == path {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
 func setOnlySessionRunning(t *testing.T, h *Home, title string) {
 	t.Helper()
 
@@ -357,6 +367,86 @@ func TestTickRepartitionsActiveTopAfterStatusChange(t *testing.T) {
 	a2 = sessionIndexByTitle(home, "a2")
 	if div < 0 || a2 < 0 || a2 >= div {
 		t.Fatalf("a2 should move above divider after tick repartition: a2=%d divider=%d", a2, div)
+	}
+}
+
+func TestTickDoesNotRepartitionActiveTopDuringNavigation(t *testing.T) {
+	home, _ := buildTwoGroupHome(t)
+	setOnlySessionRunning(t, home, "a1")
+	home.groupViewMode = session.GroupViewActiveTop
+	home.rebuildFlatItems()
+
+	div := dividerIndex(home)
+	a2 := sessionIndexByTitle(home, "a2")
+	if div < 0 || a2 <= div {
+		t.Fatalf("a2 should start below divider: a2=%d divider=%d", a2, div)
+	}
+	home.cursor = a2
+
+	home.instancesMu.Lock()
+	for _, inst := range home.instances {
+		if inst.Title == "a2" {
+			inst.Status = session.StatusRunning
+			break
+		}
+	}
+	home.instancesMu.Unlock()
+
+	home.isNavigating = true
+	home.lastNavigationTime = time.Now()
+	home.Update(tickMsg{})
+
+	div = dividerIndex(home)
+	a2AfterHotTick := sessionIndexByTitle(home, "a2")
+	if div < 0 || a2AfterHotTick <= div {
+		t.Fatalf("a2 moved during navigation: a2=%d divider=%d", a2AfterHotTick, div)
+	}
+	if home.cursor != a2 {
+		t.Fatalf("cursor moved during navigation: got %d, want %d", home.cursor, a2)
+	}
+
+	home.lastNavigationTime = time.Now().Add(-time.Second)
+	home.Update(tickMsg{})
+
+	div = dividerIndex(home)
+	a2AfterSettledTick := sessionIndexByTitle(home, "a2")
+	if div < 0 || a2AfterSettledTick < 0 || a2AfterSettledTick >= div {
+		t.Fatalf("a2 should move above divider after navigation settles: a2=%d divider=%d", a2AfterSettledTick, div)
+	}
+}
+
+func TestActiveTopDuplicateGroupRestoreKeepsSameOccurrence(t *testing.T) {
+	home, _ := buildTwoGroupHome(t)
+	home.instancesMu.Lock()
+	for _, inst := range home.instances {
+		switch inst.Title {
+		case "a1":
+			inst.Status = session.StatusRunning
+		case "a2":
+			inst.Status = session.StatusIdle
+		case "a3":
+			inst.Status = session.StatusStopped
+		default:
+			inst.Status = session.StatusIdle
+		}
+	}
+	home.instancesMu.Unlock()
+
+	home.groupViewMode = session.GroupViewActiveTop
+	home.rebuildFlatItems()
+
+	alphaIndexes := groupIndexesByPath(home, "alpha")
+	if len(alphaIndexes) < 3 {
+		t.Fatalf("expected alpha to appear in active, idle, and done sections; got indexes %v", alphaIndexes)
+	}
+	doneAlpha := alphaIndexes[len(alphaIndexes)-1]
+	home.cursor = doneAlpha
+
+	selected := home.captureSelectedItemIdentity()
+	home.rebuildFlatItemsPreservingSelection(selected)
+
+	if home.cursor != doneAlpha {
+		t.Fatalf("duplicate group restore moved cursor: got %d, want %d (alpha indexes %v)", home.cursor, doneAlpha, alphaIndexes)
 	}
 }
 
