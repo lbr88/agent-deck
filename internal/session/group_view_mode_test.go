@@ -32,6 +32,21 @@ func summarize(items []Item) []string {
 	return out
 }
 
+func summarizeWithDividerLabels(items []Item) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		switch it.Type {
+		case ItemTypeGroup:
+			out = append(out, "G:"+it.Path)
+		case ItemTypeSession:
+			out = append(out, "S:"+it.Session.ID)
+		case ItemTypeDivider:
+			out = append(out, "---"+it.DividerLabel)
+		}
+	}
+	return out
+}
+
 func eqSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -73,6 +88,34 @@ func TestPartitionActiveTopSplitsGroup(t *testing.T) {
 	}
 	if !eqSlice(got, want) {
 		t.Fatalf("active-top mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestPartitionActiveTopSplitsIdleAndDoneSections(t *testing.T) {
+	items := []Item{
+		groupItem("active"),
+		sessItem("run", StatusRunning, "active"),
+		groupItem("done-first"),
+		sessItem("stop-1", StatusStopped, "done-first"),
+		groupItem("idle-later"),
+		sessItem("idle-1", StatusIdle, "idle-later"),
+		groupItem("mixed"),
+		sessItem("stop-2", StatusStopped, "mixed"),
+		sessItem("idle-2", StatusIdle, "mixed"),
+	}
+
+	got := summarizeWithDividerLabels(PartitionByViewMode(items, GroupViewActiveTop, nil))
+	want := []string{
+		"G:active", "S:run",
+		"---idle",
+		"G:idle-later", "S:idle-1",
+		"G:mixed", "S:idle-2",
+		"---done",
+		"G:done-first", "S:stop-1",
+		"G:mixed", "S:stop-2",
+	}
+	if !eqSlice(got, want) {
+		t.Fatalf("active-top should split idle and done sections:\n got=%v\nwant=%v", got, want)
 	}
 }
 

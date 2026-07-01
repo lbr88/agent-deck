@@ -284,10 +284,75 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 		return items
 	}
 
+	if mode == GroupViewActiveTop {
+		return partitionActiveTopInactiveSections(top, bottom)
+	}
+
 	out := make([]Item, 0, len(top)+1+len(bottom))
 	out = append(out, top...)
 	out = append(out, Item{Type: ItemTypeDivider, DividerLabel: mode.dividerLabel()})
 	out = append(out, bottom...)
+	return out
+}
+
+func partitionActiveTopInactiveSections(top, bottom []Item) []Item {
+	hasIdleRow := make(map[string]bool)
+	hasDoneRow := make(map[string]bool)
+	sessionIsDone := func(it Item) bool {
+		return it.Session != nil && it.Session.Status == StatusStopped
+	}
+	for _, it := range bottom {
+		if it.Type != ItemTypeSession || it.Session == nil {
+			continue
+		}
+		if sessionIsDone(it) {
+			markAncestorPaths(hasDoneRow, it.Path)
+		} else {
+			markAncestorPaths(hasIdleRow, it.Path)
+		}
+	}
+
+	idle := make([]Item, 0, len(bottom))
+	done := make([]Item, 0, len(bottom))
+	for _, it := range bottom {
+		switch it.Type {
+		case ItemTypeGroup:
+			inIdle := hasIdleRow[it.Path]
+			inDone := hasDoneRow[it.Path]
+			if !inIdle && !inDone {
+				idle = append(idle, it)
+				continue
+			}
+			if inIdle {
+				idle = append(idle, it)
+			}
+			if inDone {
+				done = append(done, it)
+			}
+		case ItemTypeSession:
+			if sessionIsDone(it) {
+				done = append(done, it)
+			} else {
+				idle = append(idle, it)
+			}
+		default:
+			idle = append(idle, it)
+		}
+	}
+
+	idle = ensureBottomAncestorsPresent(idle, bottom)
+	done = ensureBottomAncestorsPresent(done, bottom)
+
+	out := make([]Item, 0, len(top)+len(idle)+len(done)+2)
+	out = append(out, top...)
+	if len(idle) > 0 {
+		out = append(out, Item{Type: ItemTypeDivider, DividerLabel: "idle"})
+		out = append(out, idle...)
+	}
+	if len(done) > 0 {
+		out = append(out, Item{Type: ItemTypeDivider, DividerLabel: "done"})
+		out = append(out, done...)
+	}
 	return out
 }
 
