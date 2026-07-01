@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -45,5 +46,21 @@ func TestCodexImportDialogMovesCursor(t *testing.T) {
 	got, ok := d.Selected()
 	if !ok || got.ID != entries[1].ID {
 		t.Fatalf("selected = %#v ok=%v, want second entry", got, ok)
+	}
+}
+
+func TestCodexImportDialogShowsPath(t *testing.T) {
+	d := NewCodexImportDialog()
+	d.SetSize(120, 40)
+	d.Show([]session.CodexIndexEntry{{
+		ID:         "44444444-4444-4444-4444-444444444444",
+		ThreadName: "alpha",
+		Path:       "/home/user/project-alpha",
+		UpdatedAt:  time.Now(),
+	}})
+
+	rendered := d.View()
+	if !strings.Contains(rendered, "/home/user/project-alpha") {
+		t.Fatalf("rendered dialog should include project path:\n%s", rendered)
 	}
 }

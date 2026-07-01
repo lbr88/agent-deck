@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -65,5 +66,21 @@ func TestClaudeImportDialogMovesCursor(t *testing.T) {
 	got, ok := d.Selected()
 	if !ok || got.SessionID != entries[1].SessionID {
 		t.Fatalf("selected = %#v ok=%v, want second entry", got, ok)
+	}
+}
+
+func TestClaudeImportDialogShowsPath(t *testing.T) {
+	d := NewClaudeImportDialog()
+	d.SetSize(120, 40)
+	d.Show([]session.ClaudeImportCandidate{{
+		SessionID: "44444444-4444-4444-4444-444444444444",
+		Name:      "alpha",
+		CWD:       "/home/user/project-alpha",
+		UpdatedAt: time.Now(),
+	}})
+
+	rendered := d.View()
+	if !strings.Contains(rendered, "/home/user/project-alpha") {
+		t.Fatalf("rendered dialog should include project path:\n%s", rendered)
 	}
 }

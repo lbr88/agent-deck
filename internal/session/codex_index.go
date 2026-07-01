@@ -17,6 +17,7 @@ import (
 type CodexIndexEntry struct {
 	ID         string
 	ThreadName string
+	Path       string
 	UpdatedAt  time.Time
 }
 
@@ -44,9 +45,12 @@ func (e *CodexSessionAmbiguousError) Unwrap() error {
 }
 
 type codexIndexLine struct {
-	ID         string `json:"id"`
-	ThreadName string `json:"thread_name"`
-	UpdatedAt  string `json:"updated_at"`
+	ID          string `json:"id"`
+	ThreadName  string `json:"thread_name"`
+	CWD         string `json:"cwd"`
+	Path        string `json:"path"`
+	ProjectPath string `json:"project_path"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // GetCodexHomeDir returns the effective Codex home using Agent Deck's normal
@@ -98,6 +102,7 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 		entry := CodexIndexEntry{
 			ID:         id,
 			ThreadName: raw.ThreadName,
+			Path:       firstNonEmpty(raw.CWD, raw.Path, raw.ProjectPath),
 			UpdatedAt:  updatedAt,
 		}
 		if prev, ok := latest[id]; !ok || entry.UpdatedAt.After(prev.UpdatedAt) {
@@ -173,6 +178,81 @@ func ResolveCodexIndexTarget(codexHome, target string) (CodexIndexEntry, error) 
 // CodexRolloutExists reports whether Codex has a rollout file for sessionID.
 func CodexRolloutExists(codexHome, sessionID string) bool {
 	return codexRolloutExistsInHome(strings.ToLower(strings.TrimSpace(sessionID)), codexHome)
+}
+
+// CodexRolloutCWD returns the project path recorded in the rollout session
+// metadata. It scans only until the first session_meta record with a cwd.
+func CodexRolloutCWD(codexHome, sessionID string) string {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	path := codexRolloutPathInHome(sessionID, codexHome)
+	if path == "" {
+		return ""
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	type rolloutMetaLine struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID        string `json:"id"`
+			SessionID string `json:"session_id"`
+			CWD       string `json:"cwd"`
+		} `json:"payload"`
+	}
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec rolloutMetaLine
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		if rec.Type != "session_meta" {
+			continue
+		}
+		cwd := strings.TrimSpace(rec.Payload.CWD)
+		if cwd == "" {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(firstNonEmpty(rec.Payload.ID, rec.Payload.SessionID)))
+		if id == "" || id == sessionID {
+			return cwd
+		}
+	}
+	return ""
+}
+
+func codexRolloutPathInHome(sessionID, codexHome string) string {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if !isCodexSessionUUID(sessionID) {
+		return ""
+	}
+	pattern := filepath.Join(codexHome, "sessions", "*", "*", "*",
+		"rollout-*-"+sessionID+".jsonl")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+	return matches[len(matches)-1]
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // AppendCodexSessionIndexName appends a Codex session_index.jsonl record that

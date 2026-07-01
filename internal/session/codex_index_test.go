@@ -190,6 +190,20 @@ func TestCodexRolloutExistsRejectsMalformedSessionID(t *testing.T) {
 	}
 }
 
+func TestCodexRolloutCWDReadsSessionMetadata(t *testing.T) {
+	home := t.TempDir()
+	sessionID := "44444444-4444-4444-4444-444444444444"
+	projectPath := filepath.Join(home, "project")
+	writeCodexRolloutBody(t, home, sessionID,
+		`{"type":"session_meta","payload":{"id":"`+sessionID+`","cwd":"`+projectPath+`"}}`+"\n",
+	)
+
+	got := CodexRolloutCWD(home, sessionID)
+	if got != projectPath {
+		t.Fatalf("CodexRolloutCWD = %q, want %q", got, projectPath)
+	}
+}
+
 func TestAppendCodexSessionIndexNameCreatesJSONLRecord(t *testing.T) {
 	home := t.TempDir()
 	id := "55555555-5555-5555-5555-555555555555"
@@ -232,12 +246,17 @@ func writeCodexIndex(t *testing.T, home string, lines ...string) {
 
 func writeCodexRollout(t *testing.T, home, sessionID string) {
 	t.Helper()
+	writeCodexRolloutBody(t, home, sessionID, "{}\n")
+}
+
+func writeCodexRolloutBody(t *testing.T, home, sessionID, body string) {
+	t.Helper()
 	dir := filepath.Join(home, "sessions", "2026", "06", "30")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir codex rollout dir: %v", err)
 	}
 	path := filepath.Join(dir, "rollout-2026-06-30T10-00-00-"+sessionID+".jsonl")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write codex rollout: %v", err)
 	}
 }

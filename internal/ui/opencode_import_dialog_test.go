@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,22 @@ func TestOpenCodeImportDialogMovesCursor(t *testing.T) {
 	got, ok := d.Selected()
 	if !ok || got.ID != entries[1].ID {
 		t.Fatalf("selected = %#v ok=%v, want second entry", got, ok)
+	}
+}
+
+func TestOpenCodeImportDialogShowsPath(t *testing.T) {
+	d := NewOpenCodeImportDialog()
+	d.SetSize(120, 40)
+	d.Show([]session.OpenCodeImportEntry{{
+		ID:        "ses_alpha123",
+		Title:     "alpha",
+		Directory: "/home/user/project-alpha",
+		UpdatedAt: time.Now(),
+	}})
+
+	rendered := d.View()
+	if !strings.Contains(rendered, "/home/user/project-alpha") {
+		t.Fatalf("rendered dialog should include project path:\n%s", rendered)
 	}
 }
 

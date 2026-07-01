@@ -2,9 +2,11 @@ package session
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
+	"github.com/sahilm/fuzzy"
 )
 
 // DiscoverExistingTmuxSessions finds all tmux sessions and converts them to instances
@@ -129,8 +131,67 @@ func FilterByQuery(instances []*Instance, query string) []*Instance {
 			filtered = append(filtered, inst)
 		}
 	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+
+	type scoredInstance struct {
+		inst  *Instance
+		score int
+		index int
+	}
+	var scored []scoredInstance
+	for i, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		score, ok := bestLocalSessionFuzzyScore(query, inst)
+		if !ok {
+			continue
+		}
+		scored = append(scored, scoredInstance{inst: inst, score: score, index: i})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].index < scored[j].index
+	})
+	for _, match := range scored {
+		filtered = append(filtered, match.inst)
+	}
 
 	return filtered
+}
+
+func bestLocalSessionFuzzyScore(query string, inst *Instance) (int, bool) {
+	fields := []struct {
+		value string
+		bonus int
+	}{
+		{value: inst.Tool, bonus: 3000},
+		{value: inst.Title, bonus: 2000},
+		{value: inst.ProjectPath, bonus: 1000},
+	}
+
+	best := 0
+	matched := false
+	for _, field := range fields {
+		value := strings.TrimSpace(field.value)
+		if value == "" {
+			continue
+		}
+		matches := fuzzy.Find(query, []string{strings.ToLower(value)})
+		if len(matches) == 0 {
+			continue
+		}
+		score := matches[0].Score + field.bonus
+		if !matched || score > best {
+			best = score
+			matched = true
+		}
+	}
+	return best, matched
 }
 
 // filterByStatus returns only instances with the specified status

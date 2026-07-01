@@ -119,6 +119,9 @@ func (d *CodexImportDialog) View() string {
 				dimStyle.Render(shortCodexID(entry.ID)),
 				dimStyle.Render(entry.UpdatedAt.Local().Format("2006-01-02 15:04")),
 			)
+			if path := strings.TrimSpace(entry.Path); path != "" {
+				row += "  " + dimStyle.Render(path)
+			}
 			if i == d.cursor {
 				lines = append(lines, "> "+selectedStyle.Render(row))
 			} else {
@@ -129,7 +132,7 @@ func (d *CodexImportDialog) View() string {
 	lines = append(lines, "")
 	lines = append(lines, footerStyle.Render("Enter import | Esc cancel | j/k navigate"))
 
-	dialogWidth := fitDialogWidth(72, 44, d.width)
+	dialogWidth := fitDialogWidth(96, 44, d.width)
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)
 }

@@ -132,6 +132,33 @@ func TestFilterByQuery(t *testing.T) {
 	}
 }
 
+func TestFilterByQueryFuzzyMatchesTitlePathAndTool(t *testing.T) {
+	instances := []*Instance{
+		{Title: "devops-claude", ProjectPath: "/home/user/devops", Tool: "claude"},
+		{Title: "frontend-shell", ProjectPath: "/home/user/frontend", Tool: "shell"},
+		{Title: "backend-opencode", ProjectPath: "/home/user/backend", Tool: "opencode"},
+	}
+
+	tests := []struct {
+		query string
+		want  string
+	}{
+		{"dvc", "devops-claude"},
+		{"frsh", "frontend-shell"},
+		{"opcd", "backend-opencode"},
+	}
+
+	for _, tt := range tests {
+		got := FilterByQuery(instances, tt.query)
+		if len(got) == 0 {
+			t.Fatalf("FilterByQuery(%q) returned no matches, want %q", tt.query, tt.want)
+		}
+		if got[0].Title != tt.want {
+			t.Fatalf("FilterByQuery(%q) first match = %q, want %q", tt.query, got[0].Title, tt.want)
+		}
+	}
+}
+
 func TestGroupByProject(t *testing.T) {
 	instances := []*Instance{
 		{Title: "session-1", ProjectPath: "/home/user/projects/devops"},

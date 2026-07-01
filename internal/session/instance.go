@@ -1705,17 +1705,7 @@ func (i *Instance) buildCopilotCommand(baseCommand string) string {
 //
 // Codex layout: codexHome/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 func codexRolloutExistsInHome(sessionID, codexHome string) bool {
-	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
-	if !isCodexSessionUUID(sessionID) {
-		return false
-	}
-	pattern := filepath.Join(codexHome, "sessions", "*", "*", "*",
-		"rollout-*-"+sessionID+".jsonl")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return false
-	}
-	return len(matches) > 0
+	return codexRolloutPathInHome(sessionID, codexHome) != ""
 }
 
 // detectOpenCodeSessionAsync detects the OpenCode session ID after startup

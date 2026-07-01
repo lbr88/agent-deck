@@ -128,6 +128,34 @@ func TestHomeClaudeImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 }
 
+func TestHomeCodexImportPickerUsesRolloutPath(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	codexHome := filepath.Join(homeDir, ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	id := "88888888-8888-8888-8888-888888888888"
+	projectPath := "/home/user/projectalpha"
+	writeCodexIndexForHomeImport(t, codexHome, id, "saved codex", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForHomeImportWithCWD(t, codexHome, id, projectPath)
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	rendered := h.codexImportDialog.View()
+	if !strings.Contains(rendered, projectPath) {
+		t.Fatalf("Codex import picker should include rollout cwd %q:\n%s", projectPath, rendered)
+	}
+}
+
 func TestHomeOpenCodeImportHotkeyOpensSourceDialog(t *testing.T) {
 	projectPath := t.TempDir()
 	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `[
@@ -3081,6 +3109,24 @@ func TestMouseYToItemIndexEmptyList(t *testing.T) {
 	}
 }
 
+func TestRenderSessionListShowsScrollbarWhenOverflowing(t *testing.T) {
+	items := make([]session.Item, 24)
+	for i := range items {
+		items[i] = session.Item{
+			Type:    session.ItemTypeSession,
+			Session: &session.Instance{ID: fmt.Sprintf("s-%02d", i), Title: fmt.Sprintf("session-%02d", i), Tool: "claude"},
+		}
+	}
+	home := newTestHomeWithItems(80, 20, items)
+	home.cursor = 18
+	home.syncViewport()
+
+	rendered := home.renderSessionList(48, 8)
+	if !strings.Contains(rendered, "█") {
+		t.Fatalf("overflowing session list should render a scrollbar thumb:\n%s", rendered)
+	}
+}
+
 func TestMouseClickXBoundaryPerLayout(t *testing.T) {
 	items := []session.Item{
 		{Type: session.ItemTypeSession, Session: &session.Instance{ID: "s1", Title: "S1"}, Level: 0},
@@ -4381,12 +4427,23 @@ func appendCodexIndexForHomeImport(t *testing.T, home, id, threadName, updatedAt
 
 func writeCodexRolloutForHomeImport(t *testing.T, home, sessionID string) {
 	t.Helper()
+	writeCodexRolloutForHomeImportBody(t, home, sessionID, "{}\n")
+}
+
+func writeCodexRolloutForHomeImportWithCWD(t *testing.T, home, sessionID, cwd string) {
+	t.Helper()
+	body := `{"type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + cwd + `"}}` + "\n"
+	writeCodexRolloutForHomeImportBody(t, home, sessionID, body)
+}
+
+func writeCodexRolloutForHomeImportBody(t *testing.T, home, sessionID, body string) {
+	t.Helper()
 	dir := filepath.Join(home, "sessions", "2026", "06", "30")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir codex rollout dir: %v", err)
 	}
 	path := filepath.Join(dir, "rollout-2026-06-30T10-00-00-"+sessionID+".jsonl")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write codex rollout: %v", err)
 	}
 }

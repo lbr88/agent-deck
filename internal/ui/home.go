@@ -12145,6 +12145,9 @@ func codexImportEntriesWithRollout(codexHome string, entries []session.CodexInde
 	filtered := make([]session.CodexIndexEntry, 0, len(entries))
 	for _, entry := range entries {
 		if session.CodexRolloutExists(codexHome, entry.ID) {
+			if strings.TrimSpace(entry.Path) == "" {
+				entry.Path = session.CodexRolloutCWD(codexHome, entry.ID)
+			}
 			filtered = append(filtered, entry)
 		}
 	}
@@ -12227,8 +12230,11 @@ func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.C
 		if title == "" {
 			title = shortCodexID(entry.ID)
 		}
-		projectPath := "."
-		if cwd, err := os.Getwd(); err == nil {
+		projectPath := strings.TrimSpace(entry.Path)
+		if projectPath == "" {
+			projectPath = "."
+		}
+		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(entry.Path) == "" {
 			projectPath = cwd
 		}
 		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "codex")
@@ -14749,7 +14755,53 @@ func (h *Home) renderSessionList(width, height int) string {
 	}
 
 	// Height padding is handled by ensureExactHeight() in View() for consistency
-	return b.String()
+	return renderSessionListScrollbar(b.String(), width, height, len(h.flatItems), h.viewOffset, visibleCount)
+}
+
+func renderSessionListScrollbar(content string, width, height, totalItems, viewOffset, visibleItems int) string {
+	if width < 2 || height <= 0 || totalItems <= 0 || visibleItems <= 0 {
+		return content
+	}
+	overflowing := viewOffset > 0 || viewOffset+visibleItems < totalItems
+	if !overflowing {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+
+	if visibleItems > totalItems {
+		visibleItems = totalItems
+	}
+	thumbHeight := (height * visibleItems) / totalItems
+	if thumbHeight < 1 {
+		thumbHeight = 1
+	}
+	if thumbHeight > height {
+		thumbHeight = height
+	}
+
+	scrollRange := totalItems - visibleItems
+	thumbTop := 0
+	if scrollRange > 0 && height > thumbHeight {
+		thumbTop = (viewOffset * (height - thumbHeight)) / scrollRange
+	}
+
+	trackStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+	thumbStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	for i, line := range lines {
+		marker := trackStyle.Render("│")
+		if i >= thumbTop && i < thumbTop+thumbHeight {
+			marker = thumbStyle.Render("█")
+		}
+		lines[i] = fitCellWidth(line, width-1) + marker
+	}
+	return strings.Join(lines, "\n")
 }
 
 type groupRenderStats struct {
