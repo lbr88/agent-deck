@@ -827,6 +827,9 @@ func TestSettingsPanel_PreviewSettings_LoadConfig(t *testing.T) {
 			ShowOutput:    &showOutputTrue,
 			ShowAnalytics: &showAnalyticsFalse,
 		},
+		UI: session.UISettings{
+			PreviewRefreshMS: 750,
+		},
 	}
 	panel.LoadConfig(config)
 
@@ -835,6 +838,9 @@ func TestSettingsPanel_PreviewSettings_LoadConfig(t *testing.T) {
 	}
 	if panel.showAnalytics {
 		t.Error("showAnalytics should be false after loading config")
+	}
+	if panel.previewRefreshMS != 750 {
+		t.Fatalf("previewRefreshMS = %d, want 750", panel.previewRefreshMS)
 	}
 
 	// Test loading with nil ShowAnalytics (should default to false)
@@ -853,12 +859,16 @@ func TestSettingsPanel_PreviewSettings_LoadConfig(t *testing.T) {
 	if panel.showAnalytics {
 		t.Error("showAnalytics should default to false when nil")
 	}
+	if panel.previewRefreshMS != int(session.DefaultPreviewRefresh.Milliseconds()) {
+		t.Fatalf("previewRefreshMS default = %d, want %d", panel.previewRefreshMS, session.DefaultPreviewRefresh.Milliseconds())
+	}
 }
 
 func TestSettingsPanel_PreviewSettings_GetConfig(t *testing.T) {
 	panel := NewSettingsPanel()
 	panel.showOutput = true
 	panel.showAnalytics = false
+	panel.previewRefreshMS = 750
 
 	config := panel.GetConfig()
 
@@ -870,12 +880,47 @@ func TestSettingsPanel_PreviewSettings_GetConfig(t *testing.T) {
 	} else if *config.Preview.ShowAnalytics {
 		t.Error("Preview.ShowAnalytics should be false")
 	}
+	if config.UI.PreviewRefreshMS != 750 {
+		t.Fatalf("UI.PreviewRefreshMS = %d, want 750", config.UI.PreviewRefreshMS)
+	}
+}
+
+func TestSettingsPanel_PreviewRefresh_AdjustsInTUI(t *testing.T) {
+	panel := NewSettingsPanel()
+	panel.Show()
+	panel.cursor = int(SettingPreviewRefresh)
+	panel.previewRefreshMS = 200
+
+	_, _, changed := panel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if !changed {
+		t.Fatal("left on Preview refresh should report changed=true")
+	}
+	if panel.previewRefreshMS != 100 {
+		t.Fatalf("previewRefreshMS after left = %d, want 100", panel.previewRefreshMS)
+	}
+
+	_, _, changed = panel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if changed {
+		t.Fatal("left at minimum should not report changed=true")
+	}
+	if panel.previewRefreshMS != 100 {
+		t.Fatalf("previewRefreshMS below min = %d, want 100", panel.previewRefreshMS)
+	}
+
+	_, _, changed = panel.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !changed {
+		t.Fatal("right on Preview refresh should report changed=true")
+	}
+	if panel.previewRefreshMS != 200 {
+		t.Fatalf("previewRefreshMS after right = %d, want 200", panel.previewRefreshMS)
+	}
 }
 
 func TestSettingsPanel_PreviewSettings_GetConfigPreservesHiddenFields(t *testing.T) {
 	panel := NewSettingsPanel()
 	panel.showOutput = false
 	panel.showAnalytics = true
+	panel.previewRefreshMS = 750
 
 	showNotes := false
 	showTools := false
@@ -887,8 +932,14 @@ func TestSettingsPanel_PreviewSettings_GetConfigPreservesHiddenFields(t *testing
 				ShowTools: &showTools,
 			},
 		},
+		UI: session.UISettings{
+			PreviewPct:               70,
+			RemoteSessionRefreshSecs: 45,
+			HiddenTools:              []string{"codex"},
+		},
 	}
 	panel.LoadConfig(original)
+	panel.previewRefreshMS = 750
 	panel.originalConfig = original
 
 	config := panel.GetConfig()
@@ -904,6 +955,18 @@ func TestSettingsPanel_PreviewSettings_GetConfigPreservesHiddenFields(t *testing
 	}
 	if config.Preview.Analytics.ShowTools == nil || *config.Preview.Analytics.ShowTools {
 		t.Fatal("Preview.Analytics should preserve original hidden settings")
+	}
+	if config.UI.PreviewRefreshMS != 750 {
+		t.Fatalf("UI.PreviewRefreshMS = %d, want 750", config.UI.PreviewRefreshMS)
+	}
+	if config.UI.PreviewPct != 70 {
+		t.Fatalf("UI.PreviewPct should be preserved, got %d", config.UI.PreviewPct)
+	}
+	if config.UI.RemoteSessionRefreshSecs != 45 {
+		t.Fatalf("UI.RemoteSessionRefreshSecs should be preserved, got %d", config.UI.RemoteSessionRefreshSecs)
+	}
+	if len(config.UI.HiddenTools) != 1 || config.UI.HiddenTools[0] != "codex" {
+		t.Fatalf("UI.HiddenTools should be preserved, got %#v", config.UI.HiddenTools)
 	}
 }
 
@@ -1031,6 +1094,7 @@ func TestSettingsPanel_PreviewSettings_ViewContains(t *testing.T) {
 		"PREVIEW",
 		"Show Output",
 		"Show Analytics",
+		"Preview refresh:",
 	}
 
 	for _, elem := range expectedElements {

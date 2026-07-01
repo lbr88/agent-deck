@@ -34,6 +34,7 @@ const (
 	SettingShowOutput
 	SettingShowAnalytics
 	SettingShowNotes
+	SettingPreviewRefresh
 	SettingNotesOutputSplit
 	SettingMaintenanceEnabled
 	SettingStatsEnabled
@@ -53,7 +54,7 @@ const (
 )
 
 // Total number of navigable settings.
-const settingsCount = 34
+const settingsCount = 35
 
 // SettingsPanel displays and edits user configuration
 type SettingsPanel struct {
@@ -88,6 +89,7 @@ type SettingsPanel struct {
 	showOutput          bool
 	showAnalytics       bool
 	showNotes           bool
+	previewRefreshMS    int
 	syncTitle           bool // global: let the agent rename the session (off = keep your title)
 	notesOutputSplit    int  // percentage 10-90 (displayed as %, stored as 0.10-0.90)
 	maintenanceEnabled  bool
@@ -155,10 +157,11 @@ func NewSettingsPanel() *SettingsPanel {
 		recentDays:          90,
 		showOutput:          true,  // Default: output ON (shows launch animation)
 		showAnalytics:       false, // Default: analytics OFF (opt-in)
-		syncTitle:           true,  // Default: title sync ON (matches GetSyncTitle default)
-		notesOutputSplit:    33,    // Default: 33%
-		statsEnabled:        true,  // Default: stats ON
-		statsRefreshSecs:    5,     // Default: 5 seconds
+		previewRefreshMS:    int(session.DefaultPreviewRefresh.Milliseconds()),
+		syncTitle:           true, // Default: title sync ON (matches GetSyncTitle default)
+		notesOutputSplit:    33,   // Default: 33%
+		statsEnabled:        true, // Default: stats ON
+		statsRefreshSecs:    5,    // Default: 5 seconds
 		statsShowCPU:        true,
 		statsShowRAM:        true,
 		statsShowDisk:       true,
@@ -300,6 +303,7 @@ func (s *SettingsPanel) LoadConfig(config *session.UserConfig) {
 	s.showOutput = config.GetShowOutput()
 	s.showAnalytics = config.GetShowAnalytics()
 	s.showNotes = config.GetShowNotes()
+	s.previewRefreshMS = int(config.UI.GetPreviewRefreshDuration().Milliseconds())
 
 	// Session settings
 	s.syncTitle = config.GetSyncTitle()
@@ -436,6 +440,10 @@ func (s *SettingsPanel) GetConfig() *session.UserConfig {
 	config.Preview.ShowNotes = &showNotes
 	config.Preview.NotesOutputSplit = float64(s.notesOutputSplit) / 100.0
 
+	// UI settings
+	config.UI.ShowOnlyInstalledTools = s.showOnlyInstalledTools
+	config.UI.PreviewRefreshMS = s.previewRefreshMS
+
 	// Session settings
 	syncTitle := s.syncTitle
 	config.SyncTitle = &syncTitle
@@ -475,9 +483,6 @@ func (s *SettingsPanel) GetConfig() *session.UserConfig {
 	config.Display.ShowSessionTimestamps = s.showSessionTimestamps
 	config.Display.ShowPaneTitles = s.showPaneTitles
 
-	// UI tool picker settings
-	config.UI.ShowOnlyInstalledTools = s.showOnlyInstalledTools
-
 	// Preserve original MCPs, Tools, and Docker settings.
 	if s.originalConfig != nil {
 		config.MCPs = s.originalConfig.MCPs
@@ -495,6 +500,11 @@ func (s *SettingsPanel) GetConfig() *session.UserConfig {
 		// Fork settings are not exposed in SettingsPanel; preserve the whole
 		// [fork] table so saving visible settings cannot reset quick-fork defaults.
 		config.Fork = s.originalConfig.Fork
+		// Preserve [ui] fields not exposed in SettingsPanel, while applying the
+		// two fields the panel owns.
+		config.UI = s.originalConfig.UI
+		config.UI.ShowOnlyInstalledTools = s.showOnlyInstalledTools
+		config.UI.PreviewRefreshMS = s.previewRefreshMS
 		// Keep global Claude config when editing profile-specific override.
 		if s.claudeConfigIsScope {
 			config.Claude.ConfigDir = s.originalConfig.Claude.ConfigDir
@@ -632,6 +642,15 @@ func (s *SettingsPanel) adjustValue(delta int) bool {
 		newVal := s.notesOutputSplit + (delta * 5)
 		if newVal >= 10 && newVal <= 90 {
 			s.notesOutputSplit = newVal
+			changed = true
+		}
+
+	case SettingPreviewRefresh:
+		step := 100
+		minVal := int(session.MinPreviewRefresh.Milliseconds())
+		newVal := s.previewRefreshMS + (delta * step)
+		if newVal >= minVal {
+			s.previewRefreshMS = newVal
 			changed = true
 		}
 
@@ -1017,6 +1036,12 @@ func (s *SettingsPanel) View() string {
 	}
 	content.WriteString("  " + labelStyle.Render(line) + "\n")
 
+	line = s.renderNumber("Preview refresh:", s.previewRefreshMS, "ms")
+	if s.cursor == int(SettingPreviewRefresh) {
+		line = highlightStyle.Render(line)
+	}
+	content.WriteString("  " + labelStyle.Render(line) + "\n")
+
 	line = s.renderNumber("Notes/Output split:", s.notesOutputSplit, "%")
 	if s.cursor == int(SettingNotesOutputSplit) {
 		line = highlightStyle.Render(line)
@@ -1199,22 +1224,23 @@ func (s *SettingsPanel) View() string {
 			37, // SettingShowOutput
 			38, // SettingShowAnalytics
 			39, // SettingShowNotes
-			40, // SettingNotesOutputSplit
-			43, // SettingMaintenanceEnabled
-			46, // SettingStatsEnabled
-			47, // SettingStatsRefresh
-			48, // SettingStatsFormat
-			50, // SettingStatsShowCPU (row with RAM, Disk)
-			50, // SettingStatsShowRAM
-			50, // SettingStatsShowDisk
-			51, // SettingStatsShowNetwork (row with GPU, Load)
-			51, // SettingStatsShowGPU
-			51, // SettingStatsShowLoad
-			54, // SettingSyncTitle (SESSIONS section, after stats)
-			57, // SettingShowSessionTimestamps (DISPLAY section, after SESSIONS)
-			58, // SettingShowPaneTitles (DISPLAY section, after timestamps)
-			61, // SettingShowOnlyInstalledTools (TOOL PICKER section)
-			62, // SettingVisibleTools
+			40, // SettingPreviewRefresh
+			41, // SettingNotesOutputSplit
+			44, // SettingMaintenanceEnabled
+			47, // SettingStatsEnabled
+			48, // SettingStatsRefresh
+			49, // SettingStatsFormat
+			51, // SettingStatsShowCPU (row with RAM, Disk)
+			51, // SettingStatsShowRAM
+			51, // SettingStatsShowDisk
+			52, // SettingStatsShowNetwork (row with GPU, Load)
+			52, // SettingStatsShowGPU
+			52, // SettingStatsShowLoad
+			55, // SettingSyncTitle (SESSIONS section, after stats)
+			58, // SettingShowSessionTimestamps (DISPLAY section, after SESSIONS)
+			59, // SettingShowPaneTitles (DISPLAY section, after timestamps)
+			62, // SettingShowOnlyInstalledTools (TOOL PICKER section)
+			63, // SettingVisibleTools
 		}
 		cursorLine := cursorToLine[s.cursor]
 

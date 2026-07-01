@@ -181,3 +181,45 @@ func TestIssue1067_MergePanelConfigOntoDisk_PreservesAllUnsetFields(t *testing.T
 		t.Errorf("Theme not applied: %q", merged.Theme)
 	}
 }
+
+func TestMergePanelConfigOntoDisk_PropagatesUIPreviewRefresh(t *testing.T) {
+	_ = remoteTempHome(t)
+
+	original := &UserConfig{
+		UI: UISettings{
+			PreviewPct:               70,
+			RemoteSessionRefreshSecs: 45,
+			HiddenTools:              []string{"codex"},
+		},
+	}
+	if err := SaveUserConfig(original); err != nil {
+		t.Fatalf("seed SaveUserConfig: %v", err)
+	}
+
+	panel := &UserConfig{
+		UI: UISettings{
+			ShowOnlyInstalledTools: true,
+			PreviewRefreshMS:       750,
+		},
+	}
+
+	merged, err := MergePanelConfigOntoDisk(panel)
+	if err != nil {
+		t.Fatalf("MergePanelConfigOntoDisk: %v", err)
+	}
+	if !merged.UI.ShowOnlyInstalledTools {
+		t.Fatal("UI.ShowOnlyInstalledTools should be propagated")
+	}
+	if merged.UI.PreviewRefreshMS != 750 {
+		t.Fatalf("UI.PreviewRefreshMS = %d, want 750", merged.UI.PreviewRefreshMS)
+	}
+	if merged.UI.PreviewPct != 70 {
+		t.Fatalf("UI.PreviewPct should be preserved, got %d", merged.UI.PreviewPct)
+	}
+	if merged.UI.RemoteSessionRefreshSecs != 45 {
+		t.Fatalf("UI.RemoteSessionRefreshSecs should be preserved, got %d", merged.UI.RemoteSessionRefreshSecs)
+	}
+	if len(merged.UI.HiddenTools) != 1 || merged.UI.HiddenTools[0] != "codex" {
+		t.Fatalf("UI.HiddenTools should be preserved, got %#v", merged.UI.HiddenTools)
+	}
+}
