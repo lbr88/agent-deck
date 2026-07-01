@@ -1990,15 +1990,7 @@ func (i *Instance) detectCodexSessionAsync() {
 			sessionID = i.queryCodexSession(i.collectOtherCodexSessionIDs(), true)
 		}
 		if sessionID != "" {
-			i.CodexSessionID = sessionID
-			i.CodexDetectedAt = time.Now()
-
-			// Store in tmux environment for restart
-			if i.tmuxSession != nil {
-				if err := i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID); err != nil {
-					sessionLog.Warn("codex_set_env_failed", slog.String("error", err.Error()))
-				}
-			}
+			i.acceptCodexSessionID(sessionID, true)
 
 			sessionLog.Debug(
 				"codex_session_detected",
@@ -2623,10 +2615,7 @@ func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe boo
 	if i.tmuxSession != nil {
 		if sessionID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && sessionID != "" {
 			envSessionID = sessionID
-			if i.CodexSessionID != sessionID {
-				i.CodexSessionID = sessionID
-			}
-			i.CodexDetectedAt = time.Now()
+			i.acceptCodexSessionID(sessionID, false)
 		}
 	}
 
@@ -2642,8 +2631,7 @@ func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe boo
 					slog.String("new_id", sessionID),
 				)
 			}
-			i.CodexSessionID = sessionID
-			i.CodexDetectedAt = time.Now()
+			i.acceptCodexSessionID(sessionID, false)
 			if i.tmuxSession != nil && i.tmuxSession.Exists() && (changed || envSessionID == "") {
 				_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
 			}
@@ -2687,8 +2675,7 @@ func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe boo
 				slog.String("new_id", sessionID),
 			)
 		}
-		i.CodexSessionID = sessionID
-		i.CodexDetectedAt = time.Now()
+		i.acceptCodexSessionID(sessionID, false)
 
 		// Sync back to tmux environment for future restarts
 		// Skip redundant writes when env already matches: each write is a tmux subprocess.
@@ -3876,8 +3863,7 @@ func (i *Instance) UpdateStatus() error {
 				}
 			case IsCodexCompatible(i.Tool):
 				if i.hookSessionID != i.CodexSessionID {
-					i.CodexSessionID = i.hookSessionID
-					i.CodexDetectedAt = time.Now()
+					i.acceptCodexSessionID(i.hookSessionID, false)
 				}
 			case i.Tool == "gemini":
 				if i.hookSessionID != i.GeminiSessionID {
@@ -4343,13 +4329,8 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
 		slog.String("new_id", sessionID),
 		slog.String("event", hookEvent),
 	)
-	i.CodexSessionID = sessionID
-	i.CodexDetectedAt = time.Now()
-	i.hookSessionID = sessionID
-
-	if i.tmuxSession != nil && i.tmuxSession.Exists() {
-		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID)
-	}
+	i.acceptCodexSessionID(sessionID, true)
+	i.hookSessionID = i.CodexSessionID
 
 	// Persist the rebind to SQLite. See bindClaudeSessionFromHook for the
 	// full rationale: none of the three UpdateHookStatus callers (TUI
@@ -4361,12 +4342,47 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
 	// poll. WriteCodexSessionBinding rewrites only the typed schema
 	// fields via json_set, leaving every other tool_data key untouched.
 	if db := statedb.GetGlobal(); db != nil {
-		if err := db.WriteCodexSessionBinding(i.ID, sessionID, i.CodexDetectedAt); err != nil {
+		if err := db.WriteCodexSessionBinding(i.ID, i.CodexSessionID, i.CodexDetectedAt); err != nil {
 			sessionLog.Warn("codex_session_rebind_persist_failed",
 				slog.String("instance_id", i.ID),
-				slog.String("new_id", sessionID),
+				slog.String("new_id", i.CodexSessionID),
 				slog.String("error", err.Error()))
 		}
+	}
+}
+
+func (i *Instance) acceptCodexSessionID(sessionID string, syncTmuxEnv bool) bool {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if sessionID == "" {
+		return false
+	}
+
+	changed := i.CodexSessionID != sessionID
+	i.CodexSessionID = sessionID
+	i.CodexDetectedAt = time.Now()
+
+	if syncTmuxEnv && i.tmuxSession != nil {
+		if err := i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID); err != nil {
+			sessionLog.Warn("codex_set_env_failed", slog.String("error", err.Error()))
+		}
+	}
+
+	if changed {
+		i.syncCodexSessionIndexName(sessionID)
+	}
+	return changed
+}
+
+func (i *Instance) syncCodexSessionIndexName(sessionID string) {
+	title := strings.TrimSpace(i.Title)
+	if title == "" {
+		return
+	}
+	if err := AppendCodexSessionIndexName(i.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
+		sessionLog.Warn("codex_session_name_sync_failed",
+			slog.String("session_id", sessionID),
+			slog.String("title", title),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -4967,7 +4983,7 @@ func (i *Instance) SyncSessionIDsFromTmux() {
 	}
 
 	if id, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && id != "" {
-		i.CodexSessionID = id
+		i.acceptCodexSessionID(id, false)
 	}
 
 	if id, err := i.tmuxSession.GetEnvironment("COPILOT_SESSION_ID"); err == nil && id != "" {
@@ -6139,8 +6155,7 @@ func (i *Instance) Restart() error {
 		// Try to get session ID from tmux environment if not already set
 		if i.CodexSessionID == "" {
 			if envID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && envID != "" {
-				i.CodexSessionID = envID
-				i.CodexDetectedAt = time.Now()
+				i.acceptCodexSessionID(envID, false)
 				sessionLog.Info("restart_codex_recovered_id", slog.String("session_id", envID))
 			}
 		}

@@ -230,6 +230,27 @@ func TestAppendCodexSessionIndexNameCreatesJSONLRecord(t *testing.T) {
 	}
 }
 
+func TestCodexSessionBindSyncsAgentDeckTitleToIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+
+	inst := NewInstanceWithTool("github import", t.TempDir(), "codex")
+	id := "66666666-6666-6666-6666-666666666666"
+
+	inst.bindCodexSessionFromHook(id, "thread/started")
+
+	entries, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("codex index entries = %#v, want one title sync record", entries)
+	}
+	if entries[0].ID != id || entries[0].ThreadName != "github import" {
+		t.Fatalf("codex index entry = %#v, want id %q title %q", entries[0], id, "github import")
+	}
+}
+
 func writeCodexIndex(t *testing.T, home string, lines ...string) {
 	t.Helper()
 	if err := os.MkdirAll(home, 0o755); err != nil {
