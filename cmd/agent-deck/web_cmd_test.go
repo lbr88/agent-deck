@@ -26,8 +26,8 @@ func (noopMutator) ArchiveSession(string) error        { return nil }
 func (noopMutator) UnarchiveSession(string) error      { return nil }
 func (noopMutator) UndoDelete() (string, error)        { return "", web.ErrUndoNothing }
 func (noopMutator) ForkSession(string) (string, error) { return "", nil }
-func (noopMutator) UpdateSession(string, map[string]string) ([]string, bool, error) {
-	return nil, false, nil
+func (noopMutator) UpdateSession(string, map[string]string) ([]string, bool, []string, error) {
+	return nil, false, nil, nil
 }
 func (noopMutator) CreateGroup(string, string) (string, error) {
 	return "", nil

@@ -2296,15 +2296,23 @@ func handleRename(profile string, args []string) {
 		}
 	}
 
+	renameData := map[string]interface{}{
+		"success":   true,
+		"id":        inst.ID,
+		"old_title": oldTitle,
+		"new_title": newTitle,
+		"profile":   storage.Profile(),
+	}
+	if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+		if !*jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: Claude name sync failed: %v\n", syncErr)
+		}
+		renameData["warning"] = fmt.Sprintf("Claude name sync failed: %v", syncErr)
+	}
+
 	out.Success(
 		fmt.Sprintf("Renamed session: %q → %q (profile '%s')", oldTitle, newTitle, storage.Profile()),
-		map[string]interface{}{
-			"success":   true,
-			"id":        inst.ID,
-			"old_title": oldTitle,
-			"new_title": newTitle,
-			"profile":   storage.Profile(),
-		},
+		renameData,
 	)
 }
 

@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -421,39 +422,43 @@ func (m *WebMutator) ForkSession(id string) (string, error) {
 //
 // instancesMu is held only across the SetField loop; the storage flush and
 // postCommits run after unlock, mirroring the TUI's home.go edit handler so
-// slow tmux/Codex side effects don't stall the status worker or precede
+// slow tmux/Codex/Claude side effects don't stall the status worker or precede
 // persistence.
-func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, error) {
+func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, []string, error) {
 	if len(updates) == 0 {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	defer unlock()
 	m.h.instancesMu.RLock()
 	inst := m.h.instanceByID[id]
 	m.h.instancesMu.RUnlock()
 	if inst == nil {
-		return nil, false, fmt.Errorf("session not found: %s", id)
+		return nil, false, nil, fmt.Errorf("session not found: %s", id)
 	}
 
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
 	var postCommits []func() error
+	titleChanged := false
 
 	m.h.instancesMu.Lock()
 	for field, value := range updates {
 		oldValue, postCommit, err := session.SetField(inst, field, value, nil)
 		if err != nil {
 			m.h.instancesMu.Unlock()
-			return nil, false, err
+			return nil, false, nil, err
 		}
 		if oldValue == value {
 			continue
 		}
 		changed = append(changed, field)
+		if field == session.FieldTitle {
+			titleChanged = true
+		}
 		if postCommit != nil {
 			postCommits = append(postCommits, postCommit)
 		}
@@ -464,12 +469,12 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 	m.h.instancesMu.Unlock()
 
 	if len(changed) == 0 {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 
 	storage, err := session.NewStorageWithProfile(m.h.profile)
 	if err != nil {
-		return nil, false, fmt.Errorf("open storage: %w", err)
+		return nil, false, nil, fmt.Errorf("open storage: %w", err)
 	}
 	defer storage.Close()
 
@@ -479,8 +484,10 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 	m.h.instancesMu.RUnlock()
 
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
-		return nil, false, fmt.Errorf("save session: %w", err)
+		return nil, false, nil, fmt.Errorf("save session: %w", err)
 	}
+
+	var warnings []string
 	var postCommitErr error
 	for _, fn := range postCommits {
 		if err := fn(); err != nil {
@@ -488,9 +495,20 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 		}
 	}
 	if postCommitErr != nil {
-		return changed, restartRequired, session.NewNonFatalWarning("post-save sync failed", postCommitErr)
+		warnings = append(warnings, session.NewNonFatalWarning("post-save sync failed", postCommitErr).Error())
 	}
-	return changed, restartRequired, nil
+
+	if titleChanged {
+		if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+			warnings = append(warnings, fmt.Sprintf("Claude name sync failed: %v", syncErr))
+			uiLog.Warn("claude_name_sync_failed",
+				slog.String("session_id", id),
+				slog.String("claude_session_id", inst.ClaudeSessionID),
+				slog.String("error", syncErr.Error()),
+			)
+		}
+	}
+	return changed, restartRequired, warnings, nil
 }
 
 // CreateGroup creates a new group (or subgroup if parentPath is non-empty) and

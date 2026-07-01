@@ -9498,16 +9498,21 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !h.forceSaveInstances() {
 			return h, nil
 		}
-		// postCommits run AFTER unlocking and saving so slow tmux/Codex
+		// postCommits run AFTER unlocking and saving so slow tmux/Codex/Claude
 		// side effects don't stall background readers or precede persistence.
-		var postCommitErr error
+		var syncErrs error
 		for _, fn := range postCommits {
 			if err := fn(); err != nil {
-				postCommitErr = errors.Join(postCommitErr, err)
+				syncErrs = errors.Join(syncErrs, err)
 			}
 		}
-		if postCommitErr != nil {
-			h.setError(fmt.Errorf("saved, but %w", postCommitErr))
+		if titleChanged {
+			if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+				syncErrs = errors.Join(syncErrs, fmt.Errorf("Claude name sync failed: %w", syncErr))
+			}
+		}
+		if syncErrs != nil {
+			h.setError(fmt.Errorf("saved, but %w", syncErrs))
 		}
 
 		h.editSessionDialog.Hide()
@@ -9743,7 +9748,8 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// Title assignment would be reverted by the #572
 					// Claude-name sync on the next hook event.
 					var postCommit func() error
-					if inst := h.getInstanceByID(sessionID); inst != nil {
+					inst := h.getInstanceByID(sessionID)
+					if inst != nil {
 						var err error
 						_, postCommit, err = session.SetField(inst, session.FieldTitle, newName, nil)
 						if err != nil {
@@ -9759,9 +9765,18 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					// Invalidate preview cache since title changed
 					h.invalidatePreviewCache(sessionID)
 					h.rebuildFlatItems()
-					if h.saveInstances() && postCommit != nil {
-						if err := postCommit(); err != nil {
-							h.setError(fmt.Errorf("saved, but %w", err))
+					if h.saveInstances() {
+						var syncErrs error
+						if postCommit != nil {
+							if err := postCommit(); err != nil {
+								syncErrs = errors.Join(syncErrs, err)
+							}
+						}
+						if syncErr := session.SyncClaudeSessionNameForInstance(inst); syncErr != nil {
+							syncErrs = errors.Join(syncErrs, fmt.Errorf("Claude name sync failed: %w", syncErr))
+						}
+						if syncErrs != nil {
+							h.setError(fmt.Errorf("renamed, but %w", syncErrs))
 						}
 					}
 				}
@@ -9855,7 +9870,8 @@ func (h *Home) handleForkDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return h, cmd
 }
 
-// saveInstances saves instances to storage
+// saveInstances saves instances to storage and reports whether the save
+// actually reached storage.
 func (h *Home) saveInstances() bool {
 	return h.saveInstancesWithForce(false)
 }

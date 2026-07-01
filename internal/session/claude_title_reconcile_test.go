@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -185,6 +186,205 @@ func TestClaudeSessionNameIn_MtimeFallbackWhenNoUpdatedAt(t *testing.T) {
 
 	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-z"); got != "newer" {
 		t.Errorf("ClaudeSessionNameIn = %q, want %q", got, "newer")
+	}
+}
+
+func TestSyncClaudeSessionNameIn_UpdatesFreshestMatchPreservingUnknownFields(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-sync",
+		"name":      "old stale",
+		"updatedAt": int64(1000),
+		"nested": map[string]any{
+			"keep": true,
+		},
+	})
+	seedClaudeSessionFile(t, home, "2222.json", map[string]any{
+		"sessionId": "sid-sync",
+		"name":      "old fresh",
+		"updatedAt": int64(2000),
+		"nested": map[string]any{
+			"keep": "yes",
+		},
+		"futureClaudeField": []any{"preserve", float64(42)},
+	})
+	seedClaudeSessionFile(t, home, "3333.json", map[string]any{
+		"sessionId": "other",
+		"name":      "do not touch",
+		"updatedAt": int64(3000),
+	})
+
+	if err := SyncClaudeSessionNameIn(claudeDir, "sid-sync", "Agent Deck Rename"); err != nil {
+		t.Fatalf("SyncClaudeSessionNameIn: %v", err)
+	}
+
+	if got := ClaudeSessionNameIn(claudeDir, "sid-sync"); got != "Agent Deck Rename" {
+		t.Fatalf("ClaudeSessionNameIn after sync = %q, want %q", got, "Agent Deck Rename")
+	}
+
+	var stale map[string]any
+	readClaudeSessionMetaFile(t, home, "1111.json", &stale)
+	if stale["name"] != "old stale" {
+		t.Errorf("stale matching metadata name = %q, want old stale", stale["name"])
+	}
+
+	var fresh map[string]any
+	readClaudeSessionMetaFile(t, home, "2222.json", &fresh)
+	if fresh["name"] != "Agent Deck Rename" {
+		t.Errorf("fresh matching metadata name = %q, want Agent Deck Rename", fresh["name"])
+	}
+	nested, ok := fresh["nested"].(map[string]any)
+	if !ok || nested["keep"] != "yes" {
+		t.Errorf("unknown nested field not preserved: %#v", fresh["nested"])
+	}
+	if got, ok := fresh["futureClaudeField"].([]any); !ok || len(got) != 2 || got[0] != "preserve" || got[1] != float64(42) {
+		t.Errorf("unknown array field not preserved: %#v", fresh["futureClaudeField"])
+	}
+
+	var other map[string]any
+	readClaudeSessionMetaFile(t, home, "3333.json", &other)
+	if other["name"] != "do not touch" {
+		t.Errorf("nonmatching metadata name = %q, want do not touch", other["name"])
+	}
+}
+
+func TestSyncClaudeSessionNameIn_MissingMetadataReturnsWarningError(t *testing.T) {
+	home := t.TempDir()
+	err := SyncClaudeSessionNameIn(filepath.Join(home, ".claude"), "missing-sid", "new name")
+	if !errors.Is(err, ErrClaudeSessionMetadataNotFound) {
+		t.Fatalf("SyncClaudeSessionNameIn error = %v, want ErrClaudeSessionMetadataNotFound", err)
+	}
+}
+
+func TestClaudeSessionNameIn_MalformedFreshestMatchDoesNotFallBackToStaleName(t *testing.T) {
+	home := t.TempDir()
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-bad-read", "name": "stale old name", "updatedAt": int64(1000),
+	})
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.WriteFile(filepath.Join(dir, "2222.json"), []byte(`{"sessionId":"sid-bad-read","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed session file: %v", err)
+	}
+
+	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-bad-read"); got != "" {
+		t.Fatalf("ClaudeSessionNameIn = %q, want empty when freshest matching metadata is malformed", got)
+	}
+
+	best, err := freshestClaudeSessionMetaIn(filepath.Join(home, ".claude"), "sid-bad-read")
+	if err == nil {
+		t.Fatalf("freshestClaudeSessionMetaIn unexpectedly returned %+v for malformed freshest match", best)
+	}
+	if errors.Is(err, ErrClaudeSessionMetadataNotFound) {
+		t.Fatalf("freshestClaudeSessionMetaIn error = %v, want actionable malformed/read error", err)
+	}
+}
+
+func TestSyncClaudeSessionNameIn_IgnoresNewerMalformedUnrelatedMetadata(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-target",
+		"name":      "old target name",
+		"updatedAt": int64(1000),
+	})
+	dir := filepath.Join(claudeDir, "sessions")
+	if err := os.WriteFile(filepath.Join(dir, "2222.json"), []byte(`{"sessionId":"sid-other","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed unrelated session file: %v", err)
+	}
+
+	if err := SyncClaudeSessionNameIn(claudeDir, "sid-target", "Agent Deck Rename"); err != nil {
+		t.Fatalf("SyncClaudeSessionNameIn error = %v, want successful update despite unrelated malformed metadata", err)
+	}
+
+	if got := ClaudeSessionNameIn(claudeDir, "sid-target"); got != "Agent Deck Rename" {
+		t.Fatalf("ClaudeSessionNameIn = %q, want Agent Deck Rename", got)
+	}
+}
+
+func TestSyncClaudeSessionNameIn_MalformedFreshestMatchReturnsActionableErrorAndLeavesStaleFileUntouched(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	seedClaudeSessionFile(t, home, "1111.json", map[string]any{
+		"sessionId": "sid-malformed-sync",
+		"name":      "old stale",
+		"updatedAt": int64(1000),
+	})
+	dir := filepath.Join(claudeDir, "sessions")
+	freshPath := filepath.Join(dir, "2222.json")
+	if err := os.WriteFile(freshPath, []byte(`{"sessionId":"sid-malformed-sync","name":`), 0o644); err != nil {
+		t.Fatalf("write malformed session file: %v", err)
+	}
+
+	beforeFresh, err := os.ReadFile(freshPath)
+	if err != nil {
+		t.Fatalf("read malformed session file before sync: %v", err)
+	}
+	if err := SyncClaudeSessionNameIn(claudeDir, "sid-malformed-sync", "Agent Deck Rename"); err == nil {
+		t.Fatal("SyncClaudeSessionNameIn unexpectedly succeeded with malformed freshest matching metadata")
+	} else if errors.Is(err, ErrClaudeSessionMetadataNotFound) {
+		t.Fatalf("SyncClaudeSessionNameIn error = %v, want actionable malformed/read error", err)
+	}
+
+	var stale map[string]any
+	readClaudeSessionMetaFile(t, home, "1111.json", &stale)
+	if stale["name"] != "old stale" {
+		t.Fatalf("stale metadata name = %q, want unchanged old stale", stale["name"])
+	}
+
+	afterFresh, err := os.ReadFile(freshPath)
+	if err != nil {
+		t.Fatalf("read malformed session file after sync: %v", err)
+	}
+	if string(afterFresh) != string(beforeFresh) {
+		t.Fatal("malformed freshest matching metadata should remain untouched on failed sync")
+	}
+}
+
+func TestSyncClaudeSessionNameForInstance_GatesToClaudeCompatibleWithSessionID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	seedClaudeSessionFile(t, home, "1234.json", map[string]any{
+		"sessionId": "sid-inst",
+		"name":      "before",
+		"updatedAt": int64(1000),
+	})
+
+	shellInst := &Instance{Tool: "shell", ClaudeSessionID: "sid-inst", Title: "shell rename"}
+	if err := SyncClaudeSessionNameForInstance(shellInst); err != nil {
+		t.Fatalf("non-Claude-compatible sync returned error: %v", err)
+	}
+	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-inst"); got != "before" {
+		t.Fatalf("non-Claude-compatible sync changed name to %q", got)
+	}
+
+	emptyIDInst := &Instance{Tool: "claude", Title: "empty id rename"}
+	if err := SyncClaudeSessionNameForInstance(emptyIDInst); err != nil {
+		t.Fatalf("empty ClaudeSessionID sync returned error: %v", err)
+	}
+	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-inst"); got != "before" {
+		t.Fatalf("empty ClaudeSessionID sync changed name to %q", got)
+	}
+
+	claudeInst := &Instance{Tool: "claude", ClaudeSessionID: "sid-inst", Title: "locked user rename", TitleLocked: true}
+	if err := SyncClaudeSessionNameForInstance(claudeInst); err != nil {
+		t.Fatalf("Claude-compatible sync returned error: %v", err)
+	}
+	if got := ClaudeSessionNameIn(filepath.Join(home, ".claude"), "sid-inst"); got != "locked user rename" {
+		t.Fatalf("Claude-compatible sync name = %q, want locked user rename", got)
+	}
+}
+
+func readClaudeSessionMetaFile(t *testing.T, home, file string, out any) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "sessions", file))
+	if err != nil {
+		t.Fatalf("read session file %s: %v", file, err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("unmarshal session file %s: %v", file, err)
 	}
 }
 

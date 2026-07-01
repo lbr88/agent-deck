@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,9 +25,12 @@ func TestWebMutatorUpdateSessionReturnsNonFatalCodexSyncWarning(t *testing.T) {
 		t.Fatalf("seed SaveWithGroups: %v", err)
 	}
 
-	changed, restartRequired, err := NewWebMutator(h).UpdateSession(inst.ID, map[string]string{
+	changed, restartRequired, warnings, err := NewWebMutator(h).UpdateSession(inst.ID, map[string]string{
 		session.FieldTitle: "new-title",
 	})
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
 
 	if len(changed) != 1 || changed[0] != session.FieldTitle {
 		t.Fatalf("changed = %#v, want title", changed)
@@ -36,12 +38,8 @@ func TestWebMutatorUpdateSessionReturnsNonFatalCodexSyncWarning(t *testing.T) {
 	if restartRequired {
 		t.Fatal("title rename should not require restart")
 	}
-	var warning *session.NonFatalWarning
-	if !errors.As(err, &warning) {
-		t.Fatalf("err = %v, want NonFatalWarning", err)
-	}
-	if !strings.Contains(warning.Error(), "Codex session name") {
-		t.Fatalf("warning = %v, want Codex session name context", warning)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "Codex session name") {
+		t.Fatalf("warnings = %v, want Codex session name context", warnings)
 	}
 
 	reloaded, _, err := storage.LoadWithGroups()

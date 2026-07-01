@@ -123,7 +123,7 @@ type SessionMutator interface {
 	// fields whose new value differs from the stored value are reported) and
 	// whether any updated field requires a restart to take effect. Validation
 	// errors (unknown field, invalid value) leave the session unchanged.
-	UpdateSession(sessionID string, updates map[string]string) (updatedFields []string, restartRequired bool, err error)
+	UpdateSession(sessionID string, updates map[string]string) (updatedFields []string, restartRequired bool, warnings []string, err error)
 	CreateGroup(name, parentPath string) (string, error)
 	RenameGroup(groupPath, newName string) error
 	DeleteGroup(groupPath string) error
