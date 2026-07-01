@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,33 @@ func TestNewHome(t *testing.T) {
 	}
 }
 
+func writeClaudeImportTranscriptForHome(t *testing.T, configDir, cwd, sessionID string, extraLines ...string) string {
+	t.Helper()
+	projectDir := filepath.Join(configDir, "projects", session.ConvertToClaudeDirName(cwd))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	lines := []string{`{"sessionId":"` + sessionID + `","cwd":"` + cwd + `","timestamp":"2026-06-30T10:00:00Z"}`}
+	lines = append(lines, extraLines...)
+	path := filepath.Join(projectDir, sessionID+".jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	return path
+}
+
+func writeClaudeImportNameForHome(t *testing.T, configDir, file, sessionID, name string, updatedAt int64) {
+	t.Helper()
+	sessionsDir := filepath.Join(configDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	payload := `{"sessionId":"` + sessionID + `","name":"` + name + `","updatedAt":` + strconv.FormatInt(updatedAt, 10) + `}`
+	if err := os.WriteFile(filepath.Join(sessionsDir, file), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write name metadata: %v", err)
+	}
+}
+
 func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -52,6 +80,31 @@ func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 	if got := h.importSourceDialog.CodexCount(); got != 1 {
 		t.Fatalf("codex count = %d, want 1", got)
+	}
+}
+
+func TestHomeClaudeImportHotkeyOpensSourceDialog(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	claudeDir := filepath.Join(homeDir, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	session.ClearUserConfigCache()
+
+	writeClaudeImportTranscriptForHome(t, claudeDir, "/tmp/claude-project", "88888888-8888-8888-8888-888888888888")
+	writeClaudeImportNameForHome(t, claudeDir, "saved.json", "88888888-8888-8888-8888-888888888888", "saved claude", 2000)
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible after import hotkey")
+	}
+	if got := h.importSourceDialog.ClaudeCount(); got != 1 {
+		t.Fatalf("claude count = %d, want 1", got)
 	}
 }
 
@@ -140,6 +193,31 @@ func TestHomeImportHotkeyKeepsTmuxSourceWhenCodexIndexFails(t *testing.T) {
 	}
 }
 
+func TestHomeImportHotkeyKeepsTmuxSourceWhenClaudeLoadFails(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	claudeDir := filepath.Join(homeDir, "broken-file")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	session.ClearUserConfigCache()
+	if err := os.WriteFile(claudeDir, []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should still open import source chooser")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("tmux import source chooser should remain visible when Claude load fails")
+	}
+	if h.err != nil {
+		t.Fatalf("Claude load failure should not block tmux import before Claude is selected, got %v", h.err)
+	}
+}
+
 func TestHomeImportSourceCodexSelectionShowsDeferredIndexError(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -163,6 +241,55 @@ func TestHomeImportSourceCodexSelectionShowsDeferredIndexError(t *testing.T) {
 
 	if h.err == nil || !strings.Contains(h.err.Error(), "line 1") {
 		t.Fatalf("selecting Codex source should surface deferred index error, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceClaudeSelectionShowsDeferredLoadError(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	claudeDir := filepath.Join(homeDir, "broken-file")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	session.ClearUserConfigCache()
+	if err := os.WriteFile(claudeDir, []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "failed to load saved Claude sessions") {
+		t.Fatalf("selecting Claude source should surface deferred load error, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceClaudeSelectionShowsNoSessionsError(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	claudeDir := filepath.Join(homeDir, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	session.ClearUserConfigCache()
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "no saved Claude sessions found") {
+		t.Fatalf("selecting Claude source with no sessions should show a user-facing error, got %v", h.err)
 	}
 }
 
@@ -196,6 +323,41 @@ func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	got := instances[0]
 	if got.Tool != "codex" || got.CodexSessionID != entry.ID || got.Title != entry.ThreadName || got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted Codex import: %#v", got)
+	}
+}
+
+func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	claudeDir := filepath.Join(homeDir, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	session.ClearUserConfigCache()
+	h := NewHomeWithProfile("claude_import_tui")
+	entry := session.ClaudeImportCandidate{
+		SessionID: "99999999-9999-9999-9999-999999999999",
+		Name:      "imported from tui",
+		CWD:       "/tmp/claude-project",
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.claudeImportDialog.Show([]session.ClaudeImportCandidate{entry})
+
+	_, cmd := h.handleClaudeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting a Claude import should create a session command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	instances, _, err := h.storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances=%d, want 1", len(instances))
+	}
+	got := instances[0]
+	if got.Tool != "claude" || got.Command != "claude" || got.ClaudeSessionID != entry.SessionID ||
+		got.Title != entry.Name || got.ProjectPath != entry.CWD || got.Status != session.StatusStopped {
+		t.Fatalf("bad persisted Claude import: %#v", got)
 	}
 }
 
@@ -1325,7 +1487,7 @@ func TestRenderSessionListEmptyUsesConfiguredKeys(t *testing.T) {
 
 	for _, want := range []string{
 		"Press a to create a new session",
-		"Press b to import existing tmux sessions",
+		"Press b to import existing sessions",
 		"Press c to create a group",
 	} {
 		if !strings.Contains(rendered, want) {

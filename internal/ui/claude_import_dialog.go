@@ -10,58 +10,57 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
-type codexImportSubmitMsg struct{}
+type claudeImportSubmitMsg struct{}
 
-// CodexImportDialog lets the user choose a saved Codex session from the Codex
-// session index.
-type CodexImportDialog struct {
+// ClaudeImportDialog lets the user choose a saved Claude session from Claude metadata.
+type ClaudeImportDialog struct {
 	visible  bool
-	entries  []session.CodexIndexEntry
+	entries  []session.ClaudeImportCandidate
 	cursor   int
-	selected *session.CodexIndexEntry
+	selected *session.ClaudeImportCandidate
 	width    int
 	height   int
 }
 
-func NewCodexImportDialog() *CodexImportDialog {
-	return &CodexImportDialog{}
+func NewClaudeImportDialog() *ClaudeImportDialog {
+	return &ClaudeImportDialog{}
 }
 
-func (d *CodexImportDialog) Show(entries []session.CodexIndexEntry) {
+func (d *ClaudeImportDialog) Show(entries []session.ClaudeImportCandidate) {
 	d.visible = true
 	d.entries = append(d.entries[:0], entries...)
 	d.cursor = 0
 	d.selected = nil
 }
 
-func (d *CodexImportDialog) Hide() {
+func (d *ClaudeImportDialog) Hide() {
 	d.visible = false
 	d.entries = nil
 	d.cursor = 0
 	d.selected = nil
 }
 
-func (d *CodexImportDialog) Visible() bool {
+func (d *ClaudeImportDialog) Visible() bool {
 	return d.visible
 }
 
-func (d *CodexImportDialog) IsVisible() bool {
+func (d *ClaudeImportDialog) IsVisible() bool {
 	return d.visible
 }
 
-func (d *CodexImportDialog) SetSize(width, height int) {
+func (d *ClaudeImportDialog) SetSize(width, height int) {
 	d.width = width
 	d.height = height
 }
 
-func (d *CodexImportDialog) Selected() (session.CodexIndexEntry, bool) {
+func (d *ClaudeImportDialog) Selected() (session.ClaudeImportCandidate, bool) {
 	if d.selected == nil {
-		return session.CodexIndexEntry{}, false
+		return session.ClaudeImportCandidate{}, false
 	}
 	return *d.selected, true
 }
 
-func (d *CodexImportDialog) Update(msg tea.Msg) (*CodexImportDialog, tea.Cmd) {
+func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) {
 	if !d.visible {
 		return d, nil
 	}
@@ -87,12 +86,12 @@ func (d *CodexImportDialog) Update(msg tea.Msg) (*CodexImportDialog, tea.Cmd) {
 		}
 		selected := d.entries[d.cursor]
 		d.selected = &selected
-		return d, func() tea.Msg { return codexImportSubmitMsg{} }
+		return d, func() tea.Msg { return claudeImportSubmitMsg{} }
 	}
 	return d, nil
 }
 
-func (d *CodexImportDialog) View() string {
+func (d *ClaudeImportDialog) View() string {
 	if !d.visible {
 		return ""
 	}
@@ -104,19 +103,19 @@ func (d *CodexImportDialog) View() string {
 	footerStyle := lipgloss.NewStyle().Foreground(ColorComment).Italic(true)
 
 	var lines []string
-	lines = append(lines, titleStyle.Render("Import Saved Codex Session"))
+	lines = append(lines, titleStyle.Render("Import Saved Claude Session"))
 	lines = append(lines, "")
 	if len(d.entries) == 0 {
-		lines = append(lines, dimStyle.Render("No saved Codex sessions found."))
+		lines = append(lines, dimStyle.Render("No saved Claude sessions found."))
 	} else {
 		for i, entry := range d.entries {
-			title := strings.TrimSpace(entry.ThreadName)
+			title := strings.TrimSpace(entry.Name)
 			if title == "" {
-				title = shortCodexID(entry.ID)
+				title = shortClaudeImportID(entry.SessionID)
 			}
 			row := fmt.Sprintf("%s  %s  %s",
 				title,
-				dimStyle.Render(shortCodexID(entry.ID)),
+				dimStyle.Render(shortClaudeImportID(entry.SessionID)),
 				dimStyle.Render(entry.UpdatedAt.Local().Format("2006-01-02 15:04")),
 			)
 			if i == d.cursor {
@@ -129,12 +128,12 @@ func (d *CodexImportDialog) View() string {
 	lines = append(lines, "")
 	lines = append(lines, footerStyle.Render("Enter import | Esc cancel | j/k navigate"))
 
-	dialogWidth := fitDialogWidth(72, 44, d.width)
+	dialogWidth := fitDialogWidth(76, 44, d.width)
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)
 }
 
-func shortCodexID(id string) string {
+func shortClaudeImportID(id string) string {
 	id = strings.TrimSpace(id)
 	if len(id) <= 8 {
 		return id

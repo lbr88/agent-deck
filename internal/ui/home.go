@@ -251,10 +251,13 @@ type Home struct {
 	worktreeFinishDialog *WorktreeFinishDialog // For finishing worktree sessions (merge + cleanup)
 	feedbackDialog       *FeedbackDialog       // For in-app feedback popup (Phase 2)
 	zoxidePicker         *ZoxidePicker         // Quick-open picker backed by the zoxide DB
-	importSourceDialog   *ImportSourceDialog   // Chooses between existing tmux and saved Codex imports
+	importSourceDialog   *ImportSourceDialog   // Chooses between existing tmux and saved session imports
 	codexImportDialog    *CodexImportDialog    // Picks a saved Codex session to import
 	codexImportEntries   []session.CodexIndexEntry
 	codexImportErr       error
+	claudeImportDialog   *ClaudeImportDialog // Picks a saved Claude session to import
+	claudeImportEntries  []session.ClaudeImportCandidate
+	claudeImportErr      error
 	feedbackState        *feedback.State      // Loaded at first show, avoids repeated disk I/O
 	feedbackSender       *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
 	watcherPanel         *WatcherPanel        // For showing watcher status and events
@@ -875,6 +878,13 @@ type codexImportEntriesLoadedMsg struct {
 	err     error
 }
 
+type importSourcesLoadedMsg struct {
+	codexEntries  []session.CodexIndexEntry
+	codexErr      error
+	claudeEntries []session.ClaudeImportCandidate
+	claudeErr     error
+}
+
 type sessionForkedMsg struct {
 	instance *session.Instance
 	sourceID string // ID of the source session that was forked (for cleanup)
@@ -919,6 +929,11 @@ type openCodeDetectionCompleteMsg struct {
 
 type updateCheckMsg struct {
 	info *update.UpdateInfo
+}
+
+type claudeImportEntriesLoadedMsg struct {
+	entries []session.ClaudeImportCandidate
+	err     error
 }
 
 type (
@@ -1114,6 +1129,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		zoxidePicker:              NewZoxidePicker(),
 		importSourceDialog:        NewImportSourceDialog(),
 		codexImportDialog:         NewCodexImportDialog(),
+		claudeImportDialog:        NewClaudeImportDialog(),
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -4545,6 +4561,26 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, h.fetchPreview(inst, key, winIdx)
 
+	case importSourcesLoadedMsg:
+		h.codexImportErr = msg.codexErr
+		if msg.codexErr != nil {
+			h.codexImportEntries = nil
+		} else {
+			h.codexImportEntries = msg.codexEntries
+		}
+		h.claudeImportErr = msg.claudeErr
+		if msg.claudeErr != nil {
+			h.claudeImportEntries = nil
+		} else {
+			h.claudeImportEntries = append(h.claudeImportEntries[:0], msg.claudeEntries...)
+		}
+		h.importSourceDialog.Show(ImportSourceCounts{
+			Codex:  len(h.codexImportEntries),
+			Claude: len(h.claudeImportEntries),
+		})
+		h.importSourceDialog.SetSize(h.width, h.height)
+		return h, nil
+
 	case codexImportEntriesLoadedMsg:
 		h.codexImportErr = msg.err
 		if msg.err != nil {
@@ -4552,7 +4588,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.codexImportEntries = msg.entries
 		}
-		h.importSourceDialog.Show(len(h.codexImportEntries))
+		h.importSourceDialog.Show(ImportSourceCounts{
+			Codex:  len(h.codexImportEntries),
+			Claude: len(h.claudeImportEntries),
+		})
 		h.importSourceDialog.SetSize(h.width, h.height)
 		return h, nil
 
@@ -6074,6 +6113,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case claudeImportEntriesLoadedMsg:
+		h.claudeImportEntries = append(h.claudeImportEntries[:0], msg.entries...)
+		h.claudeImportErr = msg.err
+		h.importSourceDialog.Show(ImportSourceCounts{
+			Codex:  len(h.codexImportEntries),
+			Claude: len(h.claudeImportEntries),
+		})
+		h.importSourceDialog.SetSize(h.width, h.height)
+		return h, nil
+
 	case tea.KeyMsg:
 		// Track user activity for adaptive status updates
 		h.lastUserInputTime = time.Now()
@@ -6209,6 +6258,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.codexImportDialog != nil && h.codexImportDialog.IsVisible() {
 			return h.handleCodexImportDialogKey(msg)
+		}
+		if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
+			return h.handleClaudeImportDialogKey(msg)
 		}
 		if h.newDialog.IsVisible() {
 			return h.handleNewDialogKey(msg)
@@ -12004,14 +12056,28 @@ func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
+	msg := importSourcesLoadedMsg{}
+
 	codexHome := defaultCodexImportHome()
-	entries, err := session.ListCodexIndex(codexHome)
+	codexEntries, err := session.ListCodexIndex(codexHome)
 	if err != nil {
-		return codexImportEntriesLoadedMsg{err: err}
+		msg.codexErr = err
+	} else {
+		msg.codexEntries = codexImportEntriesWithRollout(codexHome, codexEntries)
 	}
-	return codexImportEntriesLoadedMsg{
-		entries: codexImportEntriesWithRollout(codexHome, entries),
+
+	claudeConfigDir := session.GetClaudeConfigDirForInstance(&session.Instance{
+		Tool:      "claude",
+		GroupPath: h.resolveNewSessionGroup(),
+	})
+	claudeEntries, err := session.ListClaudeImportCandidates(claudeConfigDir)
+	if err != nil {
+		msg.claudeErr = err
+	} else {
+		msg.claudeEntries = claudeEntries
 	}
+
+	return msg
 }
 
 func defaultCodexImportHome() string {
@@ -12052,6 +12118,18 @@ func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		h.codexImportDialog.Show(h.codexImportEntries)
 		h.codexImportDialog.SetSize(h.width, h.height)
 		return h, nil
+	case importSourceClaude:
+		if h.claudeImportErr != nil {
+			h.setError(fmt.Errorf("failed to load saved Claude sessions: %w", h.claudeImportErr))
+			return h, nil
+		}
+		if len(h.claudeImportEntries) == 0 {
+			h.setError(fmt.Errorf("no saved Claude sessions found"))
+			return h, nil
+		}
+		h.claudeImportDialog.Show(h.claudeImportEntries)
+		h.claudeImportDialog.SetSize(h.width, h.height)
+		return h, nil
 	default:
 		return h, nil
 	}
@@ -12088,6 +12166,50 @@ func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.C
 		inst.Command = "codex"
 		inst.CodexSessionID = strings.ToLower(strings.TrimSpace(entry.ID))
 		inst.CodexDetectedAt = entry.UpdatedAt
+		inst.Status = session.StatusStopped
+		return sessionCreatedMsg{instance: inst}
+	}
+}
+
+func (h *Home) handleClaudeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.claudeImportDialog, cmd = h.claudeImportDialog.Update(msg)
+	entry, ok := h.claudeImportDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+	h.claudeImportDialog.Hide()
+	return h, h.createSessionFromClaudeImport(entry)
+}
+
+func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate) tea.Cmd {
+	return func() tea.Msg {
+		sessionID := strings.TrimSpace(entry.SessionID)
+		if sessionID == "" {
+			return sessionCreatedMsg{err: fmt.Errorf("Claude session id is required")}
+		}
+
+		title := strings.TrimSpace(entry.Name)
+		if title == "" {
+			title = shortClaudeImportID(sessionID)
+		}
+
+		projectPath := strings.TrimSpace(entry.CWD)
+		if projectPath == "" {
+			projectPath = strings.TrimSpace(entry.Path)
+		}
+		if projectPath == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return sessionCreatedMsg{err: err}
+			}
+			projectPath = cwd
+		}
+
+		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "claude")
+		inst.Command = "claude"
+		inst.ClaudeSessionID = sessionID
+		inst.ClaudeDetectedAt = entry.UpdatedAt
 		inst.Status = session.StatusStopped
 		return sessionCreatedMsg{instance: inst}
 	}
@@ -12344,6 +12466,12 @@ func (h *Home) renderFilterBar() string {
 // updateSizes updates component sizes
 func (h *Home) updateSizes() {
 	h.search.SetSize(h.width, h.height)
+	if h.importSourceDialog != nil {
+		h.importSourceDialog.SetSize(h.width, h.height)
+	}
+	if h.claudeImportDialog != nil {
+		h.claudeImportDialog.SetSize(h.width, h.height)
+	}
 	h.newDialog.SetSize(h.width, h.height)
 	h.groupDialog.SetSize(h.width, h.height)
 	h.confirmDialog.SetSize(h.width, h.height)
@@ -12442,6 +12570,9 @@ func (h *Home) View() string {
 	}
 	if h.codexImportDialog != nil && h.codexImportDialog.IsVisible() {
 		return h.codexImportDialog.View()
+	}
+	if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
+		return h.claudeImportDialog.View()
 	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
@@ -14378,7 +14509,7 @@ func (h *Home) renderSessionList(width, height int) string {
 			hints = append(hints, fmt.Sprintf("Press %s to create a new session", key))
 		}
 		if key := h.actionKey(hotkeyImport); key != "" {
-			hints = append(hints, fmt.Sprintf("Press %s to import existing tmux sessions", key))
+			hints = append(hints, fmt.Sprintf("Press %s to import existing sessions", key))
 		}
 		if key := h.actionKey(hotkeyCreateGroup); key != "" {
 			hints = append(hints, fmt.Sprintf("Press %s to create a group", key))
@@ -15783,7 +15914,7 @@ func (h *Home) renderPreviewPane(width, height int) string {
 				hints = append(hints, fmt.Sprintf("Press %s to create your first session", key))
 			}
 			if key := h.actionKey(hotkeyImport); key != "" {
-				hints = append(hints, fmt.Sprintf("Press %s to import tmux sessions", key))
+				hints = append(hints, fmt.Sprintf("Press %s to import sessions", key))
 			}
 			if len(hints) == 0 {
 				hints = append(hints, "Create or import sessions to get started")

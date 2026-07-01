@@ -749,7 +749,7 @@
   {
    "id": "CAP-TUI-026",
    "area": "TUI",
-   "name": "Import tmux sessions (i) and manual reload (ctrl+r)",
+   "name": "Import sessions (i) and manual reload (ctrl+r)",
    "surfaces_raw": "TUI",
    "surfaces": [
     "TUI"
@@ -3296,7 +3296,7 @@
   {
    "id": "CAP-TUI-026",
    "area": "TUI",
-   "name": "Import tmux sessions (i) and manual reload (ctrl+r)",
+   "name": "Import sessions (i) and manual reload (ctrl+r)",
    "surface": "TUI",
    "automated_test": "",
    "user_verified": "2026-06-11",

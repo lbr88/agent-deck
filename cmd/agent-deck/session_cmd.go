@@ -49,6 +49,8 @@ func handleSession(profile string, args []string) {
 		handleSessionFork(profile, args[1:])
 	case "import-codex":
 		handleSessionImportCodex(profile, args[1:])
+	case "import-claude":
+		handleSessionImportClaude(profile, args[1:])
 	case "attach":
 		handleSessionAttach(profile, args[1:])
 	case "show":
@@ -105,6 +107,7 @@ func printSessionHelp() {
 	fmt.Println("  revive [--all|--name]   Rebuild dead control pipes for errored sessions")
 	fmt.Println("  fork <id>               Fork Claude, OpenCode, Pi, or Codex session with context")
 	fmt.Println("  import-codex <id|name>  Import an existing saved Codex session")
+	fmt.Println("  import-claude <id|name> Import an existing Claude Code session")
 	fmt.Println("  attach <id>             Attach to session interactively")
 	fmt.Println("  show [id]               Show session details (auto-detect current if no id)")
 	fmt.Println("  current                 Show current session and profile (auto-detect)")
@@ -132,6 +135,7 @@ func printSessionHelp() {
 	fmt.Println("  agent-deck session restart my-project")
 	fmt.Println("  agent-deck session restart --all                # Restart all active sessions")
 	fmt.Println("  agent-deck session fork my-project -t \"my-project-fork\"")
+	fmt.Println("  agent-deck session import-claude 11111111-2222-3333-4444-555555555555")
 	fmt.Println("  agent-deck session attach my-project")
 	fmt.Println("  agent-deck session show                  # Auto-detect current session")
 	fmt.Println("  agent-deck session show my-project --json")
@@ -158,6 +162,243 @@ func printSessionHelp() {
 	fmt.Println("  agent-deck session set my-project claude-session-id \"abc123-def456\"")
 	fmt.Println("  agent-deck session set my-project tool claude")
 	fmt.Println("  agent-deck session set my-project wrapper \"nvim +'terminal {command}'\"")
+}
+
+type importClaudeSessionOptions struct {
+	Target      string
+	Title       string
+	GroupPath   string
+	ProjectPath string
+	Start       bool
+}
+
+type importClaudeSessionResult struct {
+	Instance  *session.Instance
+	Candidate *session.ClaudeImportCandidate
+	Started   bool
+}
+
+type importClaudeSessionDeps struct {
+	load    func(string) (*session.Storage, []*session.Instance, []*session.GroupData, error)
+	save    func(*session.Storage, []*session.Instance, []*session.GroupData) error
+	resolve func(string, string) (*session.ClaudeImportCandidate, error)
+	cwd     func() (string, error)
+	start   func(*session.Instance) error
+}
+
+func (d importClaudeSessionDeps) withDefaults() importClaudeSessionDeps {
+	if d.load == nil {
+		d.load = loadSessionData
+	}
+	if d.save == nil {
+		d.save = saveSessionData
+	}
+	if d.resolve == nil {
+		d.resolve = session.ResolveClaudeImportTarget
+	}
+	if d.cwd == nil {
+		d.cwd = os.Getwd
+	}
+	if d.start == nil {
+		d.start = func(inst *session.Instance) error {
+			return inst.Start()
+		}
+	}
+	return d
+}
+
+func importClaudeSession(profile string, opts importClaudeSessionOptions, deps importClaudeSessionDeps) (*importClaudeSessionResult, error) {
+	deps = deps.withDefaults()
+	target := strings.TrimSpace(opts.Target)
+	if target == "" {
+		return nil, fmt.Errorf("Claude session id or name is required")
+	}
+
+	groupPath := strings.TrimSpace(opts.GroupPath)
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	} else {
+		groupPath = normalizeGroupPath(groupPath)
+	}
+
+	storage, instances, groups, err := deps.load(profile)
+	if err != nil {
+		return nil, err
+	}
+
+	configDir := session.GetClaudeConfigDirForInstance(&session.Instance{
+		Tool:      "claude",
+		GroupPath: groupPath,
+	})
+	candidate, err := deps.resolve(configDir, target)
+	if err != nil {
+		return nil, err
+	}
+	if candidate == nil || strings.TrimSpace(candidate.SessionID) == "" {
+		return nil, fmt.Errorf("Claude session %q not found", target)
+	}
+
+	projectPath, err := resolveImportClaudeProjectPath(opts.ProjectPath, candidate.CWD, candidate.Path, deps.cwd)
+	if err != nil {
+		return nil, err
+	}
+	title := resolveImportClaudeTitle(opts.Title, candidate.Name, candidate.SessionID)
+
+	inst := session.NewInstanceWithGroupAndTool(title, projectPath, groupPath, "claude")
+	inst.Command = "claude"
+	inst.ClaudeSessionID = strings.TrimSpace(candidate.SessionID)
+	if !candidate.UpdatedAt.IsZero() {
+		inst.ClaudeDetectedAt = candidate.UpdatedAt
+	} else {
+		inst.ClaudeDetectedAt = time.Now()
+	}
+	inst.Status = session.StatusStopped
+
+	instances = append(instances, inst)
+	if err := deps.save(storage, instances, groups); err != nil {
+		return nil, err
+	}
+
+	result := &importClaudeSessionResult{Instance: inst, Candidate: candidate}
+	if opts.Start {
+		if err := deps.start(inst); err != nil {
+			return nil, fmt.Errorf("failed to start imported Claude session: %w", err)
+		}
+		result.Started = true
+		if err := deps.save(storage, instances, groups); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func resolveImportClaudeProjectPath(explicitPath, transcriptCWD, metadataPath string, cwd func() (string, error)) (string, error) {
+	if strings.TrimSpace(explicitPath) != "" {
+		return resolveAddPath(explicitPath)
+	}
+	if strings.TrimSpace(transcriptCWD) != "" {
+		return strings.TrimSpace(transcriptCWD), nil
+	}
+	if strings.TrimSpace(metadataPath) != "" {
+		return strings.TrimSpace(metadataPath), nil
+	}
+	if cwd == nil {
+		cwd = os.Getwd
+	}
+	return cwd()
+}
+
+func resolveImportClaudeTitle(explicitTitle, claudeName, sessionID string) string {
+	if title := strings.TrimSpace(explicitTitle); title != "" {
+		return title
+	}
+	if name := strings.TrimSpace(claudeName); name != "" {
+		return name
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if len(sessionID) <= 8 {
+		return sessionID
+	}
+	return sessionID[:8]
+}
+
+func handleSessionImportClaude(profile string, args []string) {
+	fs := flag.NewFlagSet("session import-claude", flag.ExitOnError)
+	title := fs.String("title", "", "Title for the imported Agent Deck session")
+	titleShort := fs.String("t", "", "Title for the imported Agent Deck session (short)")
+	group := fs.String("group", "", "Group path for the imported session")
+	groupShort := fs.String("g", "", "Group path for the imported session (short)")
+	path := fs.String("path", "", "Project path for the imported session")
+	start := fs.Bool("start", false, "Start the imported session after saving it")
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	quiet := fs.Bool("quiet", false, "Minimal output")
+	quietShort := fs.Bool("q", false, "Minimal output (short)")
+
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck session import-claude <session-id-or-name> [options]")
+		fmt.Println()
+		fmt.Println("Import an existing Claude Code session without reading transcript content.")
+		fmt.Println()
+		fmt.Println("Options:")
+		fs.PrintDefaults()
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  agent-deck session import-claude 11111111-2222-3333-4444-555555555555")
+		fmt.Println("  agent-deck session import-claude \"Plan worker\" --group work --start")
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	quietMode := *quiet || *quietShort
+	out := NewCLIOutput(*jsonOutput, quietMode)
+	target := fs.Arg(0)
+	if strings.TrimSpace(target) == "" {
+		out.Error("Claude session id or name is required", ErrCodeNotFound)
+		os.Exit(2)
+	}
+
+	result, err := importClaudeSession(profile, importClaudeSessionOptions{
+		Target:      target,
+		Title:       mergeFlags(*title, *titleShort),
+		GroupPath:   mergeFlags(*group, *groupShort),
+		ProjectPath: *path,
+		Start:       *start,
+	}, importClaudeSessionDeps{})
+	if err != nil {
+		code := ErrCodeInvalidOperation
+		exitCode := 1
+		extra := map[string]interface{}(nil)
+		var resolveErr *session.ClaudeImportResolveError
+		if errors.As(err, &resolveErr) {
+			switch resolveErr.Kind {
+			case session.ClaudeImportResolveAmbiguous:
+				code = ErrCodeAmbiguous
+				extra = map[string]interface{}{"candidates": claudeImportCandidateJSON(resolveErr.Candidates)}
+			case session.ClaudeImportResolveNotFound:
+				code = ErrCodeNotFound
+				exitCode = 2
+			}
+		}
+		out.ErrorWithData(err.Error(), code, extra)
+		os.Exit(exitCode)
+	}
+
+	out.Success(
+		fmt.Sprintf("Imported Claude session: %s", result.Instance.Title),
+		importClaudeResultJSON(result),
+	)
+}
+
+func importClaudeResultJSON(result *importClaudeSessionResult) map[string]interface{} {
+	inst := result.Instance
+	return map[string]interface{}{
+		"success":           true,
+		"id":                inst.ID,
+		"title":             inst.Title,
+		"status":            string(inst.Status),
+		"tool":              inst.Tool,
+		"command":           inst.Command,
+		"claude_session_id": inst.ClaudeSessionID,
+		"project_path":      inst.ProjectPath,
+		"group_path":        inst.GroupPath,
+		"started":           result.Started,
+	}
+}
+
+func claudeImportCandidateJSON(candidates []session.ClaudeImportCandidate) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, map[string]interface{}{
+			"session_id": c.SessionID,
+			"name":       c.Name,
+			"cwd":        c.CWD,
+			"path":       c.Path,
+			"updated_at": c.UpdatedAt,
+		})
+	}
+	return out
 }
 
 // handleSessionStart starts a session's tmux process

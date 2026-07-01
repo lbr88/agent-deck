@@ -35,6 +35,7 @@ func channelsCLIBinary(t *testing.T) string {
 	bin := filepath.Join(binDir, "agent-deck-test")
 
 	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Env = append(filteredCLIEnvForHome(filepath.Join("/var/tmp", "agent-deck-cli-build-home")), cliBuildCacheEnv(t)...)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\noutput: %s", err, out)
 	}
@@ -54,35 +55,10 @@ func runAgentDeck(
 
 	bin := channelsCLIBinary(t)
 	cmd := exec.Command(bin, args...)
-
-	// Strip TMUX*/AGENTDECK_*/HOME from parent so the test isolation is
-	// total — same pattern used by TestLogCgroupIsolationDecision_*
-	// in cgroup_isolation_wiring_test.go:60-78.
-	var env []string
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "TMUX") {
-			continue
-		}
-		if strings.HasPrefix(kv, "AGENTDECK_") {
-			continue
-		}
-		if strings.HasPrefix(kv, "HOME=") {
-			continue
-		}
-		// Strip CLAUDE_CONFIG_DIR so the test's isolated HOME/.claude is the
-		// effective Claude config dir — otherwise session search leaks into
-		// the developer's real ~/.claude/projects tree. Added for #483.
-		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env,
-		"HOME="+home,
+	cmd.Env = append(filteredCLIEnvForHome(home),
 		"AGENTDECK_PROFILE=ch_support_test",
 		"TERM=dumb",
 	)
-	cmd.Env = env
 
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout = &outBuf
@@ -96,6 +72,61 @@ func runAgentDeck(
 		}
 	}
 	return outBuf.String(), errBuf.String(), exitCode
+}
+
+func filteredCLIEnvForHome(home string) []string {
+	xdgConfigHome := filepath.Join(home, ".config")
+	xdgDataHome := filepath.Join(home, ".local", "share")
+	xdgCacheHome := filepath.Join(home, ".cache")
+	xdgStateHome := filepath.Join(home, ".local", "state")
+	claudeConfigDir := filepath.Join(home, ".claude")
+
+	var env []string
+	for _, kv := range os.Environ() {
+		switch {
+		case strings.HasPrefix(kv, "TMUX"),
+			strings.HasPrefix(kv, "AGENTDECK_"),
+			strings.HasPrefix(kv, "HOME="),
+			strings.HasPrefix(kv, "XDG_CONFIG_HOME="),
+			strings.HasPrefix(kv, "XDG_DATA_HOME="),
+			strings.HasPrefix(kv, "XDG_CACHE_HOME="),
+			strings.HasPrefix(kv, "XDG_STATE_HOME="),
+			strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR="):
+			continue
+		}
+		env = append(env, kv)
+	}
+
+	env = append(env,
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+xdgConfigHome,
+		"XDG_DATA_HOME="+xdgDataHome,
+		"XDG_CACHE_HOME="+xdgCacheHome,
+		"XDG_STATE_HOME="+xdgStateHome,
+		"CLAUDE_CONFIG_DIR="+claudeConfigDir,
+	)
+	return env
+}
+
+func cliBuildCacheEnv(t *testing.T) []string {
+	t.Helper()
+	root := filepath.Join("/var/tmp", "agent-deck-cli-build-cache")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir build cache root: %v", err)
+	}
+	gocache := filepath.Join(root, "gocache")
+	gomodcache := filepath.Join(root, "gomodcache")
+	gopath := filepath.Join(root, "gopath")
+	for _, dir := range []string{gocache, gomodcache, gopath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir build cache dir %s: %v", dir, err)
+		}
+	}
+	return []string{
+		"GOCACHE=" + gocache,
+		"GOMODCACHE=" + gomodcache,
+		"GOPATH=" + gopath,
+	}
 }
 
 // readSessionsJSON reads the persisted sessions for the test profile.
