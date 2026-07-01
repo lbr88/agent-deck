@@ -102,13 +102,23 @@ func (d *ClaudeImportDialog) View() string {
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 	footerStyle := lipgloss.NewStyle().Foreground(ColorComment).Italic(true)
 
+	dialogWidth := fitDialogWidth(96, 44, d.width)
+	innerWidth := importDialogInnerWidth(dialogWidth)
+	fit := func(s string) string { return cellTruncate(s, innerWidth, "…") }
+
 	var lines []string
-	lines = append(lines, titleStyle.Render("Import Saved Claude Session"))
+	lines = append(lines, fit(titleStyle.Render("Import Saved Claude Session")))
 	lines = append(lines, "")
 	if len(d.entries) == 0 {
-		lines = append(lines, dimStyle.Render("No saved Claude sessions found."))
+		lines = append(lines, fit(dimStyle.Render("No saved Claude sessions found.")))
 	} else {
-		for i, entry := range d.entries {
+		visibleRows := savedSessionImportVisibleRows(d.height)
+		start, end := windowBounds(d.cursor, len(d.entries), visibleRows)
+		if start > 0 {
+			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↑ %d more", start))))
+		}
+		for i := start; i < end; i++ {
+			entry := d.entries[i]
 			title := strings.TrimSpace(entry.Name)
 			if title == "" {
 				title = shortClaudeImportID(entry.SessionID)
@@ -122,16 +132,18 @@ func (d *ClaudeImportDialog) View() string {
 				row += "  " + dimStyle.Render(path)
 			}
 			if i == d.cursor {
-				lines = append(lines, "> "+selectedStyle.Render(row))
+				lines = append(lines, fit("> "+selectedStyle.Render(row)))
 			} else {
-				lines = append(lines, "  "+normalStyle.Render(row))
+				lines = append(lines, fit("  "+normalStyle.Render(row)))
 			}
+		}
+		if end < len(d.entries) {
+			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(d.entries)-end))))
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, footerStyle.Render("Enter import | Esc cancel | j/k navigate"))
+	lines = append(lines, fit(footerStyle.Render("Enter import | Esc cancel | j/k navigate")))
 
-	dialogWidth := fitDialogWidth(96, 44, d.width)
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)
 }
