@@ -26,5 +26,10 @@ export async function apiFetch(method, path, body) {
     if (method !== 'GET') addToast(msg)
     throw new Error(msg)
   }
+  if (method !== 'GET' && Array.isArray(data?.warnings)) {
+    for (const warning of data.warnings) {
+      if (warning) addToast(warning, 'info')
+    }
+  }
   return data
 }

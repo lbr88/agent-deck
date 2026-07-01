@@ -2,6 +2,8 @@ package session
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,58 @@ func TestSetField_Title_LocksTitle(t *testing.T) {
 	}
 	if inst.TitleLocked {
 		t.Error("TitleLocked = true after explicit unlock, want false")
+	}
+}
+
+func TestSetFieldTitleCodexReturnsPostCommitIndexSync(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	inst := NewInstanceWithTool("old", t.TempDir(), "codex")
+	inst.CodexSessionID = "66666666-6666-6666-6666-666666666666"
+
+	old, postCommit, err := SetField(inst, FieldTitle, "new title", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old != "old" || inst.Title != "new title" {
+		t.Fatalf("rename failed old=%q title=%q", old, inst.Title)
+	}
+	if postCommit == nil {
+		t.Fatal("codex title rename should return postCommit")
+	}
+
+	postCommit()
+
+	entries := readCodexIndexRecords(t, home)
+	if len(entries) != 1 || entries[0].ThreadName != "new title" {
+		t.Fatalf("codex index not synced: %#v", entries)
+	}
+}
+
+func TestSetFieldTitleCodexPostCommitReturnsSyncError(t *testing.T) {
+	homeFile := filepath.Join(t.TempDir(), "codex-home-file")
+	if err := os.WriteFile(homeFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write codex home file: %v", err)
+	}
+	t.Setenv("CODEX_HOME", homeFile)
+
+	inst := NewInstanceWithTool("old", t.TempDir(), "codex")
+	inst.CodexSessionID = "66666666-6666-6666-6666-666666666666"
+
+	_, postCommit, err := SetField(inst, FieldTitle, "new title", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postCommit == nil {
+		t.Fatal("codex title rename should return postCommit")
+	}
+
+	err = postCommit()
+	if err == nil {
+		t.Fatal("postCommit error = nil, want Codex sync failure")
+	}
+	if !strings.Contains(err.Error(), "Codex session name") {
+		t.Fatalf("postCommit error = %v, want Codex session name context", err)
 	}
 }
 
@@ -472,4 +526,21 @@ func TestSetField_ToolSessionID_ClearStillAllowed(t *testing.T) {
 	if cx.CodexSessionID != "" {
 		t.Fatalf("CodexSessionID should clear, got %q", cx.CodexSessionID)
 	}
+}
+
+func readCodexIndexRecords(t *testing.T, home string) []codexIndexLine {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(home, "session_index.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []codexIndexLine
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec codexIndexLine
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, rec)
+	}
+	return entries
 }

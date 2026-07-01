@@ -323,19 +323,25 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request, sess
 	}
 
 	changed, restartRequired, err := s.mutator.UpdateSession(sessionID, updates)
+	var warnings []string
 	if err != nil {
 		// session.MutationError signals client-side bad input; "not found"
 		// signals an unknown id. Everything else is a 500.
 		var mutErr *session.MutationError
+		var warning *session.NonFatalWarning
 		switch {
+		case errors.As(err, &warning):
+			warnings = append(warnings, warning.Error())
 		case errors.As(err, &mutErr):
 			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+			return
 		case strings.HasPrefix(err.Error(), "session not found"):
 			writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+			return
 		default:
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+			return
 		}
-		return
 	}
 
 	if len(changed) > 0 {
@@ -345,6 +351,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request, sess
 		SessionID:       sessionID,
 		UpdatedFields:   changed,
 		RestartRequired: restartRequired,
+		Warnings:        warnings,
 	})
 }
 

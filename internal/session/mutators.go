@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,16 +127,16 @@ func normalizeToolSessionID(field, value string) (string, error) {
 // SetField is the single source of truth for session metadata edits — both
 // `agent-deck session set` and the TUI EditSessionDialog call it.
 //
-// postCommit is non-nil for fields that need a slow tmux subprocess
-// (claude/gemini session-id env propagation). TUI callers must drop
-// instancesMu before invoking it so the subprocess doesn't stall background
-// readers; CLI callers run it inline.
+// postCommit is non-nil for fields that need a slow side effect after
+// persistence (claude/gemini session-id env propagation, Codex rename sync).
+// TUI callers must drop instancesMu before invoking it so the subprocess
+// doesn't stall background readers; CLI callers run it inline.
 //
 // extraArgsTokens supplies pre-tokenized argv for FieldExtraArgs (CLI path);
 // when nil, FieldExtraArgs falls back to strings.Fields(value) (TUI path).
 //
 // Persistence is the caller's responsibility.
-func SetField(inst *Instance, field, value string, extraArgsTokens []string) (oldValue string, postCommit func(), err error) {
+func SetField(inst *Instance, field, value string, extraArgsTokens []string) (oldValue string, postCommit func() error, err error) {
 	switch field {
 	case FieldTitle:
 		oldValue = inst.Title
@@ -146,6 +147,21 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		// next hook event. Unlock via `session set <id> title-locked false`.
 		inst.TitleLocked = true
 		inst.SyncTmuxDisplayName()
+		if IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "" && strings.TrimSpace(value) != "" {
+			codexHome := inst.getCodexHomeDir()
+			sessionID := inst.CodexSessionID
+			title := inst.Title
+			postCommit = func() error {
+				if err := AppendCodexSessionIndexName(codexHome, sessionID, title, time.Now()); err != nil {
+					sessionLog.Warn("codex_session_name_sync_failed",
+						slog.String("session_id", sessionID),
+						slog.String("title", title),
+						slog.String("error", err.Error()))
+					return fmt.Errorf("Codex session name sync failed: %w", err)
+				}
+				return nil
+			}
+		}
 
 	case FieldPath:
 		oldValue = inst.ProjectPath
@@ -450,16 +466,19 @@ func setClaudeOptionBool(inst *Instance, field, value string, get func(*ClaudeOp
 // ID to a running tmux session via `tmux set-environment`. nil when no
 // tmux session is bound; captures sess+socket+value so the closure can run
 // after the caller drops instancesMu.
-func makeSessionEnvPostCommit(inst *Instance, envName, value string) func() {
+func makeSessionEnvPostCommit(inst *Instance, envName, value string) func() error {
 	tmuxSess := inst.GetTmuxSession()
 	if tmuxSess == nil {
 		return nil
 	}
 	socket := inst.TmuxSocketName
-	return func() {
+	return func() error {
 		if tmuxSess.Exists() {
-			_ = tmux.Exec(socket, "set-environment", "-t", tmuxSess.Name, envName, value).Run()
+			if err := tmux.Exec(socket, "set-environment", "-t", tmuxSess.Name, envName, value).Run(); err != nil {
+				return fmt.Errorf("sync %s to tmux session: %w", envName, err)
+			}
 		}
+		return nil
 	}
 }
 

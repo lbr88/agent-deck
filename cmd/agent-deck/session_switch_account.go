@@ -114,10 +114,6 @@ func handleSessionSwitchAccount(profile string, args []string) {
 		os.Exit(1)
 		return // unreachable, satisfies staticcheck SA5011
 	}
-	if postCommit != nil {
-		postCommit()
-	}
-
 	restarted := false
 	var startErr error
 	if wasRunning && !*noRestart {
@@ -130,6 +126,11 @@ func handleSessionSwitchAccount(profile string, args []string) {
 	if err := saveSessionData(storage, instances, groups); err != nil {
 		out.Error(fmt.Sprintf("failed to save session state: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+	if postCommit != nil {
+		if err := postCommit(); err != nil {
+			warnPostCommitError(err)
+		}
 	}
 
 	if startErr != nil {

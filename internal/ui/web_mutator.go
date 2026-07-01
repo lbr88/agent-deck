@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -418,9 +419,10 @@ func (m *WebMutator) ForkSession(id string) (string, error) {
 // same path the TUI EditSessionDialog uses) and persists. Returns the list
 // of fields that actually changed and whether any change requires a restart.
 //
-// instancesMu is held only across the SetField loop — postCommits and the
-// storage flush run after unlock, mirroring the TUI's home.go edit handler
-// so slow tmux subprocesses don't stall the status worker.
+// instancesMu is held only across the SetField loop; the storage flush and
+// postCommits run after unlock, mirroring the TUI's home.go edit handler so
+// slow tmux/Codex side effects don't stall the status worker or precede
+// persistence.
 func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, error) {
 	if len(updates) == 0 {
 		return nil, false, nil
@@ -439,7 +441,7 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
-	var postCommits []func()
+	var postCommits []func() error
 
 	m.h.instancesMu.Lock()
 	for field, value := range updates {
@@ -461,10 +463,6 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 	}
 	m.h.instancesMu.Unlock()
 
-	for _, fn := range postCommits {
-		fn()
-	}
-
 	if len(changed) == 0 {
 		return nil, false, nil
 	}
@@ -482,6 +480,15 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
 		return nil, false, fmt.Errorf("save session: %w", err)
+	}
+	var postCommitErr error
+	for _, fn := range postCommits {
+		if err := fn(); err != nil {
+			postCommitErr = errors.Join(postCommitErr, err)
+		}
+	}
+	if postCommitErr != nil {
+		return changed, restartRequired, session.NewNonFatalWarning("post-save sync failed", postCommitErr)
 	}
 	return changed, restartRequired, nil
 }
