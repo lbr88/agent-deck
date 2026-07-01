@@ -14,12 +14,14 @@ type claudeImportSubmitMsg struct{}
 
 // ClaudeImportDialog lets the user choose a saved Claude session from Claude metadata.
 type ClaudeImportDialog struct {
-	visible  bool
-	entries  []session.ClaudeImportCandidate
-	cursor   int
-	selected *session.ClaudeImportCandidate
-	width    int
-	height   int
+	visible      bool
+	entries      []session.ClaudeImportCandidate
+	cursor       int
+	selected     *session.ClaudeImportCandidate
+	width        int
+	height       int
+	searchActive bool
+	searchQuery  string
 }
 
 func NewClaudeImportDialog() *ClaudeImportDialog {
@@ -31,6 +33,8 @@ func (d *ClaudeImportDialog) Show(entries []session.ClaudeImportCandidate) {
 	d.entries = append(d.entries[:0], entries...)
 	d.cursor = 0
 	d.selected = nil
+	d.searchActive = false
+	d.searchQuery = ""
 }
 
 func (d *ClaudeImportDialog) Hide() {
@@ -38,6 +42,8 @@ func (d *ClaudeImportDialog) Hide() {
 	d.entries = nil
 	d.cursor = 0
 	d.selected = nil
+	d.searchActive = false
+	d.searchQuery = ""
 }
 
 func (d *ClaudeImportDialog) Visible() bool {
@@ -69,21 +75,34 @@ func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) 
 		return d, nil
 	}
 
+	if handled, changed := importDialogHandleSearchKey(key, &d.searchActive, &d.searchQuery); handled {
+		if changed {
+			d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
+		}
+		return d, nil
+	}
+
 	switch key.String() {
+	case "/":
+		d.searchActive = true
+		d.searchQuery = ""
+		d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
 	case "j", "down":
-		if len(d.entries) > 0 {
-			d.cursor = (d.cursor + 1) % len(d.entries)
+		if indexes := d.matchingIndexes(); len(indexes) > 0 {
+			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
 		}
 	case "k", "up":
-		if len(d.entries) > 0 {
-			d.cursor = (d.cursor - 1 + len(d.entries)) % len(d.entries)
+		if indexes := d.matchingIndexes(); len(indexes) > 0 {
+			d.cursor = importDialogMoveCursor(d.cursor, indexes, -1)
 		}
 	case "esc":
 		d.Hide()
 	case "enter":
-		if len(d.entries) == 0 {
+		indexes := d.matchingIndexes()
+		if len(indexes) == 0 {
 			return d, nil
 		}
+		d.cursor = importDialogNormalizeCursor(d.cursor, indexes)
 		selected := d.entries[d.cursor]
 		d.selected = &selected
 		return d, func() tea.Msg { return claudeImportSubmitMsg{} }
@@ -109,15 +128,21 @@ func (d *ClaudeImportDialog) View() string {
 	var lines []string
 	lines = append(lines, fit(titleStyle.Render("Import Saved Claude Session")))
 	lines = append(lines, "")
+	indexes := d.matchingIndexes()
 	if len(d.entries) == 0 {
 		lines = append(lines, fit(dimStyle.Render("No saved Claude sessions found.")))
+	} else if len(indexes) == 0 {
+		lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("No matches for %q.", d.searchQuery))))
 	} else {
 		visibleRows := savedSessionImportVisibleRows(d.height)
-		start, end := windowBounds(d.cursor, len(d.entries), visibleRows)
+		renderCursor := importDialogNormalizeCursor(d.cursor, indexes)
+		cursorPos := importDialogCursorPosition(renderCursor, indexes)
+		start, end := windowBounds(cursorPos, len(indexes), visibleRows)
 		if start > 0 {
 			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↑ %d more", start))))
 		}
-		for i := start; i < end; i++ {
+		for pos := start; pos < end; pos++ {
+			i := indexes[pos]
 			entry := d.entries[i]
 			title := strings.TrimSpace(entry.Name)
 			if title == "" {
@@ -131,21 +156,34 @@ func (d *ClaudeImportDialog) View() string {
 			if path := importDialogPath(entry.CWD, entry.Path); path != "" {
 				row += "  " + dimStyle.Render(path)
 			}
-			if i == d.cursor {
+			if i == renderCursor {
 				lines = append(lines, fit("> "+selectedStyle.Render(row)))
 			} else {
 				lines = append(lines, fit("  "+normalStyle.Render(row)))
 			}
 		}
-		if end < len(d.entries) {
-			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(d.entries)-end))))
+		if end < len(indexes) {
+			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(indexes)-end))))
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, fit(footerStyle.Render("Enter import | Esc cancel | j/k navigate")))
+	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery))))
 
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)
+}
+
+func (d *ClaudeImportDialog) matchingIndexes() []int {
+	return importDialogSearchIndexes(len(d.entries), d.searchQuery, func(i int) []string {
+		entry := d.entries[i]
+		return []string{
+			entry.Name,
+			entry.SessionID,
+			shortClaudeImportID(entry.SessionID),
+			entry.CWD,
+			entry.Path,
+		}
+	})
 }
 
 func shortClaudeImportID(id string) string {
