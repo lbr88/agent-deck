@@ -1,4 +1,4 @@
-# Session Tool Conversion Design
+# Session Tool Handover Design
 
 ## Context
 
@@ -10,26 +10,26 @@ tool types. Each tool has a different native history mechanism:
 - OpenCode resumes from OpenCode storage and can clone OpenCode sessions via
   its own export/import flow.
 
-Those formats are not a stable shared interchange format. A converter that
-rewrites native history files across all three tools would be brittle and would
-need to track private format changes in every upstream CLI.
+Those formats are not a stable shared interchange format. A native-history
+migrator that rewrites native history files across all three tools would be
+brittle and would need to track private format changes in every upstream CLI.
 
-The first conversion feature should therefore use a handoff model: keep the
+The first handover feature should therefore use a handover model: keep the
 source Agent Deck session unchanged, create a new target-tool session in the
 same project/group, and start it with a generated context packet that tells the
 target tool what it needs to continue.
 
 ## Goals
 
-- Add a CLI workflow to convert one Agent Deck session into a new Claude,
+- Add a CLI workflow to hand over one Agent Deck session into a new Claude,
   Codex, or OpenCode session.
 - Add a TUI workflow with equivalent behavior. TUI parity is mandatory for this
   user-facing session feature.
-- Keep CLI and TUI behavior on a shared conversion service.
+- Keep CLI and TUI behavior on a shared handover service.
 - Preserve the source session unchanged.
 - Use source session metadata, project path, group, git context, and latest
-  useful output to build a concise target-tool handoff prompt.
-- Start the converted session by default when requested, using the existing
+  useful output to build a concise target-tool handover prompt.
+- Start the handed-over session by default when requested, using the existing
   `StartWithMessage` path so delivery semantics stay consistent with launch and
   send.
 
@@ -38,9 +38,9 @@ target tool what it needs to continue.
 - Do not rewrite Claude JSONL, Codex rollout, or OpenCode native session files.
 - Do not mutate the source Agent Deck row in place.
 - Do not promise full transcript continuity in the target tool.
-- Do not add Gemini, Pi, Cursor, Hermes, shell, or custom-tool conversion in
+- Do not add Gemini, Pi, Cursor, Hermes, shell, or custom-tool handover in
   this first version.
-- Do not add AI summarization as a dependency. The first handoff packet is
+- Do not add AI summarization as a dependency. The first handover packet is
   deterministic and local.
 
 ## User-Facing Behavior
@@ -50,7 +50,7 @@ target tool what it needs to continue.
 Add:
 
 ```bash
-agent-deck session convert <source-session> --to <claude|codex|opencode> [options]
+agent-deck session handover <source-session> --to <claude|codex|opencode> [options]
 ```
 
 Options:
@@ -60,8 +60,8 @@ Options:
   `<source title> (<target>)`.
 - `--group`, `-g`: group for the new session. Defaults to source group.
 - `--path`: project path for the new session. Defaults to source project path.
-- `--message`, `-m`: optional user instruction appended to the handoff packet.
-- `--start`: start the converted session and deliver the handoff message.
+- `--message`, `-m`: optional user instruction appended to the handover packet.
+- `--start`: start the handed-over session and deliver the handover message.
 - `--no-start`: create the stopped target session without starting it. This is
   useful for review or later manual start.
 - `--json`: structured output.
@@ -71,18 +71,18 @@ Default start behavior should match existing import conventions for safety:
 create the new row stopped unless `--start` is provided. The TUI can make start
 a visible checkbox so the user chooses intentionally.
 
-The command refuses conversion when the target tool equals the source tool. The
+The command refuses handover when the target tool equals the source tool. The
 message should point users at the existing same-tool fork feature where
 available.
 
 ### TUI
 
-Add a convert action reachable from the selected session row. Use a two-key
-route under the existing edit/action family, `P` then `c`, rather than taking a
+Add a handover action reachable from the selected session row. Use a two-key
+route under the existing edit/action family, `P` then `h`, rather than taking a
 new top-level key. The flow must be discoverable in help and must not require
 dropping to a shell.
 
-The convert dialog shows:
+The handover dialog shows:
 
 - source title and source tool
 - source tool session id when known, shortened for display
@@ -94,29 +94,29 @@ The convert dialog shows:
 - optional single-line message field
 - start-now checkbox
 
-On confirm, the TUI calls the same shared conversion service as the CLI. If the
+On confirm, the TUI calls the same shared handover service as the CLI. If the
 start-now checkbox is enabled, it starts the new target session with the
-handoff packet. If it is disabled, it persists a stopped target session and
+handover packet. If it is disabled, it persists a stopped target session and
 surfaces a success notice.
 
-## Shared Conversion Service
+## Shared Handover Service
 
-Add a small service in `internal/session` rather than putting conversion logic
+Add a small service in `internal/session` rather than putting handover logic
 directly in CLI or TUI handlers.
 
 Suggested API shape:
 
 ```go
-type ConversionTarget string
+type HandoverTarget string
 
 const (
-    ConversionTargetClaude   ConversionTarget = "claude"
-    ConversionTargetCodex    ConversionTarget = "codex"
-    ConversionTargetOpenCode ConversionTarget = "opencode"
+    HandoverTargetClaude   HandoverTarget = "claude"
+    HandoverTargetCodex    HandoverTarget = "codex"
+    HandoverTargetOpenCode HandoverTarget = "opencode"
 )
 
-type ConversionOptions struct {
-    Target      ConversionTarget
+type HandoverOptions struct {
+    Target      HandoverTarget
     Title       string
     GroupPath   string
     ProjectPath string
@@ -125,18 +125,18 @@ type ConversionOptions struct {
     Peers       []*Instance
 }
 
-type ConversionResult struct {
-    Source        *Instance
-    Target        *Instance
-    HandoffPrompt string
-    Started       bool
-    Warning       string
+type HandoverResult struct {
+    Source         *Instance
+    Target         *Instance
+    HandoverPrompt string
+    Started        bool
+    Warning        string
 }
 
-func ConvertSession(source *Instance, opts ConversionOptions) (*ConversionResult, error)
+func HandoverSession(source *Instance, opts HandoverOptions) (*HandoverResult, error)
 ```
 
-`ConvertSession` should:
+`HandoverSession` should:
 
 1. Validate source and target.
 2. Resolve target title/group/path defaults.
@@ -145,15 +145,15 @@ func ConvertSession(source *Instance, opts ConversionOptions) (*ConversionResult
 4. Copy safe shared metadata where appropriate: sandbox settings, account only
    for Claude-compatible target sessions, plugin/channel fields only if the
    target tool supports them today, and worktree metadata only when the
-   converted session stays in the same project path.
-5. Build a deterministic handoff prompt.
+   handed-over session stays in the same project path.
+5. Build a deterministic handover prompt.
 6. Return the target instance and prompt to the caller.
 
 Persistence and starting can remain in the CLI/TUI layer because those layers
-already own storage, group trees, and user-facing output. The conversion
+already own storage, group trees, and user-facing output. The handover
 service should not write global state by itself.
 
-## Handoff Packet
+## Handover Packet
 
 The generated prompt should be concise, explicit, and stable enough to test. It
 should not pretend that native history was migrated.
@@ -161,7 +161,7 @@ should not pretend that native history was migrated.
 Recommended structure:
 
 ```text
-You are continuing work from an Agent Deck session converted from <source tool>
+You are continuing work from an Agent Deck session handed over from <source tool>
 to <target tool>.
 
 Source session:
@@ -183,14 +183,14 @@ Operator instruction:
 
 Important:
 - Native transcript history was not migrated.
-- Treat this handoff as the context to continue from.
+- Treat this handover as the context to continue from.
 - Inspect the repository before making changes.
 ```
 
 The latest output should come from `GetLastResponseBestEffortChecked(peers)`
 when possible so Claude transcript collision guards remain active. For Codex
-and OpenCode, the current best effort may be terminal-output based; the handoff
-builder should cap content by characters or lines so conversion cannot flood a
+and OpenCode, the current best effort may be terminal-output based; the handover
+builder should cap content by characters or lines so handover cannot flood a
 new session with huge pane history.
 
 Git context should be best effort and local:
@@ -207,22 +207,22 @@ CLI:
 
 1. Load profile sessions and groups.
 2. Resolve source by id/title using existing session resolution.
-3. Call `session.ConvertSession(source, opts)`.
+3. Call `session.HandoverSession(source, opts)`.
 4. Append target instance to storage and ensure its group exists.
-5. If `--start`, call `target.StartWithMessage(result.HandoffPrompt)`.
+5. If `--start`, call `target.StartWithMessage(result.HandoverPrompt)`.
 6. Save target state again after start so status and session ids can persist.
 7. Print result.
 
 TUI:
 
-1. User opens convert dialog for selected source session.
+1. User opens the handover dialog for selected source session.
 2. Dialog collects target, title, path, group, optional message, and start-now.
-3. Submit handler calls the same `session.ConvertSession`.
+3. Submit handler calls the same `session.HandoverSession`.
 4. Add the target to `h.instances`, `h.groupTree`, and storage using existing
    session-created plumbing where practical.
 5. If start-now is enabled, use existing start/create command paths that already
    handle status, errors, and loading placeholders.
-6. Rebuild flat items and preserve selection on the newly converted target when
+6. Rebuild flat items and preserve selection on the newly handed-over target when
    possible.
 
 ## Error Handling
@@ -232,16 +232,16 @@ TUI:
 - Target equals source tool: refuse and suggest same-tool fork when supported.
 - Empty source project path: use current working directory as fallback and
   surface a warning in JSON/TUI notice.
-- Failed latest-output extraction: conversion still succeeds with a warning and
-  a handoff packet that says no latest output was available.
-- Failed git context extraction: conversion still succeeds with a warning-free
-  "git context unavailable" line in the handoff.
+- Failed latest-output extraction: handover still succeeds with a warning and
+  a handover packet that says no latest output was available.
+- Failed git context extraction: handover still succeeds with a warning-free
+  "git context unavailable" line in the handover packet.
 - Start failure after the row is created: keep the row, mark/start failure
   using existing `StartWithMessage` behavior, and surface the error.
 
 ## Duplicate Handling
 
-Conversion creates a new Agent Deck session. It should not reject merely
+Handover creates a new Agent Deck session. It should not reject merely
 because another session has the same project path. It should avoid exact title
 collisions by auto-suffixing generated default titles:
 
@@ -255,35 +255,35 @@ rule. Do not invent a broader uniqueness policy in this feature.
 
 ## Testing
 
-Shared conversion tests in `internal/session`:
+Shared handover tests in `internal/session`:
 
-- Claude -> Codex builds a Codex target with same path/group and a handoff
+- Claude -> Codex builds a Codex target with same path/group and a handover
   packet containing source metadata.
 - Codex -> Claude builds a Claude target and refuses target equals source.
 - OpenCode -> Claude includes OpenCode session id when present.
 - Missing latest output produces a deterministic fallback section.
 - Generated default title suffixes around existing peer titles.
-- Handoff packet caps long latest output.
+- Handover packet caps long latest output.
 - Git context helper reports branch/status for a real temp repo and a clear
   unavailable message outside git.
 
 CLI tests in `cmd/agent-deck`:
 
-- `session convert <source> --to codex` creates a stopped Codex row.
-- `--start` calls the start path with the generated handoff prompt.
+- `session handover <source> --to codex` creates a stopped Codex row.
+- `--start` calls the start path with the generated handover prompt.
 - `--json` includes source id, target id, target tool, started, and warning.
 - target equals source exits with a clear error.
 - unknown target exits with a clear error.
 
 TUI tests in `internal/ui`:
 
-- Convert action opens a dialog for the selected session.
+- Handover action opens a dialog for the selected session.
 - Target selector excludes the source tool.
 - Confirm creates a persisted target row with same group/path defaults.
-- Start-now path invokes the create/start command with the generated handoff
+- Start-now path invokes the create/start command with the generated handover
   prompt.
-- TUI surfaces conversion errors without mutating the session list.
-- Help includes the convert action.
+- TUI surfaces handover errors without mutating the session list.
+- Help includes the handover action.
 
 ## Implementation Notes
 
@@ -292,12 +292,12 @@ TUI tests in `internal/ui`:
 - Prefer reusing `StartWithMessage`, `GetLastResponseBestEffortChecked`, and
   existing group-tree save paths instead of creating separate delivery or
   storage flows.
-- Keep native same-tool fork behavior separate. Same-tool conversion is not a
+- Keep native same-tool fork behavior separate. Same-tool handover is not a
   replacement for `session fork`.
-- Conversion targets use the existing configured tool command resolution at
+- Handover targets use the existing configured tool command resolution at
   start time through normal `Instance` command building.
 - The TUI optional message is single-line in the first version. Multiline
   editing can be added later if real usage shows that the extra UI complexity
   is worth it.
-- CLI conversion creates stopped sessions by default. Starting requires
+- CLI handover creates stopped sessions by default. Starting requires
   `--start`; the TUI mirrors this with an unchecked start-now checkbox.
