@@ -12240,7 +12240,7 @@ func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.C
 		if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(entry.Path) == "" {
 			projectPath = cwd
 		}
-		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "codex")
+		inst := session.NewInstanceWithGroupAndTool(title, projectPath, importGroupPathForProject(projectPath), "codex")
 		inst.Command = "codex"
 		inst.CodexSessionID = strings.ToLower(strings.TrimSpace(entry.ID))
 		inst.CodexDetectedAt = entry.UpdatedAt
@@ -12284,7 +12284,7 @@ func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate
 			projectPath = cwd
 		}
 
-		inst := session.NewInstanceWithGroupAndTool(title, projectPath, h.resolveNewSessionGroup(), "claude")
+		inst := session.NewInstanceWithGroupAndTool(title, projectPath, importGroupPathForProject(projectPath), "claude")
 		inst.Command = "claude"
 		inst.ClaudeSessionID = sessionID
 		inst.ClaudeDetectedAt = entry.UpdatedAt
@@ -12306,9 +12306,14 @@ func (h *Home) handleOpenCodeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd
 
 func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry) tea.Cmd {
 	return func() tea.Msg {
+		projectPath := importDialogPath(entry.Directory, entry.Path)
+		if projectPath == "" {
+			projectPath = currentWorkingDirOrDot()
+		}
 		inst, err := session.NewOpenCodeImportedInstance(entry, session.OpenCodeImportOptions{
-			GroupPath:           h.resolveNewSessionGroup(),
-			FallbackProjectPath: currentWorkingDirOrDot(),
+			GroupPath:           importGroupPathForProject(projectPath),
+			ProjectPath:         projectPath,
+			FallbackProjectPath: projectPath,
 		})
 		if err != nil {
 			return sessionCreatedMsg{err: err}
@@ -12351,6 +12356,18 @@ func currentWorkingDirOrDot() string {
 		return cwd
 	}
 	return "."
+}
+
+func importGroupPathForProject(projectPath string) string {
+	projectPath = strings.TrimSpace(projectPath)
+	if projectPath == "" || projectPath == "." {
+		return session.DefaultGroupPath
+	}
+	groupPath := strings.TrimSpace(session.GroupPathForProject(projectPath))
+	if groupPath == "" || groupPath == session.DefaultGroupName {
+		return session.DefaultGroupPath
+	}
+	return groupPath
 }
 
 func findOpenCodeImportSessionIDConflict(instances []*session.Instance, importedSessionID string) *session.Instance {

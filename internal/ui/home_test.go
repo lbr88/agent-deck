@@ -454,10 +454,13 @@ func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
 	t.Setenv("CODEX_HOME", codexHome)
+	projectPath := "/home/lrasmussen/git/domutech/domutech-github"
 	h := NewHomeWithProfile("codex_import_tui")
+	h.groupScope = "tmp"
 	entry := session.CodexIndexEntry{
 		ID:         "99999999-9999-9999-9999-999999999999",
 		ThreadName: "imported from tui",
+		Path:       projectPath,
 		UpdatedAt:  time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
 	writeCodexRolloutForHomeImport(t, codexHome, entry.ID)
@@ -478,7 +481,8 @@ func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 		t.Fatalf("instances=%d, want 1", len(instances))
 	}
 	got := instances[0]
-	if got.Tool != "codex" || got.CodexSessionID != entry.ID || got.Title != entry.ThreadName || got.Status != session.StatusStopped {
+	if got.Tool != "codex" || got.CodexSessionID != entry.ID || got.Title != entry.ThreadName ||
+		got.ProjectPath != projectPath || got.GroupPath != "domutech" || got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted Codex import: %#v", got)
 	}
 }
@@ -489,10 +493,11 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
 	session.ClearUserConfigCache()
 	h := NewHomeWithProfile("claude_import_tui")
+	h.groupScope = "tmp"
 	entry := session.ClaudeImportCandidate{
 		SessionID: "99999999-9999-9999-9999-999999999999",
 		Name:      "imported from tui",
-		CWD:       "/tmp/claude-project",
+		CWD:       "/home/lrasmussen/git/domutech/domutech-claude",
 		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
 	h.claudeImportDialog.Show([]session.ClaudeImportCandidate{entry})
@@ -513,14 +518,16 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	}
 	got := instances[0]
 	if got.Tool != "claude" || got.Command != "claude" || got.ClaudeSessionID != entry.SessionID ||
-		got.Title != entry.Name || got.ProjectPath != entry.CWD || got.Status != session.StatusStopped {
+		got.Title != entry.Name || got.ProjectPath != entry.CWD || got.GroupPath != "domutech" ||
+		got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted Claude import: %#v", got)
 	}
 }
 
 func TestHomeOpenCodeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
-	projectPath := t.TempDir()
+	projectPath := "/home/lrasmussen/git/domutech/domutech-opencode"
 	h := NewHomeWithProfile("opencode_import_tui")
+	h.groupScope = "tmp"
 	entry := session.OpenCodeImportEntry{
 		ID:        "ses_tui_import123",
 		Title:     "imported from tui",
@@ -545,7 +552,8 @@ func TestHomeOpenCodeImportSelectionCreatesPersistedStoppedSession(t *testing.T)
 	}
 	got := instances[0]
 	if got.Tool != "opencode" || got.Command != "opencode" || got.OpenCodeSessionID != entry.ID ||
-		got.Title != entry.Title || got.ProjectPath != entry.Directory || got.Status != session.StatusStopped {
+		got.Title != entry.Title || got.ProjectPath != entry.Directory || got.GroupPath != "domutech" ||
+		got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted OpenCode import: %#v", got)
 	}
 }
