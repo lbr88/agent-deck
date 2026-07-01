@@ -78,7 +78,7 @@ func (d *OpenCodeImportDialog) Update(msg tea.Msg) (*OpenCodeImportDialog, tea.C
 
 	if handled, changed := importDialogHandleSearchKey(key, &d.searchActive, &d.searchQuery); handled {
 		if changed {
-			d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
+			d.cursor = importDialogFirstMatch(d.matchingIndexes())
 		}
 		return d, nil
 	}
@@ -87,7 +87,7 @@ func (d *OpenCodeImportDialog) Update(msg tea.Msg) (*OpenCodeImportDialog, tea.C
 	case "/":
 		d.searchActive = true
 		d.searchQuery = ""
-		d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
+		d.cursor = importDialogFirstMatch(d.matchingIndexes())
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -151,20 +151,20 @@ func (d *OpenCodeImportDialog) View() string {
 			}
 			updated := ""
 			if !entry.UpdatedAt.IsZero() {
-				updated = dimStyle.Render(entry.UpdatedAt.Local().Format("2006-01-02 15:04"))
+				updated = entry.UpdatedAt.Local().Format("2006-01-02 15:04")
 			}
-			row := fmt.Sprintf("%s  %s", title, dimStyle.Render(shortOpenCodeID(entry.ID)))
-			if updated != "" {
-				row = row + "  " + updated
-			}
-			if path := importDialogPath(entry.Directory, entry.Path); path != "" {
-				row += "  " + dimStyle.Render(path)
-			}
-			if i == renderCursor {
-				lines = append(lines, fit("> "+selectedStyle.Render(row)))
-			} else {
-				lines = append(lines, fit("  "+normalStyle.Render(row)))
-			}
+			lines = importDialogAppendEntry(
+				lines,
+				i == renderCursor,
+				title,
+				shortOpenCodeID(entry.ID),
+				updated,
+				importDialogPath(entry.Directory, entry.Path),
+				innerWidth,
+				selectedStyle,
+				normalStyle,
+				dimStyle,
+			)
 		}
 		if end < len(indexes) {
 			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(indexes)-end))))

@@ -77,7 +77,7 @@ func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) 
 
 	if handled, changed := importDialogHandleSearchKey(key, &d.searchActive, &d.searchQuery); handled {
 		if changed {
-			d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
+			d.cursor = importDialogFirstMatch(d.matchingIndexes())
 		}
 		return d, nil
 	}
@@ -86,7 +86,7 @@ func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) 
 	case "/":
 		d.searchActive = true
 		d.searchQuery = ""
-		d.cursor = importDialogNormalizeCursor(d.cursor, d.matchingIndexes())
+		d.cursor = importDialogFirstMatch(d.matchingIndexes())
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -148,19 +148,18 @@ func (d *ClaudeImportDialog) View() string {
 			if title == "" {
 				title = shortClaudeImportID(entry.SessionID)
 			}
-			row := fmt.Sprintf("%s  %s  %s",
+			lines = importDialogAppendEntry(
+				lines,
+				i == renderCursor,
 				title,
-				dimStyle.Render(shortClaudeImportID(entry.SessionID)),
-				dimStyle.Render(entry.UpdatedAt.Local().Format("2006-01-02 15:04")),
+				shortClaudeImportID(entry.SessionID),
+				entry.UpdatedAt.Local().Format("2006-01-02 15:04"),
+				importDialogPath(entry.CWD, entry.Path),
+				innerWidth,
+				selectedStyle,
+				normalStyle,
+				dimStyle,
 			)
-			if path := importDialogPath(entry.CWD, entry.Path); path != "" {
-				row += "  " + dimStyle.Render(path)
-			}
-			if i == renderCursor {
-				lines = append(lines, fit("> "+selectedStyle.Render(row)))
-			} else {
-				lines = append(lines, fit("  "+normalStyle.Render(row)))
-			}
 		}
 		if end < len(indexes) {
 			lines = append(lines, fit(dimStyle.Render(fmt.Sprintf("  ↓ %d more", len(indexes)-end))))

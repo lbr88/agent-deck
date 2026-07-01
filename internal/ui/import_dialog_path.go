@@ -1,14 +1,18 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/sahilm/fuzzy"
 )
 
 const savedSessionImportDialogChrome = 10
+const savedSessionImportEntryLines = 2
 
 func importDialogPath(values ...string) string {
 	for _, value := range values {
@@ -24,7 +28,7 @@ func savedSessionImportVisibleRows(height int) int {
 	if height <= 0 {
 		return def
 	}
-	rows := height - savedSessionImportDialogChrome
+	rows := (height - savedSessionImportDialogChrome) / savedSessionImportEntryLines
 	if rows < 1 {
 		return 1
 	}
@@ -32,6 +36,109 @@ func savedSessionImportVisibleRows(height int) int {
 		return def
 	}
 	return rows
+}
+
+func importDialogFirstMatch(indexes []int) int {
+	if len(indexes) == 0 {
+		return 0
+	}
+	return indexes[0]
+}
+
+func importDialogAppendEntry(lines []string, selected bool, title, id, updated, path string, innerWidth int, selectedStyle, normalStyle, dimStyle lipgloss.Style) []string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = strings.TrimSpace(id)
+	}
+	meta := make([]string, 0, 2)
+	if strings.TrimSpace(id) != "" {
+		meta = append(meta, strings.TrimSpace(id))
+	}
+	if strings.TrimSpace(updated) != "" {
+		meta = append(meta, strings.TrimSpace(updated))
+	}
+	titleLine := title
+	if len(meta) > 0 {
+		titleLine += "  " + dimStyle.Render(strings.Join(meta, "  "))
+	}
+
+	firstPrefix := "  "
+	bodyStyle := normalStyle
+	if selected {
+		firstPrefix = "> "
+		bodyStyle = selectedStyle
+	}
+	lines = append(lines, cellTruncate(firstPrefix+bodyStyle.Render(titleLine), innerWidth, "…"))
+
+	if path = strings.TrimSpace(path); path != "" {
+		pathPrefix := "  Path: "
+		pathBudget := innerWidth - cellWidth(pathPrefix)
+		displayPath := importDialogDisplayPath(path, pathBudget)
+		lines = append(lines, cellTruncate(pathPrefix+dimStyle.Render(displayPath), innerWidth, "…"))
+	}
+	return lines
+}
+
+func importDialogDisplayPath(path string, width int) string {
+	path = importDialogCompactHome(strings.TrimSpace(path))
+	if path == "" || width <= 0 {
+		return ""
+	}
+	if cellWidth(path) <= width {
+		return path
+	}
+
+	sep := string(filepath.Separator)
+	parts := strings.Split(path, sep)
+	for i := len(parts) - 1; i >= 0; i-- {
+		tailParts := parts[i:]
+		if len(tailParts) == 0 || strings.Join(tailParts, sep) == "" {
+			continue
+		}
+		candidate := "…" + sep + strings.Join(tailParts, sep)
+		if cellWidth(candidate) <= width {
+			return candidate
+		}
+	}
+	return importDialogTailTruncate(path, width)
+}
+
+func importDialogCompactHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	home = strings.TrimRight(home, string(filepath.Separator))
+	if path == home {
+		return "~"
+	}
+	prefix := home + string(filepath.Separator)
+	if strings.HasPrefix(path, prefix) {
+		return "~" + string(filepath.Separator) + strings.TrimPrefix(path, prefix)
+	}
+	return path
+}
+
+func importDialogTailTruncate(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if cellWidth(s) <= width {
+		return s
+	}
+	tail := "…"
+	if cellWidth(tail) >= width {
+		return cellTruncate(s, width, "")
+	}
+	runes := []rune(s)
+	for i := len(runes) - 1; i >= 0; i-- {
+		candidate := tail + string(runes[i:])
+		if cellWidth(candidate) > width {
+			continue
+		}
+		return candidate
+	}
+	return tail
 }
 
 func importDialogInnerWidth(dialogWidth int) int {
