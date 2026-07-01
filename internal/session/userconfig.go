@@ -337,6 +337,12 @@ type UISettings struct {
 	// tightening the visibility latency reported on v1.9.30.
 	RemoteSessionRefreshSecs int `toml:"remote_session_refresh_secs,omitzero"`
 
+	// PreviewRefreshMS sets how often the selected local preview pane may
+	// re-capture terminal output. Valid range: 100ms and above. Default: 2000ms,
+	// preserving the historical 2s selected-preview cache TTL. Remote preview
+	// fetches keep their separate SSH-conservative cadence.
+	PreviewRefreshMS int `toml:"preview_refresh_ms,omitzero"`
+
 	// ShowOnlyInstalledTools, when true, hides tools from the new-session
 	// dialogs (TUI + web) whose command does not resolve on the host PATH
 	// (issue #1259). Default false: no PATH probing happens and the dialogs are
@@ -431,6 +437,14 @@ const (
 	MaxPreviewPct = 90
 )
 
+// Selected local preview refresh bounds. The default preserves the historical
+// hardcoded 2s TTL; the min allows faster focused previews without accepting
+// zero/negative or effectively continuous capture loops.
+const (
+	DefaultPreviewRefresh = 2 * time.Second
+	MinPreviewRefresh     = 100 * time.Millisecond
+)
+
 // iTerm "open as" modes for Shift+Enter dispatch.
 const (
 	ITermOpenAsTab     = "tab"
@@ -482,6 +496,20 @@ func (u UISettings) GetPreviewPct() int {
 		return MaxPreviewPct
 	}
 	return u.PreviewPct
+}
+
+// GetPreviewRefreshDuration returns the selected local preview refresh TTL.
+// Unset or negative values keep the default; positive values below the minimum
+// clamp up so users cannot accidentally request a zero-delay polling loop.
+func (u UISettings) GetPreviewRefreshDuration() time.Duration {
+	if u.PreviewRefreshMS <= 0 {
+		return DefaultPreviewRefresh
+	}
+	d := time.Duration(u.PreviewRefreshMS) * time.Millisecond
+	if d < MinPreviewRefresh {
+		return MinPreviewRefresh
+	}
+	return d
 }
 
 // GetITermOpenAs returns the configured iTerm open mode. Unknown or

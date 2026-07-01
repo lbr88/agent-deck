@@ -315,6 +315,7 @@ type Home struct {
 	previewCacheTime  map[string]time.Time // previewKey -> when cached (for expiration)
 	previewCacheMu    sync.RWMutex         // Protects previewCache for thread-safety
 	previewFetchingID string               // ID currently being fetched (prevents duplicate fetches)
+	previewRefreshTTL time.Duration        // Selected local preview cache TTL from [ui].preview_refresh_ms
 
 	// Preview debouncing (PERFORMANCE: prevents subprocess spawn on every keystroke)
 	// During rapid navigation, we delay preview fetch by 150ms to let navigation settle
@@ -1211,6 +1212,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.sysStatsConfig = cfg.SystemStats
 		h.costLineTemplate, h.costLineHideWhenZero = session.ResolveCostLineTemplate(cfg, actualProfile)
 		h.previewPct = cfg.UI.GetPreviewPct()
+		h.previewRefreshTTL = cfg.UI.GetPreviewRefreshDuration()
 		h.remoteLatencyRefreshSec = cfg.UI.GetRemoteLatencyRefreshSecs(cfg.SystemStats.GetRefreshSeconds())
 		h.remoteSessionRefreshSec = cfg.UI.GetRemoteSessionRefreshSecs()
 		h.footerMode = cfg.UI.GetFooter()
@@ -1219,6 +1221,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.activeFilterExcludes = (session.DisplaySettings{}).GetActiveFilterExcludes()
 		h.costLineTemplate, h.costLineHideWhenZero = session.ResolveCostLineTemplate(nil, actualProfile)
 		h.previewPct = session.DefaultPreviewPct
+		h.previewRefreshTTL = (session.UISettings{}).GetPreviewRefreshDuration()
 		h.remoteLatencyRefreshSec = (session.UISettings{}).GetRemoteLatencyRefreshSecs(0)
 		h.remoteSessionRefreshSec = (session.UISettings{}).GetRemoteSessionRefreshSecs()
 		h.footerMode = (session.UISettings{}).GetFooter()
@@ -3300,6 +3303,15 @@ func (h *Home) selectedRemotePreviewTarget() (string, string, string, bool) {
 
 	key := remotePreviewCacheKey(item.RemoteName, item.RemoteSession.ID)
 	return item.RemoteName, item.RemoteSession.ID, key, true
+}
+
+func (h *Home) selectedPreviewCacheExpired(key string, now time.Time) bool {
+	ttl := h.previewRefreshTTL
+	if ttl <= 0 {
+		ttl = session.DefaultPreviewRefresh
+	}
+	cachedTime, hasCached := h.previewCacheTime[key]
+	return !hasCached || now.Sub(cachedTime) > ttl
 }
 
 // fetchSelectedPreview debounces a preview fetch for the currently selected item.
@@ -6133,17 +6145,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Notification bar sync handled by background worker (syncNotificationsBackground)
 		// which runs even when TUI is paused during tea.Exec
 
-		// Fetch preview for currently selected item (if stale/missing and not fetching)
-		// Local previews use a short TTL for near-live terminal updates.
-		const previewCacheTTL = 2 * time.Second
+		// Fetch preview for currently selected item (if stale/missing and not fetching).
+		// Local selected previews use [ui].preview_refresh_ms for near-live terminal
+		// updates without changing broader status/background polling cadence.
 		// Remote previews use a longer TTL to avoid frequent SSH calls.
 		const remotePreviewCacheTTL = 10 * time.Second
 		var previewCmd tea.Cmd
+		now := time.Now()
 		selectedInst, selectedKey, selectedWinIdx := h.selectedPreviewTarget()
-		if selectedInst != nil && !h.shouldSuppressPreviewRefresh(time.Now()) {
+		if selectedInst != nil && !h.shouldSuppressPreviewRefresh(now) {
 			h.previewCacheMu.Lock()
-			cachedTime, hasCached := h.previewCacheTime[selectedKey]
-			cacheExpired := !hasCached || time.Since(cachedTime) > previewCacheTTL
+			cacheExpired := h.selectedPreviewCacheExpired(selectedKey, now)
 			// Only fetch if cache is stale/missing AND not currently fetching this item
 			if cacheExpired && h.previewFetchingID != selectedKey {
 				h.previewFetchingID = selectedKey
