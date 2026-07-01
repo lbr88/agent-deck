@@ -16,11 +16,13 @@ const (
 	importSourceTmux importSource = iota
 	importSourceCodex
 	importSourceClaude
+	importSourceOpenCode
 )
 
 type ImportSourceCounts struct {
-	Codex  int
-	Claude int
+	Codex    int
+	Claude   int
+	OpenCode int
 }
 
 type ImportSourceDialog struct {
@@ -65,6 +67,13 @@ func (d *ImportSourceDialog) ClaudeCount() int {
 		return 0
 	}
 	return d.counts.Claude
+}
+
+func (d *ImportSourceDialog) OpenCodeCount() int {
+	if d == nil {
+		return 0
+	}
+	return d.counts.OpenCode
 }
 
 func (d *ImportSourceDialog) SetSize(width, height int) {
@@ -148,5 +157,6 @@ func (d *ImportSourceDialog) sources() []importSourceItem {
 		{source: importSourceTmux, label: "Existing tmux sessions"},
 		{source: importSourceCodex, label: fmt.Sprintf("Saved Codex sessions  %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.Codex)))},
 		{source: importSourceClaude, label: fmt.Sprintf("Saved Claude sessions %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.Claude)))},
+		{source: importSourceOpenCode, label: fmt.Sprintf("Saved OpenCode sessions %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.OpenCode)))},
 	}
 }

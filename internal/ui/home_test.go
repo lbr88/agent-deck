@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,25 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/update"
 )
+
+func installFakeOpenCodeSessionListForHomeImport(t *testing.T, payload string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opencode")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"session\" ] && [ \"$2\" = \"list\" ] && [ \"$3\" = \"--format\" ] && [ \"$4\" = \"json\" ]; then\n" +
+		"cat <<'JSON'\n" +
+		payload + "\n" +
+		"JSON\n" +
+		"exit 0\n" +
+		"fi\n" +
+		"exit 64\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+	return dir
+}
 
 func TestNewHome(t *testing.T) {
 	home := NewHome()
@@ -106,6 +126,51 @@ func TestHomeClaudeImportHotkeyOpensSourceDialog(t *testing.T) {
 	if got := h.importSourceDialog.ClaudeCount(); got != 1 {
 		t.Fatalf("claude count = %d, want 1", got)
 	}
+}
+
+func TestHomeOpenCodeImportHotkeyOpensSourceDialog(t *testing.T) {
+	projectPath := t.TempDir()
+	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `[
+		{"id":"ses_saved123","title":"saved opencode","directory":"`+projectPath+`","updated":1768982200000}
+	]`)
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible after import hotkey")
+	}
+	if got := h.importSourceDialog.OpenCodeCount(); got != 1 {
+		t.Fatalf("OpenCode count = %d, want 1", got)
+	}
+}
+
+func TestHomeOpenCodeImportHotkeyShowsSourceDialogBeforeOpenCodeLoadCompletes(t *testing.T) {
+	h := NewHome()
+	blocked := make(chan struct{})
+	h.loadOpenCodeImportEntries = func(context.Context) ([]session.OpenCodeImportEntry, error) {
+		<-blocked
+		return nil, nil
+	}
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("import hotkey should still return a load command")
+	}
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible before OpenCode loading completes")
+	}
+	if got := h.importSourceDialog.OpenCodeCount(); got != 0 {
+		t.Fatalf("OpenCode count before load = %d, want 0", got)
+	}
+	close(blocked)
 }
 
 func TestHomeCodexImportHotkeySkipsMalformedIndexIDs(t *testing.T) {
@@ -218,6 +283,26 @@ func TestHomeImportHotkeyKeepsTmuxSourceWhenClaudeLoadFails(t *testing.T) {
 	}
 }
 
+func TestHomeImportHotkeyKeepsTmuxSourceWhenOpenCodeListFails(t *testing.T) {
+	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `{`)
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should still open import source chooser")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("tmux import source chooser should remain visible when OpenCode list fails")
+	}
+	if h.err != nil {
+		t.Fatalf("OpenCode list failure should not block tmux import before OpenCode is selected, got %v", h.err)
+	}
+}
+
 func TestHomeImportSourceCodexSelectionShowsDeferredIndexError(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -293,6 +378,50 @@ func TestHomeImportSourceClaudeSelectionShowsNoSessionsError(t *testing.T) {
 	}
 }
 
+func TestHomeImportSourceOpenCodeSelectionShowsDeferredListError(t *testing.T) {
+	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `{`)
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	h = selectOpenCodeImportSource(t, h)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "failed to load saved OpenCode sessions") {
+		t.Fatalf("selecting OpenCode source should surface deferred list error, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceOpenCodeSelectionShowsEmptyListError(t *testing.T) {
+	fakeDir := installFakeOpenCodeSessionListForHomeImport(t, `[]`)
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	h = selectOpenCodeImportSource(t, h)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "no saved OpenCode sessions found") {
+		t.Fatalf("selecting OpenCode source with no sessions should show a user-facing error, got %v", h.err)
+	}
+}
+
+func selectOpenCodeImportSource(t *testing.T, h *Home) *Home {
+	t.Helper()
+
+	var model tea.Model
+	for i := 0; i < 3; i++ {
+		model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+		h = model.(*Home)
+	}
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	return model.(*Home)
+}
+
 func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -358,6 +487,91 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	if got.Tool != "claude" || got.Command != "claude" || got.ClaudeSessionID != entry.SessionID ||
 		got.Title != entry.Name || got.ProjectPath != entry.CWD || got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted Claude import: %#v", got)
+	}
+}
+
+func TestHomeOpenCodeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
+	projectPath := t.TempDir()
+	h := NewHomeWithProfile("opencode_import_tui")
+	entry := session.OpenCodeImportEntry{
+		ID:        "ses_tui_import123",
+		Title:     "imported from tui",
+		Directory: projectPath,
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.openCodeImportDialog.Show([]session.OpenCodeImportEntry{entry})
+
+	_, cmd := h.handleOpenCodeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting an OpenCode import should create a session command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	instances, _, err := h.storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances=%d, want 1", len(instances))
+	}
+	got := instances[0]
+	if got.Tool != "opencode" || got.Command != "opencode" || got.OpenCodeSessionID != entry.ID ||
+		got.Title != entry.Title || got.ProjectPath != entry.Directory || got.Status != session.StatusStopped {
+		t.Fatalf("bad persisted OpenCode import: %#v", got)
+	}
+}
+
+func TestHomeOpenCodeImportRejectsDuplicateSessionID(t *testing.T) {
+	projectPath := t.TempDir()
+	h := NewHomeWithProfile("opencode_import_duplicate_id_tui")
+	existing := session.NewInstanceWithTool("existing", projectPath, "opencode")
+	existing.OpenCodeSessionID = "ses_duplicate123"
+	h.instances = []*session.Instance{existing}
+
+	entry := session.OpenCodeImportEntry{
+		ID:        "ses_duplicate123",
+		Title:     "duplicate imported session",
+		Directory: filepath.Join(projectPath, "other"),
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.openCodeImportDialog.Show([]session.OpenCodeImportEntry{entry})
+
+	_, cmd := h.handleOpenCodeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting an OpenCode import should return a create command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "already imported by Agent Deck session") {
+		t.Fatalf("duplicate OpenCode session ID should set user-facing error, got %v", h.err)
+	}
+}
+
+func TestHomeOpenCodeImportRejectsExactTitlePathDuplicate(t *testing.T) {
+	projectPath := t.TempDir()
+	h := NewHomeWithProfile("opencode_import_duplicate_title_path_tui")
+	existing := session.NewInstanceWithTool("same title", projectPath, "opencode")
+	h.instances = []*session.Instance{existing}
+
+	entry := session.OpenCodeImportEntry{
+		ID:        "ses_new123",
+		Title:     "same title",
+		Directory: projectPath,
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.openCodeImportDialog.Show([]session.OpenCodeImportEntry{entry})
+
+	_, cmd := h.handleOpenCodeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting an OpenCode import should return a create command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "same title and path") {
+		t.Fatalf("exact duplicate OpenCode import should set user-facing error, got %v", h.err)
 	}
 }
 
