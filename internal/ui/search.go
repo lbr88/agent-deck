@@ -164,7 +164,6 @@ func (s *Search) Update(msg tea.Msg) (*Search, tea.Cmd) {
 		case "tab":
 			// Signal to switch to global search
 			s.switchToGlobal = true
-			s.Hide()
 			return s, nil
 
 		default:

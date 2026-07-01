@@ -6396,9 +6396,12 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	h.search, cmd = h.search.Update(msg)
 
 	// Check if user wants to switch to global search
-	if h.search.WantsSwitchToGlobal() && h.globalSearchIndex != nil {
-		h.globalSearch.SetSize(h.width, h.height)
-		h.globalSearch.Show()
+	if h.search.WantsSwitchToGlobal() {
+		if h.globalSearchIndex != nil {
+			h.search.Hide()
+			h.globalSearch.SetSize(h.width, h.height)
+			h.globalSearch.Show()
+		}
 	}
 
 	return h, cmd

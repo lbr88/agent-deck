@@ -1369,6 +1369,58 @@ func TestHomeSearchOpensLocalWhenNoIndex(t *testing.T) {
 	}
 }
 
+func TestHomeLocalSearchTabWithoutGlobalIndexKeepsSearchVisible(t *testing.T) {
+	home := NewHome()
+	home.width = 100
+	home.height = 30
+	home.globalSearchIndex = nil
+	home.search.Show()
+
+	model, _ := home.Update(tea.KeyMsg{Type: tea.KeyTab})
+	h := model.(*Home)
+
+	if !h.search.IsVisible() {
+		t.Fatal("local search should stay visible when Tab cannot switch to global search")
+	}
+	if h.globalSearch.IsVisible() {
+		t.Fatal("global search should remain hidden when no global index exists")
+	}
+}
+
+func TestHomeLocalSearchTabWithGlobalIndexSwitchesToGlobal(t *testing.T) {
+	home := NewHome()
+	home.width = 100
+	home.height = 30
+
+	tmpDir := t.TempDir()
+	searchEnabled := true
+	config := session.GlobalSearchSettings{
+		Enabled:        &searchEnabled,
+		Tier:           "instant",
+		MemoryLimitMB:  100,
+		IndexRateLimit: 100,
+	}
+	index, err := session.NewGlobalSearchIndex(tmpDir, config)
+	if err != nil {
+		t.Fatalf("Failed to create test index: %v", err)
+	}
+	defer index.Close()
+
+	home.globalSearchIndex = index
+	home.globalSearch.SetIndex(index)
+	home.search.Show()
+
+	model, _ := home.Update(tea.KeyMsg{Type: tea.KeyTab})
+	h := model.(*Home)
+
+	if h.search.IsVisible() {
+		t.Fatal("local search should hide when Tab switches to global search")
+	}
+	if !h.globalSearch.IsVisible() {
+		t.Fatal("global search should be visible after Tab when global index exists")
+	}
+}
+
 func TestHomeGlobalSearchEscape(t *testing.T) {
 	home := NewHome()
 	home.width = 100
