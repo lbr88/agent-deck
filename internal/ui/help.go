@@ -199,7 +199,7 @@ func (h *HelpOverlay) View() string {
 		notesKey = ""
 	}
 	editPathsKey := h.key(hotkeyEditPaths, "p")
-	editSessionKey := h.key(hotkeyEditSession, "P")
+	editSessionKey := "P e / P P"
 	worktreeSetupKey := h.key(hotkeyWorktreeSetup, "b")
 	worktreeKey := h.key(hotkeyWorktreeFinish, "W")
 	watcherPanelKey := h.key(hotkeyWatcherPanel, "w")
@@ -274,6 +274,7 @@ func (h *HelpOverlay) View() string {
 				{execShellKey, "Exec shell in sandbox container"},
 				{editPathsKey, "Edit multi-repo paths"},
 				{editSessionKey, "Edit session settings (title/color/...)"},
+				{"P h", "Handover session to another tool"},
 				{notesKey, "Edit notes"},
 			},
 		},

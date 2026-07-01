@@ -239,6 +239,7 @@ type Home struct {
 	pluginDialog              *PluginDialog         // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
 	editPathsDialog           *EditPathsDialog      // For editing multi-repo paths
 	editSessionDialog         *EditSessionDialog    // For editing session settings (title/color/notes/command/...)
+	handoverDialog            *HandoverDialog       // For handing a session to another supported tool
 	skillDialog               *SkillDialog          // For managing project skills
 	setupWizard               *SetupWizard          // For first-run setup
 	settingsPanel             *SettingsPanel        // For editing settings
@@ -299,6 +300,7 @@ type Home struct {
 	initialSelectDone   bool                  // Guard so preselection only fires once
 	previewMode         PreviewMode           // What to show in preview pane (both, output-only, analytics-only)
 	groupViewMode       session.GroupViewMode // List partition: normal, active-on-top, populated-on-top (cycled by hotkey 't')
+	sessionActionPrefix bool                  // True after P; next key chooses an action in the session action family.
 	err                 error
 	errTime             time.Time  // When error occurred (for auto-dismiss)
 	isReloading         bool       // Visual feedback during auto-reload
@@ -877,6 +879,12 @@ type sessionCreatedMsg struct {
 	tempID   string // matches creatingSessions key for placeholder removal
 }
 
+type sessionHandoverCreatedMsg struct {
+	instance *session.Instance
+	err      error
+	warning  string
+}
+
 type codexImportEntriesLoadedMsg struct {
 	entries []session.CodexIndexEntry
 	err     error
@@ -1120,6 +1128,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		pluginDialog:         NewPluginDialog(),
 		editPathsDialog:      NewEditPathsDialog(),
 		editSessionDialog:    NewEditSessionDialog(),
+		handoverDialog:       NewHandoverDialog(),
 		skillDialog:          NewSkillDialog(),
 		setupWizard:          NewSetupWizard(),
 		settingsPanel:        NewSettingsPanel(),
@@ -4444,6 +4453,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.geminiModelDialog.SetSize(msg.Width, msg.Height)
 		h.promptInputDialog.SetSize(msg.Width, msg.Height)
+		if h.handoverDialog != nil {
+			h.handoverDialog.SetSize(msg.Width, msg.Height)
+		}
 		// Issue #1366: a resize can reveal the preview pane (single -> stacked/dual).
 		// fetchSelectedPreview self-guards to nil in single-column, so this only
 		// fetches when a preview pane is actually visible.
@@ -4919,6 +4931,42 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, h.fetchPreview(msg.instance, msg.instance.ID, -1)
 		}
 		return h, nil
+
+	case sessionHandoverCreatedMsg:
+		if msg.instance == nil {
+			if msg.err != nil {
+				h.setError(msg.err)
+			}
+			return h, nil
+		}
+
+		h.instancesMu.Lock()
+		h.instances = append(h.instances, msg.instance)
+		h.instanceByID[msg.instance.ID] = msg.instance
+		session.UpdateClaudeSessionsWithDedup(h.instances)
+		h.instancesMu.Unlock()
+		h.cachedStatusCounts.valid.Store(false)
+
+		if msg.instance.GroupPath != "" {
+			h.groupTree.ExpandGroupWithParents(msg.instance.GroupPath)
+		}
+		h.groupTree.AddSession(msg.instance)
+		h.rebuildFlatItems()
+		h.search.SetItems(h.instances)
+		for i, item := range h.flatItems {
+			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
+				h.cursor = i
+				h.syncViewport()
+				break
+			}
+		}
+		h.forceSaveInstances()
+		if msg.err != nil {
+			h.setError(msg.err)
+		} else if msg.warning != "" {
+			h.setError(fmt.Errorf("%s", msg.warning))
+		}
+		return h, h.fetchPreview(msg.instance, msg.instance.ID, -1)
 
 	case sessionForkedMsg:
 		// Clean up forking state for source session
@@ -6301,6 +6349,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.editPathsDialog.IsVisible() {
 			return h.handleEditPathsDialogKey(msg)
 		}
+		if h.handoverDialog != nil && h.handoverDialog.IsVisible() {
+			return h.handleHandoverDialogKey(msg)
+		}
 		if h.editSessionDialog.IsVisible() {
 			return h.handleEditSessionDialogKey(msg)
 		}
@@ -7044,6 +7095,7 @@ func (h *Home) hasModalVisible() bool {
 		h.codeBlockDialog.IsVisible() ||
 		h.sessionSwitcher.IsVisible() ||
 		h.worktreeFinishDialog.IsVisible() || h.editPathsDialog.IsVisible() ||
+		(h.handoverDialog != nil && h.handoverDialog.IsVisible()) ||
 		h.editSessionDialog.IsVisible() ||
 		h.zoxidePicker.IsVisible()
 }
@@ -7231,6 +7283,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if h.maintenanceMsg == navHintText {
 			h.maintenanceMsg = ""
 		}
+	}
+
+	if h.sessionActionPrefix {
+		return h.handleSessionActionPrefixKey(key)
 	}
 
 	switch key {
@@ -7711,14 +7767,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "P", "shift+p":
-		// Edit session settings — local sessions only (remote mutators live
-		// on the remote host, not in our Storage).
-		if h.cursor < len(h.flatItems) {
-			item := h.flatItems[h.cursor]
-			if item.Type == session.ItemTypeSession && item.Session != nil {
-				h.editSessionDialog.SetSize(h.width, h.height)
-				h.editSessionDialog.Show(item.Session)
-			}
+		if h.getSelectedSession() != nil {
+			h.sessionActionPrefix = true
+			h.maintenanceMsg = "P: h handover, e edit, P edit"
 		}
 		return h, nil
 
@@ -8675,6 +8726,53 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return h, nil
+}
+
+func (h *Home) handleSessionActionPrefixKey(key string) (tea.Model, tea.Cmd) {
+	h.sessionActionPrefix = false
+	if h.maintenanceMsg == "P: h handover, e edit, P edit" {
+		h.maintenanceMsg = ""
+	}
+	switch key {
+	case "h":
+		h.openHandoverDialogForSelected()
+	case "e", "P", "shift+p", "enter":
+		h.openEditSessionDialogForSelected()
+	case "esc":
+		return h, nil
+	default:
+		h.setError(fmt.Errorf("unknown session action: P %s", key))
+	}
+	return h, nil
+}
+
+func (h *Home) openEditSessionDialogForSelected() {
+	if h.cursor >= len(h.flatItems) {
+		return
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type == session.ItemTypeSession && item.Session != nil {
+		h.editSessionDialog.SetSize(h.width, h.height)
+		h.editSessionDialog.Show(item.Session)
+	}
+}
+
+func (h *Home) openHandoverDialogForSelected() {
+	if h.cursor >= len(h.flatItems) {
+		return
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type != session.ItemTypeSession || item.Session == nil {
+		return
+	}
+	switch canonicalHandoverDialogTool(item.Session) {
+	case "claude", "codex", "opencode":
+	default:
+		h.setError(fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode", item.Session.Tool))
+		return
+	}
+	h.handoverDialog.SetSize(h.width, h.height)
+	h.handoverDialog.Show(item.Session)
 }
 
 // handleConfirmDialogKey handles keys when confirmation dialog is visible
@@ -12328,6 +12426,73 @@ func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry
 	}
 }
 
+var startHandoverTarget = func(inst *session.Instance, prompt string) error {
+	if err := inst.StartWithMessage(prompt); err != nil {
+		return err
+	}
+	inst.PostStartSync(3 * time.Second)
+	return nil
+}
+
+func (h *Home) handleHandoverDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		if validation := h.handoverDialog.Validate(); validation != "" {
+			h.handoverDialog.SetError(validation)
+			return h, nil
+		}
+		values := h.handoverDialog.Values()
+		h.handoverDialog.Hide()
+		h.instancesMu.RLock()
+		source := h.instanceByID[values.SourceID]
+		peers := make([]*session.Instance, len(h.instances))
+		copy(peers, h.instances)
+		h.instancesMu.RUnlock()
+		if source == nil {
+			return h, func() tea.Msg {
+				return sessionHandoverCreatedMsg{err: fmt.Errorf("source session no longer exists")}
+			}
+		}
+		return h, h.createSessionFromHandover(source, peers, values)
+	case "esc":
+		h.handoverDialog.Hide()
+		return h, nil
+	default:
+		var cmd tea.Cmd
+		h.handoverDialog, cmd = h.handoverDialog.Update(msg)
+		return h, cmd
+	}
+}
+
+func (h *Home) createSessionFromHandover(source *session.Instance, peers []*session.Instance, values HandoverDialogValues) tea.Cmd {
+	return func() tea.Msg {
+		result, err := session.HandoverSession(source, session.HandoverOptions{
+			Target:      session.HandoverTarget(values.Target),
+			Title:       values.Title,
+			GroupPath:   values.GroupPath,
+			ProjectPath: values.ProjectPath,
+			Message:     values.Message,
+			Start:       values.StartNow,
+			Peers:       peers,
+		})
+		if err != nil {
+			return sessionHandoverCreatedMsg{err: err}
+		}
+		if values.StartNow {
+			session.ScrubProcessEnvForChildLaunch(result.Target)
+			if startErr := startHandoverTarget(result.Target, result.HandoverPrompt); startErr != nil {
+				return sessionHandoverCreatedMsg{
+					instance: result.Target,
+					err:      fmt.Errorf("failed to start handed-over session: %w", startErr),
+					warning:  result.Warning,
+				}
+			}
+			result.Started = true
+		}
+		return sessionHandoverCreatedMsg{instance: result.Target, warning: result.Warning}
+	}
+}
+
 // importSessions imports existing tmux sessions
 func (h *Home) importSessions() tea.Msg {
 	discovered, err := session.DiscoverExistingTmuxSessions(h.instances)
@@ -12762,11 +12927,14 @@ func (h *Home) View() string {
 	if h.pluginDialog.IsVisible() {
 		return h.pluginDialog.View()
 	}
-	if h.editSessionDialog.IsVisible() {
-		return h.editSessionDialog.View()
-	}
 	if h.editPathsDialog.IsVisible() {
 		return h.editPathsDialog.View()
+	}
+	if h.handoverDialog != nil && h.handoverDialog.IsVisible() {
+		return h.handoverDialog.View()
+	}
+	if h.editSessionDialog.IsVisible() {
+		return h.editSessionDialog.View()
 	}
 	if h.skillDialog.IsVisible() {
 		return h.skillDialog.View()

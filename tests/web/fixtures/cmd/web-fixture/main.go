@@ -424,12 +424,12 @@ func (s *fixtureStore) UndoDelete() (string, error) {
 // the in-memory MenuSession DTO. Restart-required fields are tracked with
 // the same policy as session.RestartPolicyFor so e2e tests can assert the
 // restartRequired flag without booting a real session.
-func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]string, bool, string, error) {
+func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]string, bool, []string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
 	if !ok {
-		return nil, false, "", fmt.Errorf("session not found: %s", id)
+		return nil, false, nil, fmt.Errorf("session not found: %s", id)
 	}
 	changed := make([]string, 0, len(updates))
 	restartRequired := false
@@ -449,7 +449,7 @@ func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]st
 			// tests can verify the round-trip without expanding MenuSession.
 			oldValue = value
 		default:
-			return nil, false, "", fmt.Errorf("invalid field: %s", field)
+			return nil, false, nil, fmt.Errorf("invalid field: %s", field)
 		}
 		if oldValue == value {
 			continue
@@ -459,7 +459,7 @@ func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]st
 			restartRequired = true
 		}
 	}
-	return changed, restartRequired, "", nil
+	return changed, restartRequired, nil, nil
 }
 
 func (s *fixtureStore) ForkSession(parentID string) (string, error) {

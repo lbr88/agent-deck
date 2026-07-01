@@ -53,6 +53,8 @@ func handleSession(profile string, args []string) {
 		handleSessionImportClaude(profile, args[1:])
 	case "import-opencode":
 		handleSessionImportOpenCode(profile, args[1:])
+	case "handover":
+		handleSessionHandover(profile, args[1:])
 	case "attach":
 		handleSessionAttach(profile, args[1:])
 	case "show":
@@ -111,6 +113,7 @@ func printSessionHelp() {
 	fmt.Println("  import-codex <id|name>  Import an existing saved Codex session")
 	fmt.Println("  import-claude <id|name> Import an existing Claude Code session")
 	fmt.Println("  import-opencode <id|title>  Import an existing saved OpenCode session")
+	fmt.Println("  handover <id|title> --to <tool>  Create a new Claude, Codex, or OpenCode session with handover context")
 	fmt.Println("  attach <id>             Attach to session interactively")
 	fmt.Println("  show [id]               Show session details (auto-detect current if no id)")
 	fmt.Println("  current                 Show current session and profile (auto-detect)")
@@ -141,6 +144,7 @@ func printSessionHelp() {
 	fmt.Println("  agent-deck session import-codex 11111111-2222-3333-4444-555555555555")
 	fmt.Println("  agent-deck session import-claude 11111111-2222-3333-4444-555555555555")
 	fmt.Println("  agent-deck session import-opencode ses_abc123 -t \"Imported OpenCode\"")
+	fmt.Println("  agent-deck session handover my-project --to codex --start")
 	fmt.Println("  agent-deck session attach my-project")
 	fmt.Println("  agent-deck session show                  # Auto-detect current session")
 	fmt.Println("  agent-deck session show my-project --json")
