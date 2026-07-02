@@ -27,7 +27,11 @@ var ErrClaudeSessionMetadataUnreadable = errors.New("claude session metadata unr
 type claudeSessionMeta struct {
 	SessionID string `json:"sessionId"`
 	Name      string `json:"name"`
-	UpdatedAt *int64 `json:"updatedAt"` // unix ms; nil when absent
+	// NameSource distinguishes a user rename ("user", or absent on older Claude)
+	// from a name Claude Code 2.1.19x auto-derives from the cwd folder
+	// ("derived"). Only user renames are real intent; see ClaudeSessionNameIn.
+	NameSource string `json:"nameSource"`
+	UpdatedAt  *int64 `json:"updatedAt"` // unix ms; nil when absent
 }
 
 type claudeSessionMetaCandidate struct {
@@ -192,9 +196,18 @@ func freshestClaudeSessionMetaIn(claudeDir, sessionID string) (*claudeSessionMet
 // Issue #572: Claude Code writes per-process metadata here when the user starts
 // with `claude --name X` or runs `/rename X` mid-session. claudeDir is an
 // explicit parameter so tests can point it at a temp dir.
+//
+// Claude Code 2.1.19x also auto-derives a name from the cwd folder and stamps
+// nameSource="derived". That is not a user rename, so a derived name is treated
+// as no name at all — including on the freshest entry, where it suppresses any
+// stale user name (mirrors the freshest-unnamed rule). A name with no
+// nameSource (older Claude) is always a user rename, so it is honored.
 func ClaudeSessionNameIn(claudeDir, sessionID string) string {
 	best, err := freshestClaudeSessionMetaIn(claudeDir, sessionID)
 	if err != nil {
+		return ""
+	}
+	if best.meta.NameSource == "derived" {
 		return ""
 	}
 	return strings.TrimSpace(best.meta.Name)
