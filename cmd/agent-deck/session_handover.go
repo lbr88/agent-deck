@@ -122,7 +122,7 @@ func handoverSession(profile string, opts handoverSessionOptions, deps handoverS
 func handleSessionHandover(profile string, args []string) {
 	fs := flag.NewFlagSet("session handover", flag.ExitOnError)
 	fs.SetOutput(os.Stdout)
-	to := fs.String("to", "", "Target tool: claude, codex, or opencode")
+	to := fs.String("to", "", "Target tool: claude, codex, opencode, or kiro")
 	title := fs.String("title", "", "Title for the new session")
 	titleShort := fs.String("t", "", "Title for the new session (short)")
 	group := fs.String("group", "", "Group path for the new session")
@@ -137,7 +137,7 @@ func handleSessionHandover(profile string, args []string) {
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
 
 	fs.Usage = func() {
-		fmt.Println("Usage: agent-deck session handover <source-session> --to <claude|codex|opencode> [options]")
+		fmt.Println("Usage: agent-deck session handover <source-session> --to <claude|codex|opencode|kiro> [options]")
 		fmt.Println()
 		fmt.Println("Create a new target-tool session with a deterministic handover packet.")
 		fmt.Println()
@@ -155,7 +155,7 @@ func handleSessionHandover(profile string, args []string) {
 
 	out := NewCLIOutput(*jsonOutput, *quiet || *quietShort)
 	if fs.NArg() != 1 {
-		out.Error("usage: agent-deck session handover <source-session> --to <claude|codex|opencode>", ErrCodeInvalidOperation)
+		out.Error("usage: agent-deck session handover <source-session> --to <claude|codex|opencode|kiro>", ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 	if *start && *noStart {

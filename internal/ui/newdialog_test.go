@@ -93,6 +93,39 @@ func TestNewDialog_ModelInputForCodex(t *testing.T) {
 	}
 }
 
+func TestNewDialog_ModelInputAndOptionsForKiro(t *testing.T) {
+	d := NewNewDialog()
+	d.SetDefaultTool("kiro")
+	d.SetSize(100, 50)
+	d.Show()
+
+	if !d.selectedToolSupportsModel() {
+		t.Fatal("kiro should support model selection")
+	}
+	if idx := d.indexOf(focusModel); idx < 0 {
+		t.Fatal("model input should be focusable for kiro")
+	}
+	if idx := d.indexOf(focusOptions); idx < 0 {
+		t.Fatal("Kiro options should be focusable")
+	}
+	view := d.View()
+	if !strings.Contains(view, "Model ID") || !strings.Contains(view, "Kiro Options") || !strings.Contains(view, "Trust all tools") {
+		t.Fatalf("Kiro new-session dialog should render model and trust options:\n%s", view)
+	}
+
+	d.modelInput.SetValue("claude-sonnet-4-6")
+	if got := d.GetLaunchModelID(); got != "claude-sonnet-4-6" {
+		t.Fatalf("GetLaunchModelID() = %q, want claude-sonnet-4-6", got)
+	}
+	if d.GetKiroTrustAllTools() {
+		t.Fatal("Kiro trust-all-tools should default off without config")
+	}
+	d.kiroOptions.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !d.GetKiroTrustAllTools() {
+		t.Fatal("Kiro trust-all-tools should toggle on")
+	}
+}
+
 func TestNewDialog_ModelSuggestions_FilterAndSelectCodex(t *testing.T) {
 	d := NewNewDialog()
 	d.SetDefaultTool("codex")
@@ -271,8 +304,8 @@ func TestDisplayCommandPreset(t *testing.T) {
 func TestDialogPresetCommands(t *testing.T) {
 	d := NewNewDialog()
 
-	// Should have shell (empty), claude, gemini, opencode, codex, pi, copilot, crush, cursor, hermes
-	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "pi", "copilot", "crush", "cursor", "hermes"}
+	// Should have shell (empty), claude, gemini, opencode, codex, kiro, pi, copilot, crush, cursor, hermes
+	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "copilot", "crush", "cursor", "hermes"}
 
 	if len(d.presetCommands) != len(expectedCommands) {
 		t.Errorf("Expected %d preset commands, got %d", len(expectedCommands), len(d.presetCommands))

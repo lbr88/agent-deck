@@ -20,8 +20,8 @@ func TestHandoverDialog_ShowDefaultsAndExcludesSourceTool(t *testing.T) {
 	if !d.IsVisible() {
 		t.Fatal("dialog should be visible")
 	}
-	if strings.Join(d.targetOptions, ",") != "claude,opencode" {
-		t.Fatalf("targetOptions = %v, want claude/opencode without codex", d.targetOptions)
+	if strings.Join(d.targetOptions, ",") != "claude,opencode,kiro" {
+		t.Fatalf("targetOptions = %v, want claude/opencode/kiro without codex", d.targetOptions)
 	}
 	if d.titleInput.Value() != "SERV-220 (claude)" {
 		t.Fatalf("title default = %q", d.titleInput.Value())

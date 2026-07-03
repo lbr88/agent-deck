@@ -37,6 +37,15 @@ func TestSavedSessionImportDialogsAdvertiseSlashSearch(t *testing.T) {
 			t.Fatalf("import picker should advertise slash search:\n%s", rendered)
 		}
 	})
+
+	t.Run("kiro", func(t *testing.T) {
+		d := NewKiroImportDialog()
+		d.SetSize(120, 40)
+		d.Show([]session.KiroSavedSession{{ID: "44444444-4444-4444-4444-444444444444", Title: "alpha", UpdatedAt: time.Now()}})
+		if rendered := d.View(); !strings.Contains(rendered, "/ search") {
+			t.Fatalf("import picker should advertise slash search:\n%s", rendered)
+		}
+	})
 }
 
 func TestSavedSessionImportDialogsSlashSearchFiltersAndSelects(t *testing.T) {
@@ -117,6 +126,32 @@ func TestSavedSessionImportDialogsSlashSearchFiltersAndSelects(t *testing.T) {
 			t.Fatalf("selected = %#v ok=%v, want filtered entry", got, ok)
 		}
 	})
+
+	t.Run("kiro", func(t *testing.T) {
+		d := NewKiroImportDialog()
+		d.SetSize(120, 40)
+		entries := []session.KiroSavedSession{
+			{ID: "44444444-4444-4444-4444-444444444444", Title: "alpha", CWD: "/tmp/alpha", UpdatedAt: time.Now()},
+			{ID: "55555555-5555-5555-5555-555555555555", Title: "fresh session", CWD: "/tmp/fresh", UpdatedAt: time.Now()},
+		}
+		d.Show(entries)
+		typeSearch(d, "frsh")
+		rendered := d.View()
+		if strings.Contains(rendered, "alpha") {
+			t.Fatalf("search should hide non-matching rows:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "fresh session") || !strings.Contains(rendered, "Search: frsh") {
+			t.Fatalf("search should show matching row and query:\n%s", rendered)
+		}
+		_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatal("enter should submit the filtered selection")
+		}
+		got, ok := d.Selected()
+		if !ok || got.ID != entries[1].ID {
+			t.Fatalf("selected = %#v ok=%v, want filtered entry", got, ok)
+		}
+	})
 }
 
 func TestCodexImportDialogSearchFindsPathTailMatch(t *testing.T) {
@@ -163,6 +198,58 @@ func TestCodexImportDialogPathLinePreservesTailWhenNarrow(t *testing.T) {
 		ThreadName: "current work",
 		Path:       "/home/lrasmussen/git/private/agent-deck",
 		UpdatedAt:  time.Now(),
+	}})
+
+	rendered := d.View()
+	if !strings.Contains(rendered, "Path:") || !strings.Contains(rendered, "agent-deck") {
+		t.Fatalf("path should render on its own tail-preserving line:\n%s", rendered)
+	}
+}
+
+func TestKiroImportDialogSearchFindsPathTailMatch(t *testing.T) {
+	d := NewKiroImportDialog()
+	d.SetSize(88, 40)
+	now := time.Now()
+	entries := []session.KiroSavedSession{
+		{
+			ID:        "11111111-1111-1111-1111-111111111111",
+			Title:     "granted-registry headless",
+			CWD:       "/home/lrasmussen/git/domutech/granted-registry",
+			UpdatedAt: now,
+		},
+		{
+			ID:        "22222222-2222-2222-2222-222222222222",
+			Title:     "current work",
+			CWD:       "/home/lrasmussen/git/private/agent-deck",
+			UpdatedAt: now.Add(-time.Minute),
+		},
+	}
+	d.Show(entries)
+	typeSearch(d, "agent")
+
+	rendered := d.View()
+	if !strings.Contains(rendered, "agent-deck") {
+		t.Fatalf("path-tail search should show the matching Agent Deck cwd:\n%s", rendered)
+	}
+
+	_, cmd := d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should submit the path-matched selection")
+	}
+	got, ok := d.Selected()
+	if !ok || got.ID != entries[1].ID {
+		t.Fatalf("selected = %#v ok=%v, want path-matched Agent Deck entry", got, ok)
+	}
+}
+
+func TestKiroImportDialogPathLinePreservesTailWhenNarrow(t *testing.T) {
+	d := NewKiroImportDialog()
+	d.SetSize(72, 40)
+	d.Show([]session.KiroSavedSession{{
+		ID:        "22222222-2222-2222-2222-222222222222",
+		Title:     "current work",
+		CWD:       "/home/lrasmussen/git/private/agent-deck",
+		UpdatedAt: time.Now(),
 	}})
 
 	rendered := d.View()

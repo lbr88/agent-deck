@@ -39,6 +39,9 @@ func TestGetToolCommand_NoConfig(t *testing.T) {
 			t.Errorf("GetToolCommand(%q) with no config = %q, want %q", tool, got, tool)
 		}
 	}
+	if got := GetToolCommand("kiro"); got != "kiro-cli chat --tui" {
+		t.Errorf("GetToolCommand(\"kiro\") with no config = %q, want default Kiro CLI TUI command", got)
+	}
 }
 
 func TestGetToolCommand_WithOverride(t *testing.T) {
@@ -47,6 +50,7 @@ func TestGetToolCommand_WithOverride(t *testing.T) {
 		Gemini:   GeminiSettings{Command: "gemini --custom-flag"},
 		OpenCode: OpenCodeSettings{Command: "opencode-nightly"},
 		Codex:    CodexSettings{Command: "codex --experimental"},
+		Kiro:     KiroSettings{Command: "laude kiro-wrapper"},
 		Copilot:  CopilotSettings{Command: "gh copilot"},
 		Hermes:   HermesSettings{Command: "hermes --model gpt-5.5-pro --provider openai"},
 	}
@@ -61,6 +65,7 @@ func TestGetToolCommand_WithOverride(t *testing.T) {
 		{"gemini", "gemini --custom-flag"},
 		{"opencode", "opencode-nightly"},
 		{"codex", "codex --experimental"},
+		{"kiro", "laude kiro-wrapper"},
 		{"copilot", "gh copilot"},
 		{"hermes", "hermes --model gpt-5.5-pro --provider openai"},
 	}
@@ -80,6 +85,7 @@ func TestGetToolCommand_EmptyOverrideFallsBack(t *testing.T) {
 		Gemini:   GeminiSettings{Command: ""},
 		OpenCode: OpenCodeSettings{Command: ""},
 		Codex:    CodexSettings{Command: ""},
+		Kiro:     KiroSettings{Command: ""},
 		Copilot:  CopilotSettings{Command: ""},
 		Hermes:   HermesSettings{Command: ""},
 	}
@@ -92,6 +98,9 @@ func TestGetToolCommand_EmptyOverrideFallsBack(t *testing.T) {
 		if got != tool {
 			t.Errorf("GetToolCommand(%q) with empty override = %q, want %q", tool, got, tool)
 		}
+	}
+	if got := GetToolCommand("kiro"); got != "kiro-cli chat --tui" {
+		t.Errorf("GetToolCommand(\"kiro\") with empty override = %q, want default Kiro CLI TUI command", got)
 	}
 }
 

@@ -17,12 +17,14 @@ const (
 	importSourceCodex
 	importSourceClaude
 	importSourceOpenCode
+	importSourceKiro
 )
 
 type ImportSourceCounts struct {
 	Codex    int
 	Claude   int
 	OpenCode int
+	Kiro     int
 }
 
 type ImportSourceDialog struct {
@@ -74,6 +76,13 @@ func (d *ImportSourceDialog) OpenCodeCount() int {
 		return 0
 	}
 	return d.counts.OpenCode
+}
+
+func (d *ImportSourceDialog) KiroCount() int {
+	if d == nil {
+		return 0
+	}
+	return d.counts.Kiro
 }
 
 func (d *ImportSourceDialog) SetSize(width, height int) {
@@ -158,5 +167,6 @@ func (d *ImportSourceDialog) sources() []importSourceItem {
 		{source: importSourceCodex, label: fmt.Sprintf("Saved Codex sessions  %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.Codex)))},
 		{source: importSourceClaude, label: fmt.Sprintf("Saved Claude sessions %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.Claude)))},
 		{source: importSourceOpenCode, label: fmt.Sprintf("Saved OpenCode sessions %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.OpenCode)))},
+		{source: importSourceKiro, label: fmt.Sprintf("Saved Kiro sessions   %s", dimStyle.Render(fmt.Sprintf("%d", d.counts.Kiro)))},
 	}
 }

@@ -121,7 +121,7 @@ func TestHandoverSessionCLIHelperValidationErrors(t *testing.T) {
 			return nil, []*session.Instance{source}, nil, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "allowed targets are claude, codex, opencode") {
+	if err == nil || !strings.Contains(err.Error(), "allowed targets are claude, codex, opencode, kiro") {
 		t.Fatalf("unknown-target error = %v, want allowed-targets validation", err)
 	}
 }

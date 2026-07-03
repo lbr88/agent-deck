@@ -1574,6 +1574,17 @@ func TestApplyLaunchModel_SetsToolSpecificFields(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "kiro",
+			tool: "kiro",
+			want: func(t *testing.T, inst *Instance) {
+				t.Helper()
+				opts := inst.GetKiroOptions()
+				if opts == nil || opts.Model != "claude-sonnet-4-6" {
+					t.Fatalf("Kiro model = %#v, want claude-sonnet-4-6", opts)
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {

@@ -47,6 +47,7 @@ func TestRegistry_MatchAllBranches(t *testing.T) {
 		// codex
 		{"codex with flags", "/usr/local/bin/codex --yolo", "codex"},
 		// kiro
+		{"kiro bare", "kiro", "kiro"},
 		{"kiro cli chat", "kiro-cli chat --tui", "kiro"},
 		{"kiro path", "/home/me/bin/kiro-cli chat --resume-id abc", "kiro"},
 		// pi — whitespace-token match, NOT substring

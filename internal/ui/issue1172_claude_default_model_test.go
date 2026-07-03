@@ -56,6 +56,35 @@ func TestIssue1172_ClaudeDefaultModelPreselected(t *testing.T) {
 	}
 }
 
+func TestKiroDefaultModelPreselected(t *testing.T) {
+	tempDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	t.Cleanup(func() { os.Setenv("HOME", originalHome) })
+
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".agent-deck"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := session.SaveUserConfig(&session.UserConfig{
+		Kiro: session.KiroSettings{DefaultModel: "claude-sonnet-4-6"},
+	}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+	session.ClearUserConfigCache()
+
+	d := NewNewDialog()
+	d.SetDefaultTool("kiro")
+	d.SetSize(100, 50)
+	d.ShowInGroup("projects", "Projects", "/tmp", nil, "")
+
+	if got := d.GetLaunchModelID(); got != "claude-sonnet-4-6" {
+		t.Fatalf("GetLaunchModelID() = %q, want claude-sonnet-4-6", got)
+	}
+}
+
 // Regression: no [claude].default_model => the model field stays empty, which
 // is the pre-#1172 behavior (Claude uses its own default). This guards against
 // the fix accidentally forcing a model when none is configured.

@@ -157,6 +157,17 @@ func TestInstanceLaunchModelInfo(t *testing.T) {
 			modelID: "openai/gpt-5.4-mini",
 		},
 		{
+			name: "kiro options",
+			inst: func() *Instance {
+				inst := NewInstanceWithTool("kiro", "/tmp/test", "kiro")
+				if err := inst.SetKiroOptions(&KiroOptions{Model: "claude-sonnet-4-6"}); err != nil {
+					t.Fatal(err)
+				}
+				return inst
+			}(),
+			modelID: "claude-sonnet-4-6",
+		},
+		{
 			name:    "tool default",
 			inst:    NewInstanceWithTool("shell", "/tmp/test", "shell"),
 			modelID: "",

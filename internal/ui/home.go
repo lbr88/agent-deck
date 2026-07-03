@@ -263,6 +263,9 @@ type Home struct {
 	openCodeImportEntries     []session.OpenCodeImportEntry
 	openCodeImportErr         error
 	loadOpenCodeImportEntries func(context.Context) ([]session.OpenCodeImportEntry, error)
+	kiroImportDialog          *KiroImportDialog // Picks a saved Kiro CLI session to import
+	kiroImportEntries         []session.KiroSavedSession
+	kiroImportErr             error
 	feedbackState             *feedback.State      // Loaded at first show, avoids repeated disk I/O
 	feedbackSender            *feedback.Sender     // Sender constructed once in NewHome (Phase 3, per D-05)
 	watcherPanel              *WatcherPanel        // For showing watcher status and events
@@ -900,6 +903,8 @@ type importSourcesLoadedMsg struct {
 	claudeErr       error
 	openCodeEntries []session.OpenCodeImportEntry
 	openCodeErr     error
+	kiroEntries     []session.KiroSavedSession
+	kiroErr         error
 }
 type sessionForkedMsg struct {
 	instance *session.Instance
@@ -1151,6 +1156,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		loadOpenCodeImportEntries: func(ctx context.Context) ([]session.OpenCodeImportEntry, error) {
 			return session.ListOpenCodeImportEntries(ctx, "")
 		},
+		kiroImportDialog:          NewKiroImportDialog(),
 		feedbackSender:            feedback.NewSender(),
 		watcherPanel:              NewWatcherPanel(),
 		toolVisibilityPanel:       NewToolVisibilityPanel(),
@@ -4655,10 +4661,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			h.openCodeImportEntries = append(h.openCodeImportEntries[:0], msg.openCodeEntries...)
 		}
+		h.kiroImportErr = msg.kiroErr
+		if msg.kiroErr != nil {
+			h.kiroImportEntries = nil
+		} else {
+			h.kiroImportEntries = append(h.kiroImportEntries[:0], msg.kiroEntries...)
+		}
 		h.importSourceDialog.Show(ImportSourceCounts{
 			Codex:    len(h.codexImportEntries),
 			Claude:   len(h.claudeImportEntries),
 			OpenCode: len(h.openCodeImportEntries),
+			Kiro:     len(h.kiroImportEntries),
 		})
 		h.importSourceDialog.SetSize(h.width, h.height)
 		return h, nil
@@ -4674,6 +4687,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Codex:    len(h.codexImportEntries),
 			Claude:   len(h.claudeImportEntries),
 			OpenCode: len(h.openCodeImportEntries),
+			Kiro:     len(h.kiroImportEntries),
 		})
 		h.importSourceDialog.SetSize(h.width, h.height)
 		return h, nil
@@ -6248,6 +6262,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Codex:    len(h.codexImportEntries),
 			Claude:   len(h.claudeImportEntries),
 			OpenCode: len(h.openCodeImportEntries),
+			Kiro:     len(h.kiroImportEntries),
 		})
 		h.importSourceDialog.SetSize(h.width, h.height)
 		return h, nil
@@ -6391,6 +6406,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
 			return h.handleClaudeImportDialogKey(msg)
 		}
+		if h.kiroImportDialog != nil && h.kiroImportDialog.IsVisible() {
+			return h.handleKiroImportDialogKey(msg)
+		}
 		if h.newDialog.IsVisible() {
 			return h.handleNewDialogKey(msg)
 		}
@@ -6436,6 +6454,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.openCodeImportDialog != nil && h.openCodeImportDialog.IsVisible() {
 			return h.handleOpenCodeImportDialogKey(msg)
+		}
+		if h.kiroImportDialog != nil && h.kiroImportDialog.IsVisible() {
+			return h.handleKiroImportDialogKey(msg)
 		}
 		if h.sessionSwitcher.IsVisible() {
 			return h.handleSessionSwitcherKey(msg)
@@ -6806,6 +6827,12 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			yolo := h.newDialog.GetCodexYoloMode()
 			codexOpts := &session.CodexOptions{YoloMode: &yolo}
 			toolOptionsJSON, _ = session.MarshalToolOptions(codexOpts)
+		} else if command == "kiro" {
+			trustAllTools := h.newDialog.GetKiroTrustAllTools()
+			userConfig, _ := session.LoadUserConfig()
+			kiroOpts := session.NewKiroOptions(userConfig)
+			kiroOpts.TrustAllTools = trustAllTools
+			toolOptionsJSON, _ = session.MarshalToolOptions(kiroOpts)
 		} else if command == "hermes" {
 			yolo := h.newDialog.GetHermesYoloMode()
 			hermesOpts := &session.HermesOptions{YoloMode: &yolo}
@@ -8337,6 +8364,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.claudeImportEntries = nil
 		h.openCodeImportErr = nil
 		h.openCodeImportEntries = nil
+		h.kiroImportErr = nil
+		h.kiroImportEntries = nil
 		return h, h.openImportDialog
 
 	case "I":
@@ -8829,9 +8858,9 @@ func (h *Home) openHandoverDialogForSelected() {
 		return
 	}
 	switch canonicalHandoverDialogTool(item.Session) {
-	case "claude", "codex", "opencode":
+	case "claude", "codex", "opencode", "kiro":
 	default:
-		h.setError(fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode", item.Session.Tool))
+		h.setError(fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode, kiro", item.Session.Tool))
 		return
 	}
 	h.handoverDialog.SetSize(h.width, h.height)
@@ -10548,6 +10577,8 @@ func createSessionTool(command string) (string, string) {
 		tool = "codex"
 	case "opencode":
 		tool = "opencode"
+	case "kiro":
+		tool = "kiro"
 	case "pi":
 		tool = "pi"
 	case "copilot":
@@ -12320,6 +12351,13 @@ func (h *Home) openImportDialog() tea.Msg {
 		msg.openCodeEntries = openCodeEntries
 	}
 
+	kiroEntries, err := session.ListKiroSavedSessions(session.KiroSessionsDir())
+	if err != nil {
+		msg.kiroErr = err
+	} else {
+		msg.kiroEntries = kiroEntries
+	}
+
 	return msg
 }
 
@@ -12387,6 +12425,18 @@ func (h *Home) handleImportSourceDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		h.openCodeImportDialog.Show(h.openCodeImportEntries)
 		h.openCodeImportDialog.SetSize(h.width, h.height)
+		return h, nil
+	case importSourceKiro:
+		if h.kiroImportErr != nil {
+			h.setError(fmt.Errorf("failed to load saved Kiro sessions: %w", h.kiroImportErr))
+			return h, nil
+		}
+		if len(h.kiroImportEntries) == 0 {
+			h.setError(fmt.Errorf("no saved Kiro sessions found"))
+			return h, nil
+		}
+		h.kiroImportDialog.Show(h.kiroImportEntries)
+		h.kiroImportDialog.SetSize(h.width, h.height)
 		return h, nil
 	default:
 		return h, nil
@@ -12511,6 +12561,42 @@ func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry
 	}
 }
 
+func (h *Home) handleKiroImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	h.kiroImportDialog, cmd = h.kiroImportDialog.Update(msg)
+	entry, ok := h.kiroImportDialog.Selected()
+	if !ok {
+		return h, cmd
+	}
+	h.kiroImportDialog.Hide()
+	return h, h.createSessionFromKiroImport(entry)
+}
+
+func (h *Home) createSessionFromKiroImport(entry session.KiroSavedSession) tea.Cmd {
+	return func() tea.Msg {
+		projectPath := strings.TrimSpace(entry.CWD)
+		if projectPath == "" {
+			projectPath = currentWorkingDirOrDot()
+		}
+		inst, err := session.NewKiroImportedInstance(entry, session.KiroImportOptions{
+			GroupPath:           importGroupPathForProject(projectPath),
+			ProjectPath:         projectPath,
+			FallbackProjectPath: projectPath,
+			Command:             session.GetKiroCommand(),
+		})
+		if err != nil {
+			return sessionCreatedMsg{err: err}
+		}
+		if existingInst := findKiroImportSessionIDConflict(h.instances, inst.KiroSessionID); existingInst != nil {
+			return sessionCreatedMsg{err: fmt.Errorf("Kiro session %q is already imported by Agent Deck session %q (%s)", inst.KiroSessionID, existingInst.Title, existingInst.ID)}
+		}
+		if isDupe, existingInst := isExactDuplicateImport(h.instances, inst.Title, inst.ProjectPath); isDupe {
+			return sessionCreatedMsg{err: fmt.Errorf("session already exists with same title and path: %s (%s)", existingInst.Title, existingInst.ID)}
+		}
+		return sessionCreatedMsg{instance: inst}
+	}
+}
+
 var startHandoverTarget = func(inst *session.Instance, prompt string) error {
 	if err := inst.StartWithMessage(prompt); err != nil {
 		return err
@@ -12627,6 +12713,19 @@ func findOpenCodeImportSessionIDConflict(instances []*session.Instance, imported
 	}
 	for _, inst := range instances {
 		if strings.TrimSpace(inst.OpenCodeSessionID) == importedSessionID {
+			return inst
+		}
+	}
+	return nil
+}
+
+func findKiroImportSessionIDConflict(instances []*session.Instance, importedSessionID string) *session.Instance {
+	importedSessionID = strings.ToLower(strings.TrimSpace(importedSessionID))
+	if importedSessionID == "" {
+		return nil
+	}
+	for _, inst := range instances {
+		if strings.ToLower(strings.TrimSpace(inst.KiroSessionID)) == importedSessionID {
 			return inst
 		}
 	}
@@ -12902,6 +13001,9 @@ func (h *Home) updateSizes() {
 	if h.openCodeImportDialog != nil {
 		h.openCodeImportDialog.SetSize(h.width, h.height)
 	}
+	if h.kiroImportDialog != nil {
+		h.kiroImportDialog.SetSize(h.width, h.height)
+	}
 	if h.sessionSwitcher != nil {
 		// The switcher is a centered full-screen overlay; keep it sized so a
 		// resize while it is open (notably from the overview, where it can stay
@@ -12994,6 +13096,9 @@ func (h *Home) View() string {
 	if h.claudeImportDialog != nil && h.claudeImportDialog.IsVisible() {
 		return h.claudeImportDialog.View()
 	}
+	if h.kiroImportDialog != nil && h.kiroImportDialog.IsVisible() {
+		return h.kiroImportDialog.View()
+	}
 	if h.newDialog.IsVisible() {
 		return h.newDialog.View()
 	}
@@ -13032,6 +13137,9 @@ func (h *Home) View() string {
 	}
 	if h.openCodeImportDialog != nil && h.openCodeImportDialog.IsVisible() {
 		return h.openCodeImportDialog.View()
+	}
+	if h.kiroImportDialog != nil && h.kiroImportDialog.IsVisible() {
+		return h.kiroImportDialog.View()
 	}
 	if h.sessionSwitcher.IsVisible() {
 		return h.sessionSwitcher.View()

@@ -79,6 +79,23 @@ func writeClaudeImportNameForHome(t *testing.T, configDir, file, sessionID, name
 	}
 }
 
+func writeKiroSessionForHomeImport(t *testing.T, kiroHome, sessionID, title, cwd string) {
+	t.Helper()
+	sessionsDir := filepath.Join(kiroHome, "sessions", "cli")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir kiro sessions dir: %v", err)
+	}
+	payload := fmt.Sprintf(
+		`{"session_id":%q,"cwd":%q,"title":%q,"created_at":"2026-06-30T10:00:00Z","updated_at":"2026-06-30T11:00:00Z","session_state":{"agent_name":"Kiro"}}`,
+		sessionID,
+		cwd,
+		title,
+	)
+	if err := os.WriteFile(filepath.Join(sessionsDir, sessionID+".json"), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write kiro session metadata: %v", err)
+	}
+}
+
 func TestHomeCodexImportHotkeyOpensSourceDialog(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -176,6 +193,28 @@ func TestHomeOpenCodeImportHotkeyOpensSourceDialog(t *testing.T) {
 	}
 	if got := h.importSourceDialog.OpenCodeCount(); got != 1 {
 		t.Fatalf("OpenCode count = %d, want 1", got)
+	}
+}
+
+func TestHomeKiroImportHotkeyOpensSourceDialog(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	kiroHome := filepath.Join(homeDir, ".kiro")
+	t.Setenv("KIRO_HOME", kiroHome)
+	writeKiroSessionForHomeImport(t, kiroHome, "88888888-8888-8888-8888-888888888888", "saved kiro", "/tmp/kiro-project")
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should load import options")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("import source dialog should be visible after import hotkey")
+	}
+	if got := h.importSourceDialog.KiroCount(); got != 1 {
+		t.Fatalf("Kiro count = %d, want 1", got)
 	}
 }
 
@@ -331,6 +370,33 @@ func TestHomeImportHotkeyKeepsTmuxSourceWhenOpenCodeListFails(t *testing.T) {
 	}
 }
 
+func TestHomeImportHotkeyKeepsTmuxSourceWhenKiroLoadFails(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	kiroHome := filepath.Join(homeDir, ".kiro")
+	t.Setenv("KIRO_HOME", kiroHome)
+	if err := os.MkdirAll(filepath.Join(kiroHome, "sessions"), 0o755); err != nil {
+		t.Fatalf("mkdir kiro sessions parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kiroHome, "sessions", "cli"), []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if cmd == nil {
+		t.Fatal("import hotkey should still open import source chooser")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("tmux import source chooser should remain visible when Kiro load fails")
+	}
+	if h.err != nil {
+		t.Fatalf("Kiro load failure should not block tmux import before Kiro is selected, got %v", h.err)
+	}
+}
+
 func TestHomeImportSourceCodexSelectionShowsDeferredIndexError(t *testing.T) {
 	homeDir := setXDGTestHome(t)
 	codexHome := filepath.Join(homeDir, ".codex")
@@ -438,11 +504,62 @@ func TestHomeImportSourceOpenCodeSelectionShowsEmptyListError(t *testing.T) {
 	}
 }
 
+func TestHomeImportSourceKiroSelectionShowsDeferredLoadError(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	kiroHome := filepath.Join(homeDir, ".kiro")
+	t.Setenv("KIRO_HOME", kiroHome)
+	if err := os.MkdirAll(filepath.Join(kiroHome, "sessions"), 0o755); err != nil {
+		t.Fatalf("mkdir kiro sessions parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kiroHome, "sessions", "cli"), []byte("not-a-dir"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	h = selectKiroImportSource(t, h)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "failed to load saved Kiro sessions") {
+		t.Fatalf("selecting Kiro source should surface deferred load error, got %v", h.err)
+	}
+}
+
+func TestHomeImportSourceKiroSelectionShowsEmptyListError(t *testing.T) {
+	homeDir := setXDGTestHome(t)
+	t.Setenv("KIRO_HOME", filepath.Join(homeDir, ".kiro"))
+
+	h := NewHome()
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	h = selectKiroImportSource(t, h)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "no saved Kiro sessions found") {
+		t.Fatalf("selecting Kiro source with no sessions should show a user-facing error, got %v", h.err)
+	}
+}
+
 func selectOpenCodeImportSource(t *testing.T, h *Home) *Home {
 	t.Helper()
 
 	var model tea.Model
 	for i := 0; i < 3; i++ {
+		model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+		h = model.(*Home)
+	}
+	model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	return model.(*Home)
+}
+
+func selectKiroImportSource(t *testing.T, h *Home) *Home {
+	t.Helper()
+
+	var model tea.Model
+	for i := 0; i < 4; i++ {
 		model, _ = h.handleImportSourceDialogKey(tea.KeyMsg{Type: tea.KeyDown})
 		h = model.(*Home)
 	}
@@ -558,6 +675,40 @@ func TestHomeOpenCodeImportSelectionCreatesPersistedStoppedSession(t *testing.T)
 	}
 }
 
+func TestHomeKiroImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
+	projectPath := "/home/lrasmussen/git/domutech/domutech-kiro"
+	h := NewHomeWithProfile("kiro_import_tui")
+	h.groupScope = "tmp"
+	entry := session.KiroSavedSession{
+		ID:        "99999999-9999-9999-9999-999999999999",
+		Title:     "imported from tui",
+		CWD:       projectPath,
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.kiroImportDialog.Show([]session.KiroSavedSession{entry})
+
+	_, cmd := h.handleKiroImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting a Kiro import should create a session command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	instances, _, err := h.storage.LoadWithGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances=%d, want 1", len(instances))
+	}
+	got := instances[0]
+	if got.Tool != "kiro" || got.Command != session.GetKiroCommand() || got.KiroSessionID != entry.ID ||
+		got.Title != entry.Title || got.ProjectPath != entry.CWD || got.GroupPath != "domutech" ||
+		got.Status != session.StatusStopped {
+		t.Fatalf("bad persisted Kiro import: %#v", got)
+	}
+}
+
 func TestHomeOpenCodeImportRejectsDuplicateSessionID(t *testing.T) {
 	projectPath := t.TempDir()
 	h := NewHomeWithProfile("opencode_import_duplicate_id_tui")
@@ -582,6 +733,33 @@ func TestHomeOpenCodeImportRejectsDuplicateSessionID(t *testing.T) {
 
 	if h.err == nil || !strings.Contains(h.err.Error(), "already imported by Agent Deck session") {
 		t.Fatalf("duplicate OpenCode session ID should set user-facing error, got %v", h.err)
+	}
+}
+
+func TestHomeKiroImportRejectsDuplicateSessionID(t *testing.T) {
+	projectPath := t.TempDir()
+	h := NewHomeWithProfile("kiro_import_duplicate_id_tui")
+	existing := session.NewInstanceWithTool("existing", projectPath, "kiro")
+	existing.KiroSessionID = "88888888-8888-8888-8888-888888888888"
+	h.instances = []*session.Instance{existing}
+
+	entry := session.KiroSavedSession{
+		ID:        "88888888-8888-8888-8888-888888888888",
+		Title:     "duplicate imported session",
+		CWD:       filepath.Join(projectPath, "other"),
+		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
+	}
+	h.kiroImportDialog.Show([]session.KiroSavedSession{entry})
+
+	_, cmd := h.handleKiroImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("selecting a Kiro import should return a create command")
+	}
+	model, _ := h.updateInner(cmd())
+	h = model.(*Home)
+
+	if h.err == nil || !strings.Contains(h.err.Error(), "already imported by Agent Deck session") {
+		t.Fatalf("duplicate Kiro session ID should set user-facing error, got %v", h.err)
 	}
 }
 
@@ -740,6 +918,15 @@ func TestCreateSessionTool_Hermes(t *testing.T) {
 	tool, command := createSessionTool("hermes")
 	if tool != "hermes" || command != "hermes" {
 		t.Fatalf("createSessionTool(\"hermes\") = (%q, %q), want (\"hermes\", \"hermes\")", tool, command)
+	}
+}
+
+// TUI session creation must produce Tool="kiro" rather than Tool="shell" with
+// Command="kiro", matching the Kiro CLI command builder.
+func TestCreateSessionTool_Kiro(t *testing.T) {
+	tool, command := createSessionTool("kiro")
+	if tool != "kiro" || command != "kiro" {
+		t.Fatalf("createSessionTool(\"kiro\") = (%q, %q), want (\"kiro\", \"kiro\")", tool, command)
 	}
 }
 

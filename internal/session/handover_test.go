@@ -92,6 +92,22 @@ func TestHandoverSession_OpenCodeToClaudeIncludesSourceSessionID(t *testing.T) {
 	}
 }
 
+func TestHandoverSession_KiroToCodexIncludesSourceSessionID(t *testing.T) {
+	source := NewInstanceWithGroupAndTool("investigate", t.TempDir(), "grp", "kiro")
+	source.KiroSessionID = "75e59a16-9f76-433d-baa3-3cb8e5ef4c5d"
+
+	result, err := HandoverSession(source, HandoverOptions{Target: HandoverTargetCodex})
+	if err != nil {
+		t.Fatalf("HandoverSession: %v", err)
+	}
+	if result.Target.Tool != "codex" || result.Target.Command != "codex" {
+		t.Fatalf("target = tool %q command %q, want codex/codex", result.Target.Tool, result.Target.Command)
+	}
+	if !strings.Contains(result.HandoverPrompt, "- Source tool session id: 75e59a16-9f76-433d-baa3-3cb8e5ef4c5d") {
+		t.Fatalf("prompt missing Kiro session id:\n%s", result.HandoverPrompt)
+	}
+}
+
 func TestHandoverSession_MissingLatestOutputUsesFallback(t *testing.T) {
 	source := NewInstanceWithGroupAndTool("codex source", t.TempDir(), "grp", "codex")
 

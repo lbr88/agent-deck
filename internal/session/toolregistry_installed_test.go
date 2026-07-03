@@ -100,6 +100,18 @@ func TestInstalled_FilterDropsMissing(t *testing.T) {
 	})
 }
 
+func TestInstalled_KiroUsesKiroCLIProbe(t *testing.T) {
+	withStubbedProbe(t, []string{"kiro-cli"}, func() {
+		r := InitFiltered(nil, true, nil)
+		if !r.IsVisible("kiro") {
+			t.Fatal("IsVisible(kiro) = false, want true when kiro-cli resolves")
+		}
+		if got := commands(r.Visible()); !reflect.DeepEqual(got, []string{"kiro", "shell"}) {
+			t.Fatalf("Visible() = %v, want [kiro shell]", got)
+		}
+	})
+}
+
 // TestInstalled_ShellAlwaysShown is the shell invariant: even when shell's own
 // name would not resolve via LookPath, it is hardcoded visible.
 func TestInstalled_ShellAlwaysShown(t *testing.T) {

@@ -190,6 +190,7 @@ const (
 	IconGemini   = "✨"
 	IconOpenCode = "🌐"
 	IconCodex    = "💻"
+	IconKiro     = "K"
 	IconPi       = "π"
 	IconShell    = "🐚"
 )
@@ -521,6 +522,7 @@ func initStyles() {
 		"claude":   lipgloss.NewStyle().Foreground(ColorOrange),
 		"gemini":   lipgloss.NewStyle().Foreground(ColorPurple),
 		"codex":    lipgloss.NewStyle().Foreground(ColorCyan),
+		"kiro":     lipgloss.NewStyle().Foreground(ColorYellow),
 		"copilot":  lipgloss.NewStyle().Foreground(ColorAccent),
 		"hermes":   lipgloss.NewStyle().Foreground(ColorYellow),
 		"pi":       lipgloss.NewStyle().Foreground(ColorAccent),
@@ -602,6 +604,8 @@ func ToolIcon(tool string) string {
 		return IconOpenCode
 	case "codex":
 		return IconCodex
+	case "kiro":
+		return IconKiro
 	case "copilot":
 		return "🐙"
 	case "crush":

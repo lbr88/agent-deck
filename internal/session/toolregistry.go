@@ -151,8 +151,13 @@ func (r *Registry) runInstalledProbe() {
 			r.installed[name] = true // shell is always shown
 			continue
 		}
-		// A built-in's command is its bare name (matches Registry.All / detectTool).
-		ok := probeInstalled(name)
+		// Most built-ins probe by their tool name. Kiro's canonical Agent Deck
+		// tool id is "kiro", while the installed executable is "kiro-cli".
+		probeName := name
+		if name == "kiro" {
+			probeName = "kiro-cli"
+		}
+		ok := probeInstalled(probeName)
 		r.installed[name] = ok
 		if ok {
 			nonShellInstalled++
@@ -435,7 +440,7 @@ func ConfiguredHiddenToolNames() []string {
 }
 
 // pickerPresetOrder matches buildPresetCommands in internal/ui/newdialog.go.
-var pickerPresetOrder = []string{"", "claude", "gemini", "opencode", "codex", "pi", "copilot", "crush", "cursor", "hermes"}
+var pickerPresetOrder = []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "copilot", "crush", "cursor", "hermes"}
 
 // PickerToolNames returns tool names for the new-session picker after applying
 // hidden_tools and show_only_installed_tools. The empty command "" is mapped

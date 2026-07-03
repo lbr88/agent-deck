@@ -285,7 +285,7 @@ func canonicalHandoverDialogTool(source *session.Instance) string {
 }
 
 func handoverDialogTargets(sourceTool string) []string {
-	all := []string{"claude", "codex", "opencode"}
+	all := []string{"claude", "codex", "opencode", "kiro"}
 	targets := make([]string, 0, len(all)-1)
 	for _, target := range all {
 		if target != sourceTool {
@@ -314,6 +314,8 @@ func handoverDialogSourceToolID(source *session.Instance) string {
 		return source.CodexSessionID
 	case "opencode":
 		return source.OpenCodeSessionID
+	case "kiro":
+		return source.KiroSessionID
 	default:
 		return ""
 	}

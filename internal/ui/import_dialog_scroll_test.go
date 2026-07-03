@@ -70,6 +70,24 @@ func TestSavedSessionImportDialogsBoundVisibleRows(t *testing.T) {
 			t.Fatalf("selected row should stay visible after scrolling:\n%s", rendered)
 		}
 	})
+
+	t.Run("kiro", func(t *testing.T) {
+		d := NewKiroImportDialog()
+		d.SetSize(width, height)
+		d.Show(kiroImportEntriesForScrollTest(12))
+		for i := 0; i < 8; i++ {
+			_, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
+		}
+
+		rendered := d.View()
+		assertImportDialogBounded(t, rendered, height)
+		if strings.Contains(rendered, "kiro-session-00") {
+			t.Fatalf("first row should scroll out of the import picker:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "kiro-session-08") {
+			t.Fatalf("selected row should stay visible after scrolling:\n%s", rendered)
+		}
+	})
 }
 
 func assertImportDialogBounded(t *testing.T, rendered string, height int) {
@@ -116,6 +134,20 @@ func openCodeImportEntriesForScrollTest(count int) []session.OpenCodeImportEntry
 			ID:        fmt.Sprintf("ses_%02d", i),
 			Title:     fmt.Sprintf("opencode-session-%02d", i),
 			Directory: fmt.Sprintf("/tmp/project-%02d", i),
+			UpdatedAt: now.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	return entries
+}
+
+func kiroImportEntriesForScrollTest(count int) []session.KiroSavedSession {
+	entries := make([]session.KiroSavedSession, 0, count)
+	now := time.Now()
+	for i := 0; i < count; i++ {
+		entries = append(entries, session.KiroSavedSession{
+			ID:        fmt.Sprintf("66666666-6666-6666-6666-%012d", i),
+			Title:     fmt.Sprintf("kiro-session-%02d", i),
+			CWD:       fmt.Sprintf("/tmp/project-%02d", i),
 			UpdatedAt: now.Add(time.Duration(i) * time.Minute),
 		})
 	}

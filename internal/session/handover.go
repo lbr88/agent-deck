@@ -15,6 +15,7 @@ const (
 	HandoverTargetClaude   HandoverTarget = "claude"
 	HandoverTargetCodex    HandoverTarget = "codex"
 	HandoverTargetOpenCode HandoverTarget = "opencode"
+	HandoverTargetKiro     HandoverTarget = "kiro"
 )
 
 type HandoverOptions struct {
@@ -114,8 +115,10 @@ func normalizeHandoverTarget(target HandoverTarget) (string, error) {
 		return string(HandoverTargetCodex), nil
 	case string(HandoverTargetOpenCode):
 		return string(HandoverTargetOpenCode), nil
+	case string(HandoverTargetKiro):
+		return string(HandoverTargetKiro), nil
 	default:
-		return "", fmt.Errorf("unsupported handover target %q: allowed targets are claude, codex, opencode", target)
+		return "", fmt.Errorf("unsupported handover target %q: allowed targets are claude, codex, opencode, kiro", target)
 	}
 }
 
@@ -127,8 +130,10 @@ func handoverSourceTool(source *Instance) (string, error) {
 		return string(HandoverTargetCodex), nil
 	case source.Tool == string(HandoverTargetOpenCode):
 		return string(HandoverTargetOpenCode), nil
+	case source.Tool == string(HandoverTargetKiro):
+		return string(HandoverTargetKiro), nil
 	default:
-		return "", fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode", source.Tool)
+		return "", fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode, kiro", source.Tool)
 	}
 }
 
@@ -260,6 +265,8 @@ func sourceHandoverToolSessionID(source *Instance, sourceTool string) string {
 		return strings.TrimSpace(source.CodexSessionID)
 	case string(HandoverTargetOpenCode):
 		return strings.TrimSpace(source.OpenCodeSessionID)
+	case string(HandoverTargetKiro):
+		return strings.TrimSpace(source.KiroSessionID)
 	default:
 		return ""
 	}

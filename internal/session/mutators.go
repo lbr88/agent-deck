@@ -39,7 +39,7 @@ const (
 	// FieldModel persists the operator's selected per-session model (#1436,
 	// follow-up to #1431). Tool-agnostic: routes to each tool's existing model
 	// store (ClaudeOptions.Model, GeminiModel, OpenCodeOptions.Model,
-	// CodexOptions.Model) via Instance.ApplyLaunchModel, so a model switched
+	// KiroOptions.Model, CodexOptions.Model) via Instance.ApplyLaunchModel, so a model switched
 	// after launch survives `session restart` instead of reverting to the
 	// baked/default model. Restart-required (the running process keeps the
 	// model it launched with).

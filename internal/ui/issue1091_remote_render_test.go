@@ -79,7 +79,7 @@ func TestIssue1091_RemoteSession_ToolColorMatchesLocal(t *testing.T) {
 func TestIssue1091_RemoteSession_ToolColorAllTools(t *testing.T) {
 	forceTrueColorProfile()
 
-	tools := []string{"claude", "gemini", "codex", "aider", "opencode", "cursor"}
+	tools := []string{"claude", "gemini", "codex", "kiro", "aider", "opencode", "cursor"}
 
 	for _, tool := range tools {
 		t.Run(tool, func(t *testing.T) {

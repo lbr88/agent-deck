@@ -162,6 +162,7 @@ type NewDialog struct {
 	claudeOptions         *ClaudeOptionsPanel // Claude-specific options (concrete for value extraction).
 	geminiOptions         *YoloOptionsPanel   // Gemini YOLO panel (concrete for value extraction).
 	codexOptions          *YoloOptionsPanel   // Codex YOLO panel (concrete for value extraction).
+	kiroOptions           *YoloOptionsPanel   // Kiro trust-all-tools panel (concrete for value extraction).
 	hermesOptions         *YoloOptionsPanel   // Hermes YOLO panel (concrete for value extraction).
 	toolOptions           OptionsPanel        // Currently active tool options panel (nil if none).
 	focusTargets          []focusTarget       // Ordered list of active focusable elements.
@@ -237,6 +238,7 @@ type dialogSnapshot struct {
 	claudeOptions    *session.ClaudeOptions
 	geminiYolo       bool
 	codexYolo        bool
+	kiroTrustAll     bool
 	hermesYolo       bool
 	multiRepoEnabled bool
 	multiRepoPaths   []string
@@ -261,7 +263,7 @@ func displayCommandPreset(cmd string) string {
 // flag off FilterVisibleToolNames is a no-op, so the list is byte-identical to
 // before.
 func buildPresetCommands() []string {
-	presets := []string{"", "claude", "gemini", "opencode", "codex", "pi", "copilot", "crush", "cursor", "hermes"}
+	presets := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "copilot", "crush", "cursor", "hermes"}
 	if customTools := session.GetCustomToolNames(); len(customTools) > 0 {
 		presets = append(presets, customTools...)
 	}
@@ -371,6 +373,7 @@ func NewNewDialog() *NewDialog {
 		claudeOptions:   NewClaudeOptionsPanel(),
 		geminiOptions:   NewYoloOptionsPanel("Gemini", "YOLO mode - auto-approve all"),
 		codexOptions:    NewYoloOptionsPanel("Codex", "YOLO mode - bypass approvals and sandbox"),
+		kiroOptions:     NewYoloOptionsPanel("Kiro", "Trust all tools - auto-approve Kiro tool use"),
 		hermesOptions:   NewYoloOptionsPanel("Hermes", "YOLO mode - auto-approve all tool calls"),
 		focusIndex:      0,
 		visible:         false,
@@ -461,10 +464,12 @@ func (d *NewDialog) ShowInGroup(groupPath, groupName, defaultPath string, conduc
 	// Initialize tool options from global config.
 	d.geminiOptions.SetDefaults(false)
 	d.codexOptions.SetDefaults(false)
+	d.kiroOptions.SetDefaults(false)
 	d.hermesOptions.SetDefaults(false)
 	if userConfig, err := session.LoadUserConfig(); err == nil && userConfig != nil {
 		d.geminiOptions.SetDefaults(userConfig.Gemini.YoloMode)
 		d.codexOptions.SetDefaults(userConfig.Codex.YoloMode)
+		d.kiroOptions.SetDefaults(userConfig.Kiro.TrustAllTools)
 		d.hermesOptions.SetDefaults(userConfig.Hermes.YoloMode)
 		d.claudeOptions.SetDefaults(userConfig)
 		d.sandboxEnabled = userConfig.Docker.DefaultEnabled
@@ -744,6 +749,7 @@ func (d *NewDialog) saveSnapshot() *dialogSnapshot {
 		claudeOptions:    claudeOpts,
 		geminiYolo:       d.geminiOptions.GetYoloMode(),
 		codexYolo:        d.codexOptions.GetYoloMode(),
+		kiroTrustAll:     d.kiroOptions.GetYoloMode(),
 		hermesYolo:       d.hermesOptions.GetYoloMode(),
 		multiRepoEnabled: d.multiRepoEnabled,
 		multiRepoPaths:   append([]string{}, d.multiRepoPaths...),
@@ -768,6 +774,7 @@ func (d *NewDialog) restoreSnapshot(s *dialogSnapshot) {
 	}
 	d.geminiOptions.SetDefaults(s.geminiYolo)
 	d.codexOptions.SetDefaults(s.codexYolo)
+	d.kiroOptions.SetDefaults(s.kiroTrustAll)
 	d.hermesOptions.SetDefaults(s.hermesYolo)
 	d.multiRepoEnabled = s.multiRepoEnabled
 	d.multiRepoPaths = append([]string{}, s.multiRepoPaths...)
@@ -847,6 +854,17 @@ func (d *NewDialog) previewRecentSession(rs *statedb.RecentSessionRow) {
 					d.modelInput.SetValue(opts.Model)
 				}
 			}
+		case rs.Tool == "kiro":
+			var wrapper session.ToolOptionsWrapper
+			if err := json.Unmarshal(rs.ToolOptions, &wrapper); err == nil && wrapper.Tool == "kiro" {
+				var opts session.KiroOptions
+				if err := json.Unmarshal(wrapper.Options, &opts); err == nil {
+					d.kiroOptions.SetDefaults(opts.TrustAllTools)
+					if opts.Model != "" {
+						d.modelInput.SetValue(opts.Model)
+					}
+				}
+			}
 		}
 	}
 
@@ -924,6 +942,13 @@ func knownModelIDsForTool(tool string) []string {
 			"anthropic/claude-opus-4-7",
 			"anthropic/claude-haiku-4-5",
 		}
+	case tool == "kiro":
+		return []string{
+			"claude-sonnet-4-6",
+			"claude-opus-4-8",
+			"claude-opus-4-7",
+			"claude-haiku-4-5",
+		}
 	case session.IsCodexCompatible(tool):
 		return []string{
 			"gpt-5.5",
@@ -958,9 +983,9 @@ func knownModelIDsForTool(tool string) []string {
 // catalog — an empty default, an unset config, or a stale/typo'd value (e.g.
 // an alias like "opus" or a removed pin) all degrade gracefully to "" so the
 // dialog leaves the model unset and the tool falls back to its own default
-// rather than launching a bogus --model flag (#1172). Today only Claude routes
-// its launch model through this dialog field; the other tools apply their
-// default_model at command-build time.
+// rather than launching a bogus --model flag (#1172). Tools that also apply
+// default_model at command-build time keep doing so; this prefill is only a
+// visible, editable launch override for known model IDs.
 func preselectDefaultModel(config *session.UserConfig, tool string) string {
 	if config == nil {
 		return ""
@@ -969,6 +994,8 @@ func preselectDefaultModel(config *session.UserConfig, tool string) string {
 	switch {
 	case session.IsClaudeCompatible(tool):
 		configured = config.Claude.DefaultModel
+	case tool == "kiro":
+		configured = config.Kiro.DefaultModel
 	default:
 		return ""
 	}
@@ -1119,6 +1146,11 @@ func (d *NewDialog) GetCodexYoloMode() bool {
 	return d.codexOptions.GetYoloMode()
 }
 
+// GetKiroTrustAllTools returns the Kiro trust-all-tools option state.
+func (d *NewDialog) GetKiroTrustAllTools() bool {
+	return d.kiroOptions.GetYoloMode()
+}
+
 // GetHermesYoloMode returns the Hermes YOLO mode state
 func (d *NewDialog) GetHermesYoloMode() bool {
 	return d.hermesOptions.GetYoloMode()
@@ -1208,6 +1240,8 @@ func (d *NewDialog) updateModelPlaceholder() {
 		d.modelInput.Placeholder = "gemini-3.1-pro-preview"
 	case cmd == "opencode":
 		d.modelInput.Placeholder = "openai/gpt-5.5"
+	case cmd == "kiro":
+		d.modelInput.Placeholder = "claude-sonnet-4-6"
 	case session.IsCodexCompatible(cmd):
 		d.modelInput.Placeholder = "gpt-5.5"
 	default:
@@ -1223,6 +1257,8 @@ func (d *NewDialog) modelInputHint() string {
 		return "Examples: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-2.5-pro"
 	case cmd == "opencode":
 		return "Examples: openai/gpt-5.5, openai/gpt-5.4, anthropic/claude-sonnet-4-6"
+	case cmd == "kiro":
+		return "Examples: claude-sonnet-4-6, claude-opus-4-8, claude-haiku-4-5"
 	case session.IsCodexCompatible(cmd):
 		return "Examples: gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.4-mini"
 	default:
@@ -1417,6 +1453,8 @@ func (d *NewDialog) updateToolOptions() {
 		d.toolOptions = d.geminiOptions
 	case cmd == "codex":
 		d.toolOptions = d.codexOptions
+	case cmd == "kiro":
+		d.toolOptions = d.kiroOptions
 	case cmd == "hermes":
 		d.toolOptions = d.hermesOptions
 	default:
@@ -1434,6 +1472,7 @@ func (d *NewDialog) updateFocus() {
 	d.claudeOptions.Blur()
 	d.geminiOptions.Blur()
 	d.codexOptions.Blur()
+	d.kiroOptions.Blur()
 	d.hermesOptions.Blur()
 
 	// Reset dropdown and soft-select state when focus changes.
@@ -2122,7 +2161,7 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 		case "y":
 			if !d.isTextInputFocused() {
 				selectedCmd := d.GetSelectedCommand()
-				if cur == focusCommand && (selectedCmd == "gemini" || selectedCmd == "codex" || selectedCmd == "hermes") && d.toolOptions != nil {
+				if cur == focusCommand && (selectedCmd == "gemini" || selectedCmd == "codex" || selectedCmd == "kiro" || selectedCmd == "hermes") && d.toolOptions != nil {
 					d.toolOptions.Update(msg)
 					return d, nil
 				}
@@ -2741,6 +2780,8 @@ func (d *NewDialog) View() string {
 		selectedCmd := d.GetSelectedCommand()
 		if selectedCmd == "gemini" || selectedCmd == "codex" || selectedCmd == "hermes" {
 			helpText = "←→ command │ w worktree │ s sandbox │ y yolo │ Tab next │ ^S create │ Esc cancel"
+		} else if selectedCmd == "kiro" {
+			helpText = "←→ command │ w worktree │ s sandbox │ y trust all │ Tab next │ ^S create │ Esc cancel"
 		} else {
 			helpText = "←→ command │ w worktree │ s sandbox │ Tab next │ ^S create │ Esc cancel"
 		}
