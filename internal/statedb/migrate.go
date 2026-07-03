@@ -48,6 +48,9 @@ type jsonInstanceData struct {
 	CodexSessionID  string    `json:"codex_session_id,omitempty"`
 	CodexDetectedAt time.Time `json:"codex_detected_at,omitempty"`
 
+	KiroSessionID  string    `json:"kiro_session_id,omitempty"`
+	KiroDetectedAt time.Time `json:"kiro_detected_at,omitempty"`
+
 	LatestPrompt              string          `json:"latest_prompt,omitempty"`
 	Notes                     string          `json:"notes,omitempty"`
 	ToolOptionsJSON           json.RawMessage `json:"tool_options,omitempty"`
@@ -83,6 +86,8 @@ type toolDataBlob struct {
 	OpenCodeDetectedAt        int64           `json:"opencode_detected_at,omitempty"`
 	CodexSessionID            string          `json:"codex_session_id,omitempty"`
 	CodexDetectedAt           int64           `json:"codex_detected_at,omitempty"`
+	KiroSessionID             string          `json:"kiro_session_id,omitempty"`
+	KiroDetectedAt            int64           `json:"kiro_detected_at,omitempty"`
 	LatestPrompt              string          `json:"latest_prompt,omitempty"`
 	Notes                     string          `json:"notes,omitempty"`
 	LoadedMCPNames            []string        `json:"loaded_mcp_names,omitempty"`
@@ -136,6 +141,7 @@ func MigrateFromJSON(jsonPath string, db *StateDB) (int, int, error) {
 			GeminiModel:               inst.GeminiModel,
 			OpenCodeSessionID:         inst.OpenCodeSessionID,
 			CodexSessionID:            inst.CodexSessionID,
+			KiroSessionID:             inst.KiroSessionID,
 			LatestPrompt:              inst.LatestPrompt,
 			Notes:                     inst.Notes,
 			LoadedMCPNames:            inst.LoadedMCPNames,
@@ -159,6 +165,9 @@ func MigrateFromJSON(jsonPath string, db *StateDB) (int, int, error) {
 		}
 		if !inst.CodexDetectedAt.IsZero() {
 			td.CodexDetectedAt = inst.CodexDetectedAt.Unix()
+		}
+		if !inst.KiroDetectedAt.IsZero() {
+			td.KiroDetectedAt = inst.KiroDetectedAt.Unix()
 		}
 
 		tdJSON, err := json.Marshal(td)

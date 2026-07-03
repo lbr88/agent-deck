@@ -92,6 +92,10 @@ type InstanceData struct {
 	CodexSessionID  string    `json:"codex_session_id,omitempty"`
 	CodexDetectedAt time.Time `json:"codex_detected_at,omitempty"`
 
+	// Kiro session (persisted for resume after app restart)
+	KiroSessionID  string    `json:"kiro_session_id,omitempty"`
+	KiroDetectedAt time.Time `json:"kiro_detected_at,omitempty"`
+
 	// Latest user input for context
 	LatestPrompt string `json:"latest_prompt,omitempty"`
 	Notes        string `json:"notes,omitempty"`
@@ -718,6 +722,7 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 	// #1143: idle_timeout_secs lives in the tool_data extras zone — outside
 	// the positional MarshalToolData signature so legacy binaries that don't
 	// know the key preserve it via MergeToolDataExtras.
+	toolData = statedb.WriteKiroSessionBindingToToolData(toolData, inst.KiroSessionID, inst.KiroDetectedAt)
 	toolData = WriteIdleTimeoutSecsToToolData(toolData, inst.IdleTimeoutSecs)
 
 	return &statedb.InstanceRow{
@@ -833,6 +838,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			pluginChannelLinkDisabled2,
 			autoLinkedChannels2,
 			color2 := statedb.UnmarshalToolData(r.ToolData)
+		kiroSID, kiroAt := statedb.ReadKiroSessionBindingFromToolData(r.ToolData)
 		sandboxCfg := decodeSandboxConfig(sandboxJSON)
 
 		instances[i] = &InstanceData{
@@ -871,6 +877,8 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			OpenCodeDetectedAt:        opencodeAt,
 			CodexSessionID:            codexSID,
 			CodexDetectedAt:           codexAt,
+			KiroSessionID:             kiroSID,
+			KiroDetectedAt:            kiroAt,
 			LatestPrompt:              latestPrompt,
 			Notes:                     notes,
 			ToolOptionsJSON:           toolOpts,
@@ -952,6 +960,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			pluginChannelLinkDisabled,
 			autoLinkedChannels,
 			color := statedb.UnmarshalToolData(r.ToolData)
+		kiroSID, kiroAt := statedb.ReadKiroSessionBindingFromToolData(r.ToolData)
 		sandboxCfg := decodeSandboxConfig(sandboxJSON)
 
 		data.Instances[i] = &InstanceData{
@@ -990,6 +999,8 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			OpenCodeDetectedAt:        opencodeAt,
 			CodexSessionID:            codexSID,
 			CodexDetectedAt:           codexAt,
+			KiroSessionID:             kiroSID,
+			KiroDetectedAt:            kiroAt,
 			LatestPrompt:              latestPrompt,
 			Notes:                     notes,
 			ToolOptionsJSON:           toolOpts,
@@ -1244,6 +1255,8 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			OpenCodeDetectedAt:        instData.OpenCodeDetectedAt,
 			CodexSessionID:            instData.CodexSessionID,
 			CodexDetectedAt:           instData.CodexDetectedAt,
+			KiroSessionID:             instData.KiroSessionID,
+			KiroDetectedAt:            instData.KiroDetectedAt,
 			ToolOptionsJSON:           instData.ToolOptionsJSON,
 			LatestPrompt:              instData.LatestPrompt,
 			Notes:                     instData.Notes,
