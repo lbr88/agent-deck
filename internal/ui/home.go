@@ -6830,8 +6830,7 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if command == "kiro" {
 			trustAllTools := h.newDialog.GetKiroTrustAllTools()
 			userConfig, _ := session.LoadUserConfig()
-			kiroOpts := session.NewKiroOptions(userConfig)
-			kiroOpts.TrustAllTools = trustAllTools
+			kiroOpts := newSessionKiroOptions(userConfig, trustAllTools)
 			toolOptionsJSON, _ = session.MarshalToolOptions(kiroOpts)
 		} else if command == "hermes" {
 			yolo := h.newDialog.GetHermesYoloMode()
@@ -10540,6 +10539,17 @@ func (h *Home) createSessionInGroupWithWorktreeAndOptions(
 		uiLog.Info("session_create_succeeded", slog.String("id", inst.ID))
 		return sessionCreatedMsg{instance: inst, tempID: tempID}
 	}
+}
+
+func newSessionKiroOptions(userConfig *session.UserConfig, trustAllTools bool) *session.KiroOptions {
+	kiroOpts := session.NewKiroOptions(userConfig)
+	// The visible model field is the single source of truth for TUI launches.
+	// Do not silently carry a stale [kiro].default_model into tool options;
+	// ShowInGroup preselects valid catalog defaults, and ApplyLaunchModel stores
+	// explicit entries after session creation.
+	kiroOpts.Model = ""
+	kiroOpts.TrustAllTools = trustAllTools
+	return kiroOpts
 }
 
 // createWorktreeWithSetupAndLog creates a worktree via the supplied backend.

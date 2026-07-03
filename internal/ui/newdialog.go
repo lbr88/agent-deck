@@ -944,10 +944,18 @@ func knownModelIDsForTool(tool string) []string {
 		}
 	case tool == "kiro":
 		return []string{
-			"claude-sonnet-4-6",
-			"claude-opus-4-8",
-			"claude-opus-4-7",
-			"claude-haiku-4-5",
+			"auto",
+			"claude-opus-4.8",
+			"claude-opus-4.7",
+			"claude-opus-4.6",
+			"claude-sonnet-4.6",
+			"claude-opus-4.5",
+			"claude-sonnet-4.5",
+			"claude-sonnet-4",
+			"claude-haiku-4.5",
+			"minimax-m2.5",
+			"minimax-m2.1",
+			"qwen3-coder-next",
 		}
 	case session.IsCodexCompatible(tool):
 		return []string{
@@ -1241,7 +1249,7 @@ func (d *NewDialog) updateModelPlaceholder() {
 	case cmd == "opencode":
 		d.modelInput.Placeholder = "openai/gpt-5.5"
 	case cmd == "kiro":
-		d.modelInput.Placeholder = "claude-sonnet-4-6"
+		d.modelInput.Placeholder = "auto"
 	case session.IsCodexCompatible(cmd):
 		d.modelInput.Placeholder = "gpt-5.5"
 	default:
@@ -1258,7 +1266,7 @@ func (d *NewDialog) modelInputHint() string {
 	case cmd == "opencode":
 		return "Examples: openai/gpt-5.5, openai/gpt-5.4, anthropic/claude-sonnet-4-6"
 	case cmd == "kiro":
-		return "Examples: claude-sonnet-4-6, claude-opus-4-8, claude-haiku-4-5"
+		return "Examples: auto, claude-sonnet-4.6, claude-opus-4.8"
 	case session.IsCodexCompatible(cmd):
 		return "Examples: gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.4-mini"
 	default:

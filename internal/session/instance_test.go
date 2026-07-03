@@ -1598,6 +1598,47 @@ func TestApplyLaunchModel_SetsToolSpecificFields(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusDoesNotRelabelKiroAsClaudeFromTrustPrompt(t *testing.T) {
+	skipIfNoTmuxBinary(t)
+
+	inst := NewInstanceWithTool("kiro-trust-prompt", t.TempDir(), "kiro")
+	inst.Command = "kiro"
+	if err := inst.tmuxSession.Start("printf 'Do you trust the files in this folder?\\n'; sleep 30"); err != nil {
+		t.Fatalf("tmux start: %v", err)
+	}
+	t.Cleanup(func() { _ = inst.tmuxSession.Kill() })
+
+	time.Sleep(150 * time.Millisecond)
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	if inst.Tool != "kiro" {
+		t.Fatalf("Tool = %q, want kiro", inst.Tool)
+	}
+}
+
+func TestUpdateStatusRelabelsDetectedKiroSession(t *testing.T) {
+	skipIfNoTmuxBinary(t)
+
+	inst := NewInstanceWithTool("kiro-detected-pane", t.TempDir(), "claude")
+	inst.Command = "kiro"
+	if err := inst.tmuxSession.Start("printf 'Kiro · auto\\n'; sleep 30"); err != nil {
+		t.Fatalf("tmux start: %v", err)
+	}
+	t.Cleanup(func() { _ = inst.tmuxSession.Kill() })
+	inst.tmuxSession.Command = "kiro"
+
+	time.Sleep(150 * time.Millisecond)
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	if inst.Tool != "kiro" {
+		t.Fatalf("Tool = %q, want kiro", inst.Tool)
+	}
+}
+
 func TestBuildCodexCommand_ConfiguredCommandResume(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")

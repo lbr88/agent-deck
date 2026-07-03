@@ -577,9 +577,13 @@ func SupportsHyperlinks() bool {
 }
 
 // Tool detection patterns (used by DetectTool for initial tool identification)
-var toolDetectionOrder = []string{"claude", "gemini", "opencode", "codex", "copilot", "crush", "cursor", "hermes", "pi"}
+var toolDetectionOrder = []string{"kiro", "claude", "gemini", "opencode", "codex", "copilot", "crush", "cursor", "hermes", "pi"}
 
 var toolDetectionPatterns = map[string][]*regexp.Regexp{
+	"kiro": {
+		regexp.MustCompile(`(?im)^\s*Kiro\s*[·•|]`),
+		regexp.MustCompile(`(?i)\bKiro\s+CLI\b`),
+	},
 	"claude": {
 		// Avoid matching bare words like "claude-deck" in shell prompts/paths.
 		regexp.MustCompile(`(?i)\bclaude\s+code\b`),
@@ -646,6 +650,8 @@ func detectToolFromCommand(command string) string {
 			return "opencode"
 		case "codex":
 			return "codex"
+		case "kiro", "kiro-cli":
+			return "kiro"
 		case "copilot":
 			return "copilot"
 		case "crush":
@@ -668,6 +674,8 @@ func detectToolFromCommand(command string) string {
 		return "opencode"
 	case strings.Contains(cmdLower, "codex"):
 		return "codex"
+	case strings.Contains(cmdLower, "kiro-cli"):
+		return "kiro"
 	case strings.Contains(cmdLower, "copilot") || strings.Contains(cmdLower, "@github/copilot"):
 		return "copilot"
 	case strings.Contains(cmdLower, "crush"):

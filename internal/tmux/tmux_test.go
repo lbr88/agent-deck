@@ -569,6 +569,8 @@ func TestDetectToolFromCommand(t *testing.T) {
 		{name: "gemini", command: "gemini --yolo", want: "gemini"},
 		{name: "opencode", command: "open-code --continue", want: "opencode"},
 		{name: "codex", command: "codex --dangerously-bypass-approvals-and-sandbox", want: "codex"},
+		{name: "kiro cli", command: "kiro-cli chat --tui", want: "kiro"},
+		{name: "kiro router", command: "kiro", want: "kiro"},
 		{name: "pi", command: "pi --model fast", want: "pi"},
 		{name: "cursor", command: "cursor agent", want: "cursor"},
 		{name: "shell command", command: "npm run dev", want: ""},
@@ -613,6 +615,13 @@ Yes, allow once`,
 			content: `Welcome to Pi CLI
 pi> `,
 			want: "pi",
+		},
+		{
+			name: "kiro tui header detects kiro",
+			content: `Trust All Tools active, confirmations are off · /quit to exit
+Kiro · auto          ~/git/private/agent-deck · (main)
+> `,
+			want: "kiro",
 		},
 	}
 

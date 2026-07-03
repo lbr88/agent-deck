@@ -3934,7 +3934,7 @@ func CreateExampleConfig() error {
 # command = "kiro-cli chat --tui"
 # Default agent/model for new sessions
 # default_agent = ""
-# default_model = "claude-sonnet-4-6"
+# default_model = "auto"
 # Trust all tools by default (adds --trust-all-tools)
 # trust_all_tools = false
 # Trust selected tools by default (adds repeated --trust-tools values)

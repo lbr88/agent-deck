@@ -112,10 +112,13 @@ func TestNewDialog_ModelInputAndOptionsForKiro(t *testing.T) {
 	if !strings.Contains(view, "Model ID") || !strings.Contains(view, "Kiro Options") || !strings.Contains(view, "Trust all tools") {
 		t.Fatalf("Kiro new-session dialog should render model and trust options:\n%s", view)
 	}
+	if !strings.Contains(view, "claude-sonnet-4.6") || !strings.Contains(view, "claude-opus-4.8") {
+		t.Fatalf("Kiro model hints should use Kiro CLI model IDs with dotted versions:\n%s", view)
+	}
 
-	d.modelInput.SetValue("claude-sonnet-4-6")
-	if got := d.GetLaunchModelID(); got != "claude-sonnet-4-6" {
-		t.Fatalf("GetLaunchModelID() = %q, want claude-sonnet-4-6", got)
+	d.modelInput.SetValue("claude-sonnet-4.6")
+	if got := d.GetLaunchModelID(); got != "claude-sonnet-4.6" {
+		t.Fatalf("GetLaunchModelID() = %q, want claude-sonnet-4.6", got)
 	}
 	if d.GetKiroTrustAllTools() {
 		t.Fatal("Kiro trust-all-tools should default off without config")

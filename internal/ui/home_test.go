@@ -825,6 +825,30 @@ func TestApplyCreateSessionToolOverrides_NonGeminiNoop(t *testing.T) {
 	}
 }
 
+func TestNewSessionKiroOptionsClearsConfiguredModel(t *testing.T) {
+	opts := newSessionKiroOptions(&session.UserConfig{
+		Kiro: session.KiroSettings{
+			DefaultAgent:  "kiro_default",
+			DefaultModel:  "claude-opus-4-8",
+			TrustAllTools: false,
+			TrustTools:    []string{"shell"},
+		},
+	}, true)
+
+	if opts.Model != "" {
+		t.Fatalf("Model = %q, want empty so stale config defaults are not hidden in TUI-created sessions", opts.Model)
+	}
+	if opts.Agent != "kiro_default" {
+		t.Fatalf("Agent = %q, want kiro_default", opts.Agent)
+	}
+	if !opts.TrustAllTools {
+		t.Fatal("TrustAllTools = false, want true from dialog selection")
+	}
+	if len(opts.TrustTools) != 1 || opts.TrustTools[0] != "shell" {
+		t.Fatalf("TrustTools = %v, want [shell]", opts.TrustTools)
+	}
+}
+
 func TestPersistClaudeDialogDefaults(t *testing.T) {
 	origHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()

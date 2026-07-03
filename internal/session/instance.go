@@ -4106,7 +4106,12 @@ func (i *Instance) UpdateStatus() error {
 			// Preserve configured custom tool names.
 		} else {
 			switch detectedTool {
+			case "kiro":
+				i.Tool = detectedTool
 			case "claude", "gemini", "opencode", "codex":
+				if i.Tool == "kiro" && detectedTool == "claude" {
+					break
+				}
 				i.Tool = detectedTool
 			case "shell":
 				switch i.Tool {
