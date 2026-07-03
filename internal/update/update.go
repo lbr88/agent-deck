@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -262,6 +263,9 @@ func fetchRecentReleases(limit int) ([]Release, error) {
 // If `currentVersion` is ahead of every release (or matches the newest),
 // the result is 0 — never negative.
 func CountReleasesBehind(currentVersion string, releases []Release) int {
+	if !isReleaseVersion(currentVersion) {
+		return 0
+	}
 	behind := 0
 	for _, r := range releases {
 		if CompareVersions(r.TagName, currentVersion) > 0 {
@@ -277,6 +281,9 @@ func CountReleasesBehind(currentVersion string, releases []Release) int {
 // there is no cache yet; err only on corruption.
 func CachedUpdateInfo(currentVersion string) (*UpdateInfo, error) {
 	if isUpdateCheckSkipped() {
+		return nil, nil
+	}
+	if !isReleaseVersion(currentVersion) {
 		return nil, nil
 	}
 	cache, err := loadCache()
@@ -440,12 +447,35 @@ func CompareVersions(v1, v2 string) int {
 	return 0
 }
 
+func isReleaseVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(version, "v")
+	version = strings.TrimPrefix(version, "V")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // CheckForUpdate checks if a new version is available
 // Uses cache to avoid hitting GitHub API too frequently
 func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error) {
 	info := &UpdateInfo{
 		Available:      false,
 		CurrentVersion: currentVersion,
+	}
+
+	if !isReleaseVersion(currentVersion) {
+		return info, nil
 	}
 
 	// Env kill switch — never hits the network, never reads cache.

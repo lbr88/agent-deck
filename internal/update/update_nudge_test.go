@@ -48,6 +48,17 @@ func TestCountReleasesBehind_Basic(t *testing.T) {
 	}
 }
 
+func TestCountReleasesBehind_DevelopmentVersionIsNeverBehind(t *testing.T) {
+	releases := []Release{
+		{TagName: "v1.9.73"},
+		{TagName: "v1.9.72"},
+		{TagName: "v1.9.71"},
+	}
+
+	assert.Equal(t, 0, CountReleasesBehind("cfe4ee61", releases))
+	assert.Equal(t, 0, CountReleasesBehind("1.9.73-56-gcfe4ee61", releases))
+}
+
 func TestShouldNudge_ThresholdIsGreaterThanFive(t *testing.T) {
 	tests := []struct {
 		name string
@@ -185,6 +196,22 @@ func TestCachedUpdateInfo_OfflineReadFromCache(t *testing.T) {
 	assert.False(t, info.Available)
 }
 
+func TestCachedUpdateInfo_IgnoresCacheForDevelopmentVersion(t *testing.T) {
+	isolateUpdatePaths(t)
+
+	cache := &UpdateCache{
+		CheckedAt:      time.Now(),
+		LatestVersion:  "1.9.73",
+		CurrentVersion: "1.9.40",
+		ReleasesBehind: 30,
+	}
+	require.NoError(t, saveCache(cache))
+
+	info, err := CachedUpdateInfo("cfe4ee61")
+	require.NoError(t, err)
+	assert.Nil(t, info)
+}
+
 func TestCachedUpdateInfo_EnvSkipReturnsNil(t *testing.T) {
 	isolateUpdatePaths(t)
 	t.Setenv("AGENTDECK_SKIP_UPDATE_CHECK", "1")
@@ -202,6 +229,24 @@ func TestCachedUpdateInfo_EnvSkipReturnsNil(t *testing.T) {
 	info, err := CachedUpdateInfo("1.7.20")
 	require.NoError(t, err)
 	assert.Nil(t, info)
+}
+
+func TestCheckForUpdate_DevelopmentVersionSkipsCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("development version must not hit update endpoint: %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	origURL := apiBaseURL
+	apiBaseURL = srv.URL
+	t.Cleanup(func() { apiBaseURL = origURL })
+
+	info, err := CheckForUpdate("cfe4ee61", true)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.False(t, info.Available)
+	assert.Equal(t, "cfe4ee61", info.CurrentVersion)
+	assert.Equal(t, 0, info.ReleasesBehind)
 }
 
 func TestCheckForUpdate_ReleasesBehindSurvivesCacheRoundtrip(t *testing.T) {
