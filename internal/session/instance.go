@@ -208,6 +208,11 @@ type Instance struct {
 	// It is intentionally transient and never persisted.
 	pendingCodexRestartWarning string `json:"-"`
 
+	// Kiro CLI integration
+	KiroSessionID  string    `json:"kiro_session_id,omitempty"`
+	KiroDetectedAt time.Time `json:"kiro_detected_at,omitempty"`
+	KiroStartedAt  int64     `json:"-"` // Unix millis when we started Kiro (for future session matching, not persisted)
+
 	// GitHub Copilot CLI integration
 	CopilotSessionID  string    `json:"copilot_session_id,omitempty"`
 	CopilotDetectedAt time.Time `json:"copilot_detected_at,omitempty"`
