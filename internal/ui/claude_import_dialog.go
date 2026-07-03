@@ -144,10 +144,7 @@ func (d *ClaudeImportDialog) View() string {
 		for pos := start; pos < end; pos++ {
 			i := indexes[pos]
 			entry := d.entries[i]
-			title := strings.TrimSpace(entry.Name)
-			if title == "" {
-				title = shortClaudeImportID(entry.SessionID)
-			}
+			title := entry.DisplayTitle()
 			lines = importDialogAppendEntry(
 				lines,
 				i == renderCursor,
@@ -176,7 +173,9 @@ func (d *ClaudeImportDialog) matchingIndexes() []int {
 	return importDialogSearchIndexes(len(d.entries), d.searchQuery, func(i int) []string {
 		entry := d.entries[i]
 		return []string{
+			entry.DisplayTitle(),
 			entry.Name,
+			entry.Title,
 			entry.SessionID,
 			shortClaudeImportID(entry.SessionID),
 			entry.CWD,

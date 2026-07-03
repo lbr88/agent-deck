@@ -12510,10 +12510,7 @@ func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate
 			return sessionCreatedMsg{err: fmt.Errorf("Claude session id is required")}
 		}
 
-		title := strings.TrimSpace(entry.Name)
-		if title == "" {
-			title = shortClaudeImportID(sessionID)
-		}
+		title := entry.DisplayTitle()
 
 		projectPath := strings.TrimSpace(entry.CWD)
 		if projectPath == "" {

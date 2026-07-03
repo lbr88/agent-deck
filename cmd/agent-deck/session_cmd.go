@@ -258,7 +258,7 @@ func importClaudeSession(profile string, opts importClaudeSessionOptions, deps i
 	if err != nil {
 		return nil, err
 	}
-	title := resolveImportClaudeTitle(opts.Title, candidate.Name, candidate.SessionID)
+	title := resolveImportClaudeTitle(opts.Title, candidate.DisplayTitle(), candidate.SessionID)
 
 	inst := session.NewInstanceWithGroupAndTool(title, projectPath, groupPath, "claude")
 	inst.Command = "claude"

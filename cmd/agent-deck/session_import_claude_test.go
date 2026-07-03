@@ -133,14 +133,17 @@ func TestImportClaudeSession_ExplicitOverridesAndShortUUIDFallback(t *testing.T)
 
 	saved = nil
 	deps.resolve = func(_ string, _ string) (*session.ClaudeImportCandidate, error) {
-		return &session.ClaudeImportCandidate{SessionID: "33333333-4444-5555-6666-777777777777"}, nil
+		return &session.ClaudeImportCandidate{
+			SessionID: "33333333-4444-5555-6666-777777777777",
+			Title:     "Investigate imports",
+		}, nil
 	}
 	_, err = importClaudeSession("", importClaudeSessionOptions{Target: "33333333-4444-5555-6666-777777777777"}, deps)
 	if err != nil {
 		t.Fatalf("importClaudeSession fallback title: %v", err)
 	}
-	if got := saved[0][0].Title; got != "33333333" {
-		t.Errorf("fallback Title = %q, want short UUID", got)
+	if got := saved[0][0].Title; got != "Investigate imports" {
+		t.Errorf("fallback Title = %q, want import candidate title", got)
 	}
 	if got := saved[0][0].ProjectPath; got != "/fallback/cwd" {
 		t.Errorf("fallback ProjectPath = %q, want current directory", got)

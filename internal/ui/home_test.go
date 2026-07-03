@@ -613,7 +613,7 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	h.groupScope = "tmp"
 	entry := session.ClaudeImportCandidate{
 		SessionID: "99999999-9999-9999-9999-999999999999",
-		Name:      "imported from tui",
+		Title:     "imported from tui",
 		CWD:       "/home/lrasmussen/git/domutech/domutech-claude",
 		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
@@ -635,7 +635,7 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	}
 	got := instances[0]
 	if got.Tool != "claude" || got.Command != "claude" || got.ClaudeSessionID != entry.SessionID ||
-		got.Title != entry.Name || got.ProjectPath != entry.CWD || got.GroupPath != "domutech" ||
+		got.Title != entry.Title || got.ProjectPath != entry.CWD || got.GroupPath != "domutech" ||
 		got.Status != session.StatusStopped {
 		t.Fatalf("bad persisted Claude import: %#v", got)
 	}

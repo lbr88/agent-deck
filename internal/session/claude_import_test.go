@@ -69,6 +69,9 @@ func TestListClaudeImportCandidates_MetadataOnly(t *testing.T) {
 	if got.Name != "Alpha plan" {
 		t.Errorf("Name = %q, want Alpha plan", got.Name)
 	}
+	if got.Title != "Alpha plan" {
+		t.Errorf("Title = %q, want Alpha plan", got.Title)
+	}
 	if got.FilePath != transcriptPath {
 		t.Errorf("FilePath = %q, want %q", got.FilePath, transcriptPath)
 	}
@@ -77,6 +80,53 @@ func TestListClaudeImportCandidates_MetadataOnly(t *testing.T) {
 	}
 	if strings.Contains(strings.Join([]string{got.SessionID, got.Name, got.CWD, got.FilePath}, "\n"), "PRIVATE_TRANSCRIPT_CONTENT") {
 		t.Fatalf("candidate exposed transcript content: %#v", got)
+	}
+}
+
+func TestListClaudeImportCandidates_UsesTranscriptSummaryAsFallbackTitle(t *testing.T) {
+	configDir := t.TempDir()
+	writeClaudeImportTranscript(
+		t,
+		configDir,
+		"/tmp/summary-project",
+		claudeImportIDAlpha,
+		`{"type":"summary","summary":"Review GitHub pull request #14","sessionId":"`+claudeImportIDAlpha+`"}`,
+	)
+
+	candidates, err := ListClaudeImportCandidates(configDir)
+	if err != nil {
+		t.Fatalf("ListClaudeImportCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if candidates[0].Name != "" {
+		t.Fatalf("Name = %q, want empty when Claude has no explicit name metadata", candidates[0].Name)
+	}
+	if got := candidates[0].Title; got != "Review GitHub pull request #14" {
+		t.Fatalf("Title = %q, want transcript summary fallback", got)
+	}
+}
+
+func TestListClaudeImportCandidates_UsesFirstUserMessageAsFallbackTitle(t *testing.T) {
+	configDir := t.TempDir()
+	writeClaudeImportTranscript(
+		t,
+		configDir,
+		"/tmp/user-message-project",
+		claudeImportIDBeta,
+		`{"type":"user","sessionId":"`+claudeImportIDBeta+`","message":{"role":"user","content":"Investigate why Claude imports show only short session ids"}}`,
+	)
+
+	candidates, err := ListClaudeImportCandidates(configDir)
+	if err != nil {
+		t.Fatalf("ListClaudeImportCandidates: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if got := candidates[0].Title; got != "Investigate why Claude imports show only short session ids" {
+		t.Fatalf("Title = %q, want first user message fallback", got)
 	}
 }
 

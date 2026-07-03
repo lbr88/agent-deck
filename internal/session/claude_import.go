@@ -17,10 +17,28 @@ import (
 type ClaudeImportCandidate struct {
 	SessionID string    `json:"session_id"`
 	Name      string    `json:"name,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	CWD       string    `json:"cwd,omitempty"`
 	Path      string    `json:"path,omitempty"`
 	FilePath  string    `json:"file_path"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// DisplayTitle returns the best human-readable title for importing this Claude
+// session. Name is Claude's explicit user-controlled session name; Title may be
+// derived from bounded transcript metadata when no name exists.
+func (c ClaudeImportCandidate) DisplayTitle() string {
+	if title := strings.TrimSpace(c.Title); title != "" {
+		return title
+	}
+	if name := strings.TrimSpace(c.Name); name != "" {
+		return name
+	}
+	sessionID := strings.TrimSpace(c.SessionID)
+	if len(sessionID) <= 8 {
+		return sessionID
+	}
+	return sessionID[:8]
 }
 
 // ClaudeImportResolveKind identifies why an import target could not be
@@ -59,9 +77,13 @@ func (e *ClaudeImportResolveError) Error() string {
 }
 
 type claudeImportJSONLRecord struct {
-	SessionID string `json:"sessionId"`
-	CWD       string `json:"cwd"`
-	Path      string `json:"path"`
+	Type          string          `json:"type"`
+	SessionID     string          `json:"sessionId"`
+	CWD           string          `json:"cwd"`
+	Path          string          `json:"path"`
+	Summary       string          `json:"summary"`
+	Message       json.RawMessage `json:"message"`
+	FallbackTitle string          `json:"-"`
 }
 
 // ListClaudeImportCandidates scans configDir/projects for UUID-named Claude
@@ -110,9 +132,15 @@ func ListClaudeImportCandidates(configDir string) ([]ClaudeImportCandidate, erro
 		if sessionID == "" {
 			return nil
 		}
+		name := ClaudeSessionNameIn(configDir, sessionID)
+		title := strings.TrimSpace(name)
+		if title == "" {
+			title = strings.TrimSpace(meta.FallbackTitle)
+		}
 		candidate := ClaudeImportCandidate{
 			SessionID: sessionID,
-			Name:      ClaudeSessionNameIn(configDir, sessionID),
+			Name:      name,
+			Title:     title,
 			CWD:       strings.TrimSpace(meta.CWD),
 			Path:      strings.TrimSpace(meta.Path),
 			FilePath:  path,
@@ -148,9 +176,9 @@ func parseClaudeImportJSONLMetadata(filePath string) (claudeImportJSONLRecord, e
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(io.LimitReader(f, 32*1024))
-	buf := make([]byte, 0, 32*1024)
-	scanner.Buffer(buf, 32*1024)
+	scanner := bufio.NewScanner(io.LimitReader(f, 256*1024))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 256*1024)
 
 	var meta claudeImportJSONLRecord
 	for scanner.Scan() {
@@ -171,7 +199,10 @@ func parseClaudeImportJSONLMetadata(filePath string) (claudeImportJSONLRecord, e
 		if meta.Path == "" && record.Path != "" {
 			meta.Path = record.Path
 		}
-		if meta.SessionID != "" && (meta.CWD != "" || meta.Path != "") {
+		if meta.FallbackTitle == "" {
+			meta.FallbackTitle = claudeImportFallbackTitle(record)
+		}
+		if meta.SessionID != "" && (meta.CWD != "" || meta.Path != "") && meta.FallbackTitle != "" {
 			break
 		}
 	}
@@ -179,6 +210,36 @@ func parseClaudeImportJSONLMetadata(filePath string) (claudeImportJSONLRecord, e
 		return meta, err
 	}
 	return meta, nil
+}
+
+func claudeImportFallbackTitle(record claudeImportJSONLRecord) string {
+	if summary := cleanClaudeImportFallbackTitle(record.Summary); summary != "" {
+		return summary
+	}
+	if record.Type != "user" || len(record.Message) == 0 {
+		return ""
+	}
+	var msg claudeMessage
+	if err := json.Unmarshal(record.Message, &msg); err != nil {
+		return ""
+	}
+	if msg.Role != "" && msg.Role != "user" {
+		return ""
+	}
+	return cleanClaudeImportFallbackTitle(extractContentText(msg.Content))
+}
+
+func cleanClaudeImportFallbackTitle(title string) string {
+	title = strings.Join(strings.Fields(strings.TrimSpace(title)), " ")
+	if title == "" {
+		return ""
+	}
+	const maxRunes = 80
+	runes := []rune(title)
+	if len(runes) <= maxRunes {
+		return title
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 // ResolveClaudeImportTarget resolves target by UUID first, then exact Claude
