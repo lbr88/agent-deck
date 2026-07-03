@@ -1522,6 +1522,50 @@ func (i *Instance) getCodexHomeDir() string {
 	return getCodexHomeDirForCommand(i.resolveCodexCommand(i.Command))
 }
 
+func (i *Instance) resolveKiroCommand(baseCommand string) string {
+	command := strings.TrimSpace(baseCommand)
+	if i.Tool == "kiro" && (command == "" || command == "kiro") {
+		return GetKiroCommand()
+	}
+	if command == "" {
+		return "kiro-cli chat --tui"
+	}
+	return command
+}
+
+// buildKiroCommand builds the command for Kiro CLI terminal chat sessions.
+func (i *Instance) buildKiroCommand(baseCommand string) string {
+	if i.Tool != "kiro" {
+		return baseCommand
+	}
+
+	envPrefix := i.buildEnvSourceCommand()
+	command := i.resolveKiroCommand(baseCommand)
+	if !strings.Contains(command, "kiro-cli") {
+		return envPrefix + command
+	}
+
+	if i.KiroSessionID != "" && !strings.Contains(command, "--resume-id") {
+		command += " --resume-id " + shellescape.Quote(i.KiroSessionID)
+	}
+	if !strings.Contains(command, "--tui") && !strings.Contains(command, "--legacy-ui") {
+		command += " --tui"
+	}
+
+	opts := i.GetKiroOptions()
+	if opts == nil {
+		if config, err := LoadUserConfig(); err == nil && config != nil {
+			opts = NewKiroOptions(config)
+		}
+	}
+	if opts != nil {
+		for _, arg := range opts.ToArgs() {
+			command += " " + shellescape.Quote(arg)
+		}
+	}
+	return envPrefix + command
+}
+
 // Codex stores sessions in ~/.codex/sessions/YYYY/MM/DD/*.jsonl
 // Resume: codex resume <session-id> or codex resume --last
 // Also sources .env files from [shell].env_files
@@ -2805,6 +2849,8 @@ func (i *Instance) DisplaySessionID() string {
 		return i.OpenCodeSessionID
 	case i.Tool == "codex":
 		return i.CodexSessionID
+	case i.Tool == "kiro":
+		return i.KiroSessionID
 	default:
 		return i.GetGenericSessionID()
 	}
@@ -3148,6 +3194,9 @@ func (i *Instance) Start() error {
 		command = i.buildOpenCodeCommand(i.Command)
 		// Record start time for session ID detection (Unix millis)
 		i.OpenCodeStartedAt = time.Now().UnixMilli()
+	case i.Tool == "kiro":
+		command = i.buildKiroCommand(i.Command)
+		i.KiroStartedAt = time.Now().UnixMilli()
 	case IsCodexCompatible(i.Tool):
 		if i.IsForkAwaitingStart {
 			command = i.consumeForkStartCommand()
@@ -3252,6 +3301,9 @@ func (i *Instance) Start() error {
 			yoloVal = "true"
 		}
 		_ = i.tmuxSession.SetEnvironment("GEMINI_YOLO_MODE", yoloVal)
+	}
+	if i.KiroSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("KIRO_SESSION_ID", i.KiroSessionID)
 	}
 	// OpenCode and Codex IDs are detected asynchronously; SyncSessionIDsToTmux() handles
 	// propagation once they are available.
@@ -4914,6 +4966,11 @@ func (i *Instance) SyncSessionIDsToTmux() {
 		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", i.CodexSessionID)
 	}
 
+	// Sync KiroSessionID
+	if i.KiroSessionID != "" {
+		_ = i.tmuxSession.SetEnvironment("KIRO_SESSION_ID", i.KiroSessionID)
+	}
+
 	// Sync CopilotSessionID
 	if i.CopilotSessionID != "" {
 		_ = i.tmuxSession.SetEnvironment("COPILOT_SESSION_ID", i.CopilotSessionID)
@@ -4946,6 +5003,12 @@ func (i *Instance) clearSessionBindingForFreshStart() {
 		i.mu.Lock()
 		i.pendingCodexRestartWarning = ""
 		i.mu.Unlock()
+	}
+
+	if i.Tool == "kiro" {
+		i.KiroSessionID = ""
+		i.KiroDetectedAt = time.Time{}
+		i.KiroStartedAt = 0
 	}
 
 	if i.Tool == "copilot" {
@@ -5015,6 +5078,13 @@ func (i *Instance) SyncSessionIDsFromTmux() {
 
 	if id, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && id != "" {
 		i.acceptCodexSessionID(id, false)
+	}
+
+	if id, err := i.tmuxSession.GetEnvironment("KIRO_SESSION_ID"); err == nil && id != "" {
+		i.KiroSessionID = id
+		if i.KiroDetectedAt.IsZero() {
+			i.KiroDetectedAt = time.Now()
+		}
 	}
 
 	if id, err := i.tmuxSession.GetEnvironment("COPILOT_SESSION_ID"); err == nil && id != "" {
@@ -6164,6 +6234,44 @@ func (i *Instance) Restart() error {
 		return nil
 	}
 
+	// If Kiro session AND tmux session exists, use respawn-pane.
+	if i.Tool == "kiro" && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		if i.KiroSessionID == "" {
+			if envID, err := i.tmuxSession.GetEnvironment("KIRO_SESSION_ID"); err == nil && envID != "" {
+				i.KiroSessionID = envID
+				i.KiroDetectedAt = time.Now()
+				sessionLog.Info("restart_kiro_recovered_id", slog.String("session_id", envID))
+			}
+		}
+
+		if i.KiroSessionID == "" {
+			i.KiroStartedAt = time.Now().UnixMilli()
+		}
+		resumeCmd, containerName, err := i.prepareCommand(i.buildKiroCommand(i.Command))
+		if err != nil {
+			return err
+		}
+		if containerName != "" {
+			i.SandboxContainer = containerName
+		}
+		sessionLog.Info("restart_kiro_respawn", slog.String("command", resumeCmd))
+
+		if err := i.tmuxSession.RespawnPane(resumeCmd); err != nil {
+			sessionLog.Info("restart_kiro_respawn_failed", slog.String("error", err.Error()))
+			return fmt.Errorf("failed to restart Kiro session: %w", err)
+		}
+
+		sessionLog.Info("restart_kiro_respawn_succeeded")
+		i.ensureProfileEnv()
+		if i.KiroSessionID != "" {
+			WriteHookSessionAnchor(i.ID, i.KiroSessionID)
+			_ = i.tmuxSession.SetEnvironment("KIRO_SESSION_ID", i.KiroSessionID)
+		}
+		i.sweepDuplicateToolSessions()
+		i.Status = StatusWaiting
+		return nil
+	}
+
 	// For Codex: try to update session ID, but only if we don't already have one.
 	// When we already have a known session ID (from the database), trust it —
 	// the disk scan can return a wrong ID when multiple instances share the same
@@ -6323,6 +6431,8 @@ func (i *Instance) Restart() error {
 		command = i.buildGeminiCommand("gemini")
 	} else if i.Tool == "opencode" && i.OpenCodeSessionID != "" {
 		command = i.buildOpenCodeCommand("opencode")
+	} else if i.Tool == "kiro" && i.KiroSessionID != "" {
+		command = i.buildKiroCommand(i.Command)
 	} else if IsCodexCompatible(i.Tool) && i.CodexSessionID != "" {
 		command = i.buildCodexCommand(i.Command)
 	} else {
@@ -6336,6 +6446,9 @@ func (i *Instance) Restart() error {
 			command = i.buildOpenCodeCommand(i.Command)
 			// Record start time for async session ID detection
 			i.OpenCodeStartedAt = time.Now().UnixMilli()
+		case i.Tool == "kiro":
+			command = i.buildKiroCommand(i.Command)
+			i.KiroStartedAt = time.Now().UnixMilli()
 		case IsCodexCompatible(i.Tool):
 			command = i.buildCodexCommand(i.Command)
 			// Record start time for async session ID detection
@@ -6726,6 +6839,12 @@ func (i *Instance) CanRestart() bool {
 		return true
 	}
 
+	// Kiro sessions with or without an ID can restart. A known ID resumes;
+	// otherwise the restart starts a fresh Kiro chat.
+	if i.Tool == "kiro" {
+		return true
+	}
+
 	// Pi sessions are scoped to an Agent Deck instance-specific session dir and
 	// can always be relaunched with --continue.
 	if i.Tool == "pi" {
@@ -6760,6 +6879,9 @@ func (i *Instance) CanRestartFresh() bool {
 	}
 	if i.Tool == "codex" {
 		return i.CodexSessionID != ""
+	}
+	if i.Tool == "kiro" {
+		return i.KiroSessionID != ""
 	}
 	return i.CanRestartGeneric()
 }
@@ -7461,6 +7583,32 @@ func (i *Instance) GetOpenCodeOptions() *OpenCodeOptions {
 
 // SetOpenCodeOptions stores OpenCode-specific options
 func (i *Instance) SetOpenCodeOptions(opts *OpenCodeOptions) error {
+	if opts == nil {
+		i.ToolOptionsJSON = nil
+		return nil
+	}
+	data, err := MarshalToolOptions(opts)
+	if err != nil {
+		return err
+	}
+	i.ToolOptionsJSON = data
+	return nil
+}
+
+// GetKiroOptions returns Kiro-specific options, or nil if not set.
+func (i *Instance) GetKiroOptions() *KiroOptions {
+	if len(i.ToolOptionsJSON) == 0 {
+		return nil
+	}
+	opts, err := UnmarshalKiroOptions(i.ToolOptionsJSON)
+	if err != nil {
+		return nil
+	}
+	return opts
+}
+
+// SetKiroOptions stores Kiro-specific options.
+func (i *Instance) SetKiroOptions(opts *KiroOptions) error {
 	if opts == nil {
 		i.ToolOptionsJSON = nil
 		return nil

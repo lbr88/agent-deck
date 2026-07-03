@@ -306,6 +306,78 @@ func UnmarshalOpenCodeOptions(data json.RawMessage) (*OpenCodeOptions, error) {
 	return &opts, nil
 }
 
+// KiroOptions holds launch options for Kiro CLI sessions.
+type KiroOptions struct {
+	// Agent overrides the Kiro agent to use.
+	Agent string `json:"agent,omitempty"`
+	// Model overrides the Kiro model to use.
+	Model string `json:"model,omitempty"`
+	// TrustAllTools adds --trust-all-tools.
+	TrustAllTools bool `json:"trust_all_tools,omitempty"`
+	// TrustTools adds repeated --trust-tools <tool> entries.
+	TrustTools []string `json:"trust_tools,omitempty"`
+}
+
+// ToolName returns "kiro".
+func (o *KiroOptions) ToolName() string {
+	return "kiro"
+}
+
+// ToArgs returns command-line arguments based on options.
+func (o *KiroOptions) ToArgs() []string {
+	var args []string
+	if o.Agent != "" {
+		args = append(args, "--agent", o.Agent)
+	}
+	if o.Model != "" {
+		args = append(args, "--model", o.Model)
+	}
+	if o.TrustAllTools {
+		args = append(args, "--trust-all-tools")
+	}
+	for _, tool := range o.TrustTools {
+		if tool != "" {
+			args = append(args, "--trust-tools", tool)
+		}
+	}
+	return args
+}
+
+// NewKiroOptions creates KiroOptions with defaults from config.
+func NewKiroOptions(config *UserConfig) *KiroOptions {
+	opts := &KiroOptions{}
+	if config != nil {
+		opts.Agent = config.Kiro.DefaultAgent
+		opts.Model = config.Kiro.DefaultModel
+		opts.TrustAllTools = config.Kiro.TrustAllTools
+		opts.TrustTools = append([]string(nil), config.Kiro.TrustTools...)
+	}
+	return opts
+}
+
+// UnmarshalKiroOptions deserializes KiroOptions from JSON wrapper.
+func UnmarshalKiroOptions(data json.RawMessage) (*KiroOptions, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var wrapper ToolOptionsWrapper
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, err
+	}
+
+	if wrapper.Tool != "kiro" {
+		return nil, nil
+	}
+
+	var opts KiroOptions
+	if err := json.Unmarshal(wrapper.Options, &opts); err != nil {
+		return nil, err
+	}
+
+	return &opts, nil
+}
+
 // CopilotOptions holds launch options for GitHub Copilot CLI sessions
 // (the standalone `copilot` binary from @github/copilot, not the older
 // `gh copilot` extension).

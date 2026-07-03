@@ -59,6 +59,7 @@ func builtinTools() []builtinTool {
 		{Name: "opencode", Icon: "🌐", detectSubstrings: []string{"opencode", "open-code"}},
 		{Name: "gemini", Icon: "✨", detectSubstrings: []string{"gemini"}},
 		{Name: "codex", Icon: "💻", detectSubstrings: []string{"codex"}},
+		{Name: "kiro", Icon: "K", detectSubstrings: []string{"kiro-cli"}},
 		{Name: "pi", Icon: "π", detectTokens: []string{"pi"}},
 		{Name: "copilot", Icon: "🐙", detectSubstrings: []string{"copilot"}},
 		{Name: "crush", Icon: "💘", detectSubstrings: []string{"crush"}},

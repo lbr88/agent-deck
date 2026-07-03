@@ -2364,6 +2364,11 @@ func TestInstance_CanRestartFresh(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "kiro with session ID",
+			inst: &Instance{Tool: "kiro", KiroSessionID: "kiro-session-1"},
+			want: true,
+		},
+		{
 			name: "shell never offers fresh restart",
 			inst: &Instance{Tool: "shell"},
 			want: false,

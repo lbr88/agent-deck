@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// canonicalBuiltins is the canonical 11, in the precedence order that
+// canonicalBuiltins is the canonical built-in list, in the precedence order that
 // Registry.Match() (and the legacy detectTool() switch) walk.
 var canonicalBuiltins = []string{
-	"claude", "opencode", "gemini", "codex", "pi",
-	"copilot", "crush", "cursor", "hermes", "aider", "shell",
+	"claude", "opencode", "gemini", "codex", "kiro",
+	"pi", "copilot", "crush", "cursor", "hermes", "aider", "shell",
 }
 
 func TestRegistry_AllReturnsCanonical11(t *testing.T) {
@@ -46,6 +46,9 @@ func TestRegistry_MatchAllBranches(t *testing.T) {
 		{"gemini bare", "gemini", "gemini"},
 		// codex
 		{"codex with flags", "/usr/local/bin/codex --yolo", "codex"},
+		// kiro
+		{"kiro cli chat", "kiro-cli chat --tui", "kiro"},
+		{"kiro path", "/home/me/bin/kiro-cli chat --resume-id abc", "kiro"},
 		// pi — whitespace-token match, NOT substring
 		{"pi bare", "pi", "pi"},
 		{"pi with flags", "pi --profile dev", "pi"},

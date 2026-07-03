@@ -90,6 +90,19 @@ func TestDefaultRawPatterns_Codex(t *testing.T) {
 	}
 }
 
+func TestDefaultRawPatterns_Kiro(t *testing.T) {
+	raw := DefaultRawPatterns("kiro")
+	if raw == nil {
+		t.Fatal("expected non-nil for kiro")
+	}
+	if len(raw.BusyPatterns) == 0 {
+		t.Error("kiro should have busy patterns")
+	}
+	if len(raw.PromptPatterns) == 0 {
+		t.Error("kiro should have prompt patterns")
+	}
+}
+
 func TestDefaultRawPatterns_Codex_PromptRegex(t *testing.T) {
 	raw := DefaultRawPatterns("codex")
 	if raw == nil {

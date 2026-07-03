@@ -818,6 +818,109 @@ func TestUnmarshalOpenCodeOptions_WrongTool(t *testing.T) {
 	}
 }
 
+// === Kiro Options Tests ===
+
+func TestKiroOptions_ToolName(t *testing.T) {
+	opts := &KiroOptions{}
+	if opts.ToolName() != "kiro" {
+		t.Errorf("expected ToolName() = 'kiro', got %q", opts.ToolName())
+	}
+}
+
+func TestKiroOptions_ToArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		opts     KiroOptions
+		expected []string
+	}{
+		{
+			name:     "empty options",
+			opts:     KiroOptions{},
+			expected: nil,
+		},
+		{
+			name:     "agent and model",
+			opts:     KiroOptions{Agent: "kiro_default", Model: "claude-sonnet-4"},
+			expected: []string{"--agent", "kiro_default", "--model", "claude-sonnet-4"},
+		},
+		{
+			name:     "trust all tools",
+			opts:     KiroOptions{TrustAllTools: true},
+			expected: []string{"--trust-all-tools"},
+		},
+		{
+			name:     "trust tool list",
+			opts:     KiroOptions{TrustTools: []string{"shell", "git"}},
+			expected: []string{"--trust-tools", "shell", "--trust-tools", "git"},
+		},
+		{
+			name:     "all flags",
+			opts:     KiroOptions{Agent: "planner", Model: "sonnet", TrustAllTools: true, TrustTools: []string{"shell", "git"}},
+			expected: []string{"--agent", "planner", "--model", "sonnet", "--trust-all-tools", "--trust-tools", "shell", "--trust-tools", "git"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.opts.ToArgs()
+			if !reflect.DeepEqual(got, tt.expected) {
+				t.Errorf("ToArgs() = %v, expected %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNewKiroOptions_WithConfig(t *testing.T) {
+	config := &UserConfig{
+		Kiro: KiroSettings{
+			DefaultAgent:  "kiro_default",
+			DefaultModel:  "claude-sonnet-4",
+			TrustAllTools: true,
+			TrustTools:    []string{"shell"},
+		},
+	}
+
+	opts := NewKiroOptions(config)
+	if opts.Agent != "kiro_default" || opts.Model != "claude-sonnet-4" || !opts.TrustAllTools || !reflect.DeepEqual(opts.TrustTools, []string{"shell"}) {
+		t.Fatalf("NewKiroOptions(config) = %+v", opts)
+	}
+}
+
+func TestKiroOptions_MarshalUnmarshal(t *testing.T) {
+	original := &KiroOptions{
+		Agent:         "planner",
+		Model:         "sonnet",
+		TrustAllTools: true,
+		TrustTools:    []string{"shell", "git"},
+	}
+
+	data, err := MarshalToolOptions(original)
+	if err != nil {
+		t.Fatalf("MarshalToolOptions failed: %v", err)
+	}
+
+	restored, err := UnmarshalKiroOptions(data)
+	if err != nil {
+		t.Fatalf("UnmarshalKiroOptions failed: %v", err)
+	}
+	if !reflect.DeepEqual(original, restored) {
+		t.Errorf("round-trip failed: original=%+v, restored=%+v", original, restored)
+	}
+}
+
+func TestUnmarshalKiroOptions_WrongTool(t *testing.T) {
+	claudeOpts := &ClaudeOptions{SkipPermissions: true}
+	data, _ := MarshalToolOptions(claudeOpts)
+
+	result, err := UnmarshalKiroOptions(data)
+	if err != nil {
+		t.Fatalf("UnmarshalKiroOptions failed: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil for wrong tool, got %v", result)
+	}
+}
+
 func TestStripResumeFields(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -33,6 +33,11 @@ func TestDisplaySessionID(t *testing.T) {
 			want: "cdx-789",
 		},
 		{
+			name: "kiro",
+			inst: &Instance{Tool: "kiro", KiroSessionID: "kiro-123"},
+			want: "kiro-123",
+		},
+		{
 			name: "claude without id",
 			inst: &Instance{Tool: "claude"},
 			want: "",

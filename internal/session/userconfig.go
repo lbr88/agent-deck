@@ -142,6 +142,9 @@ type UserConfig struct {
 	// Codex defines Codex CLI integration settings
 	Codex CodexSettings `toml:"codex,omitempty"`
 
+	// Kiro defines Kiro CLI integration settings
+	Kiro KiroSettings `toml:"kiro,omitempty"`
+
 	// Copilot defines GitHub Copilot CLI integration settings (Issue #556)
 	Copilot CopilotSettings `toml:"copilot,omitempty"`
 
@@ -1723,6 +1726,27 @@ type CodexSettings struct {
 	EnvFile string `toml:"env_file,omitempty"`
 }
 
+// KiroSettings defines Kiro CLI configuration.
+type KiroSettings struct {
+	// Command overrides the default Kiro terminal invocation.
+	// Default: "kiro-cli chat --tui"
+	Command string `toml:"command,omitempty"`
+
+	// DefaultAgent is the Kiro agent to use for new sessions.
+	// If empty, Kiro CLI uses its own default.
+	DefaultAgent string `toml:"default_agent,omitempty"`
+
+	// DefaultModel is the model to use for new Kiro sessions.
+	// If empty, Kiro CLI uses its own default.
+	DefaultModel string `toml:"default_model,omitempty"`
+
+	// TrustAllTools adds --trust-all-tools for Kiro sessions.
+	TrustAllTools bool `toml:"trust_all_tools,omitempty"`
+
+	// TrustTools adds repeated --trust-tools <tool> values.
+	TrustTools []string `toml:"trust_tools,omitempty"`
+}
+
 // GetProfileCodexConfigDir returns the profile-specific Codex config directory, if configured.
 func (c *UserConfig) GetProfileCodexConfigDir(profile string) string {
 	if c == nil || profile == "" || c.Profiles == nil {
@@ -3142,6 +3166,15 @@ func GetCodexCommand() string {
 	return "codex"
 }
 
+// GetKiroCommand returns the configured Kiro command/alias.
+func GetKiroCommand() string {
+	userConfig, _ := LoadUserConfig()
+	if userConfig != nil && strings.TrimSpace(userConfig.Kiro.Command) != "" {
+		return strings.TrimSpace(userConfig.Kiro.Command)
+	}
+	return "kiro-cli chat --tui"
+}
+
 func isClaudeCommand(command string) bool {
 	return isCommand(command, "claude")
 }
@@ -3220,6 +3253,9 @@ func GetCustomToolNames() []string {
 func GetToolCommand(toolName string) string {
 	config, _ := LoadUserConfig()
 	if config == nil {
+		if toolName == "kiro" {
+			return "kiro-cli chat --tui"
+		}
 		return toolName
 	}
 	switch toolName {
@@ -3239,6 +3275,11 @@ func GetToolCommand(toolName string) string {
 		if config.Codex.Command != "" {
 			return config.Codex.Command
 		}
+	case "kiro":
+		if config.Kiro.Command != "" {
+			return config.Kiro.Command
+		}
+		return "kiro-cli chat --tui"
 	case "copilot":
 		if config.Copilot.Command != "" {
 			return config.Copilot.Command
@@ -3272,6 +3313,8 @@ func GetToolIcon(toolName string) string {
 		return "🌐"
 	case "codex":
 		return "💻"
+	case "kiro":
+		return "K"
 	case "copilot":
 		return "🐙"
 	case "crush":
