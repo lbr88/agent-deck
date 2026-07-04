@@ -19,6 +19,7 @@ import (
 var (
 	ErrInviteInvalid        = errors.New("hub: invite is invalid, expired, or consumed")
 	ErrNodeNotAuthenticated = errors.New("hub: node authentication failed")
+	ErrNodeNotFound         = errors.New("hub: node not found")
 )
 
 type Store struct {
@@ -60,6 +61,7 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open hub db: %w", err)
 	}
+	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
@@ -83,7 +85,7 @@ func (s *Store) CreateInvite(nodeName string, ttl time.Duration) (plainToken str
 	now := time.Now()
 	_, err = s.db.Exec(
 		`INSERT INTO invites (token_hash, node_name, expires_at) VALUES (?, ?, ?)`,
-		hashSecret(token), nodeName, now.Add(ttl).Unix(),
+		hashSecret(token), nodeName, now.Add(ttl).UnixNano(),
 	)
 	if err != nil {
 		return "", fmt.Errorf("create invite: %w", err)
@@ -93,7 +95,7 @@ func (s *Store) CreateInvite(nodeName string, ttl time.Duration) (plainToken str
 
 func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
 	tokenHash := hashSecret(plainToken)
-	now := time.Now().Unix()
+	now := time.Now().UnixNano()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -165,7 +167,7 @@ func (s *Store) AuthenticateNode(nodeID, plainToken string) (Node, error) {
 }
 
 func (s *Store) MarkNodeOnline(nodeID string) error {
-	return s.setNodeStatus(nodeID, "online", time.Now().Unix())
+	return s.setNodeStatus(nodeID, "online", time.Now().UnixNano())
 }
 
 func (s *Store) MarkNodeOffline(nodeID string) error {
@@ -173,6 +175,12 @@ func (s *Store) MarkNodeOffline(nodeID string) error {
 }
 
 func (s *Store) ReplaceSnapshot(nodeID string, snapshot SnapshotPayload) error {
+	if _, err := s.nodeByID(nodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNodeNotFound
+		}
+		return fmt.Errorf("load snapshot node: %w", err)
+	}
 	payload, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
@@ -183,7 +191,7 @@ func (s *Store) ReplaceSnapshot(nodeID string, snapshot SnapshotPayload) error {
 		 ON CONFLICT(node_id) DO UPDATE SET
 		   sent_at = excluded.sent_at,
 		   payload_json = excluded.payload_json`,
-		nodeID, snapshot.SentAt.Unix(), string(payload),
+		nodeID, snapshot.SentAt.UnixNano(), string(payload),
 	)
 	if err != nil {
 		return fmt.Errorf("replace snapshot: %w", err)
@@ -218,7 +226,7 @@ func (s *Store) LatestSessions() ([]NodeSessions, error) {
 		}
 		out = append(out, NodeSessions{
 			Node:     node,
-			SentAt:   time.Unix(sentAtUnix, 0),
+			SentAt:   time.Unix(0, sentAtUnix),
 			Sessions: snapshot.Sessions,
 		})
 	}
@@ -311,9 +319,9 @@ func scanInvite(row *sql.Row) (Invite, error) {
 	if err := row.Scan(&invite.TokenHash, &invite.NodeName, &expiresAt, &consumedAt); err != nil {
 		return Invite{}, err
 	}
-	invite.ExpiresAt = time.Unix(expiresAt, 0)
+	invite.ExpiresAt = time.Unix(0, expiresAt)
 	if consumedAt.Valid {
-		t := time.Unix(consumedAt.Int64, 0)
+		t := time.Unix(0, consumedAt.Int64)
 		invite.ConsumedAt = &t
 	}
 	return invite, nil
@@ -350,7 +358,7 @@ func scanNodeValues(row rowScanner, node *Node) error {
 	node.OS = osName.String
 	node.Arch = arch.String
 	if lastSeenAt.Valid {
-		t := time.Unix(lastSeenAt.Int64, 0)
+		t := time.Unix(0, lastSeenAt.Int64)
 		node.LastSeenAt = &t
 	}
 	return nil
@@ -377,7 +385,7 @@ func scanNodeFields(rows *sql.Rows, node *Node, extra ...any) error {
 	node.OS = osName.String
 	node.Arch = arch.String
 	if lastSeenAt.Valid {
-		t := time.Unix(lastSeenAt.Int64, 0)
+		t := time.Unix(0, lastSeenAt.Int64)
 		node.LastSeenAt = &t
 	}
 	return nil
