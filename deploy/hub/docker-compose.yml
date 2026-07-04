@@ -1,0 +1,17 @@
+services:
+  agent-deck-hub:
+    build:
+      context: ../..
+      dockerfile: deploy/hub/Dockerfile
+    image: agent-deck-hub:local
+    command:
+      - --listen=:8421
+      - --data=/data
+      - --tls-cert=/certs/tls.crt
+      - --tls-key=/certs/tls.key
+    ports:
+      - "8421:8421"
+    volumes:
+      - ./data:/data
+      - ./certs:/certs:ro
+    restart: unless-stopped

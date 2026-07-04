@@ -14,6 +14,7 @@ Complete reference for all agent-deck CLI commands.
 - [Group Commands](#group-commands)
 - [Profile Commands](#profile-commands)
 - [Remote Commands](#remote-commands)
+- [Hub Commands](#hub-commands)
 - [Conductor Commands](#conductor-commands)
 
 ## Global Options
@@ -532,6 +533,66 @@ agent-deck remote rename dev my-session new-name
 agent-deck remote update          # update all remotes
 agent-deck remote update dev      # update specific remote
 ```
+
+## Hub Commands
+
+Run an encrypted relay for trusted agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`.
+
+### hub serve
+
+```bash
+agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub --tls-cert cert.pem --tls-key key.pem
+```
+
+| Flag | Description |
+|------|-------------|
+| `--listen <addr>` | Listen address (default: `127.0.0.1:8421`) |
+| `--data <dir>` | Hub data directory |
+| `--tls-cert <path>` | TLS certificate file, required |
+| `--tls-key <path>` | TLS private key file, required |
+
+Starts the hub server. The data directory stores the SQLite hub database.
+
+### hub invite
+
+```bash
+agent-deck hub invite [--data <dir>] [--ttl 24h] <node-name>
+```
+
+Creates a single-use invite token for `hub join`.
+
+### hub join
+
+```bash
+agent-deck hub join wss://hub.example:8421 --token <invite-token> [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--token <token>` | Invite token from `hub invite`, required |
+| `--node-name <name>` | Display name for this node |
+| `--token-file <path>` | Where to store the joined node credential |
+| `--ca-pem-file <path>` | PEM CA bundle for verifying the hub certificate |
+| `--server-name <name>` | TLS server name override |
+| `--tls-skip-verify` | Skip TLS verification for local testing only |
+
+Exchanges the invite for a node credential and writes `[hub]` config for auto-connect.
+
+### hub connect
+
+```bash
+agent-deck hub connect
+```
+
+Connects this node to the configured hub without starting the TUI. Useful for service-style nodes.
+
+### hub nodes
+
+```bash
+agent-deck hub nodes [--data <dir>] [--json]
+```
+
+Lists registered hub nodes and their online/offline status.
 
 ## Session Resolution
 

@@ -821,6 +821,25 @@ Remote configuration is stored under `[remotes]` in `$XDG_CONFIG_HOME/agent-deck
 
 Pressing `n` on a remote group or session opens the full new-session dialog in **remote mode**: path suggestions come from the remote host, the remote session's group is pre-filled, and the create routes over SSH with your chosen tool — sessions are never accidentally created on localhost.
 
+### Agent Deck Hub
+
+Agent Deck Hub connects multiple trusted agent-deck instances through one encrypted relay. It is not a web app: the hub keeps node state and relays session snapshots, terminal attach streams, and basic session actions between joined nodes.
+
+```bash
+# Run the hub with TLS
+agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub --tls-cert cert.pem --tls-key key.pem
+
+# Create a single-use invite on the hub host
+agent-deck hub invite laptop
+
+# Join from another machine
+agent-deck hub join wss://hub.example:8421 --token <token>
+```
+
+After join, the TUI auto-connects on startup. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required.
+
+See [Agent Deck Hub](docs/AGENT-DECK-HUB.md) for Docker deployment and the security model.
+
 #### Security
 
 - **SSH host-key stance.** agent-deck verifies remote host keys against your `~/.ssh/known_hosts` using OpenSSH's secure default — it never sets `StrictHostKeyChecking=no` and never points `UserKnownHostsFile` at `/dev/null`. Every connection (list, attach, deploy) runs with `BatchMode=yes`, so an **unknown or changed host key fails fast** with a clear `Host key verification failed` error instead of silently trusting the host or hanging on a prompt. Add each remote to `known_hosts` first (e.g. `ssh user@host` once interactively, or `ssh-keyscan`), and authenticate with keys/an agent (BatchMode disables interactive password prompts). A changed host key is treated as a potential MITM and refused until you resolve it.
