@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/gorilla/websocket"
 )
 
 func TestHubCommandIsRoutedFromMain(t *testing.T) {
@@ -28,6 +31,7 @@ func TestSaveHubJoinConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	session.ClearUserConfigCache()
 	t.Cleanup(session.ClearUserConfigCache)
 
@@ -223,6 +227,98 @@ func TestHubSettingsEnabledTrimsWhitespace(t *testing.T) {
 	}
 }
 
+func TestHubConnectRequiresConfiguredHub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	err := handleHubConnectWithContext(context.Background(), "default", nil)
+
+	if err == nil {
+		t.Fatal("handleHubConnectWithContext succeeded without hub config, want error")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "hub") || !strings.Contains(lower, "join") {
+		t.Fatalf("error = %q, want hub join guidance", err.Error())
+	}
+}
+
+func TestHubConnectReadsTokenFileAndConnects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	connected := make(chan struct{})
+	authHeader := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader <- r.Header.Get("Authorization")
+		conn, err := hubTestUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			var env hub.Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			if env.Type == hub.MsgSnapshot {
+				close(connected)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	tokenFile := filepath.Join(home, ".config", "agent-deck", "hub-node-token")
+	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
+		t.Fatalf("mkdir token dir: %v", err)
+	}
+	if err := os.WriteFile(tokenFile, []byte(" node_secret \n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if err := session.SaveUserConfig(&session.UserConfig{Hub: session.HubSettings{
+		URL:           " wss://" + strings.TrimPrefix(server.URL, "https://") + " ",
+		NodeID:        " node_1 ",
+		NodeName:      " laptop ",
+		TokenFile:     " " + tokenFile + " ",
+		TLSSkipVerify: true,
+	}}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+	session.ClearUserConfigCache()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	out := captureStdout(t, func() {
+		go func() {
+			errCh <- handleHubConnectWithContext(ctx, "default", nil)
+		}()
+		select {
+		case <-connected:
+			cancel()
+		case <-time.After(time.Second):
+			t.Fatal("hub connect did not publish snapshot")
+		}
+		if err := waitConnectErr(t, errCh); err != nil {
+			t.Fatalf("handleHubConnectWithContext: %v", err)
+		}
+	})
+
+	if got := waitConnectString(t, authHeader); got != "Bearer node_secret" {
+		t.Fatalf("Authorization = %q, want trimmed bearer token", got)
+	}
+	if strings.Contains(out, "node_secret") {
+		t.Fatalf("hub connect printed node token: %s", out)
+	}
+}
+
 type joinResponseServer struct {
 	server *httptest.Server
 }
@@ -243,4 +339,28 @@ func newJoinResponseServer(t *testing.T, responseBody string) joinResponseServer
 
 func (s joinResponseServer) wssURL() string {
 	return "wss://" + strings.TrimPrefix(s.server.URL, "https://")
+}
+
+var hubTestUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+func waitConnectErr(t *testing.T, ch <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for connect error")
+		return nil
+	}
+}
+
+func waitConnectString(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for string")
+		return ""
+	}
 }

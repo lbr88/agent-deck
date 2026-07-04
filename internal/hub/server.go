@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -227,6 +228,41 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		_ = conn.WriteJSON(welcome)
+	}
+	for {
+		var env Envelope
+		if err := conn.ReadJSON(&env); err != nil {
+			return
+		}
+		if err := s.handleNodeEnvelope(node.ID, env); err != nil {
+			errEnv, marshalErr := MarshalEnvelope(MsgError, node.ID, ErrorPayload{Message: err.Error()})
+			if marshalErr == nil {
+				_ = conn.WriteJSON(errEnv)
+			}
+		}
+	}
+}
+
+func (s *Server) handleNodeEnvelope(nodeID string, env Envelope) error {
+	if env.Version != 0 && env.Version != ProtocolVersion {
+		return fmt.Errorf("unsupported protocol version %d", env.Version)
+	}
+	switch env.Type {
+	case MsgHello, MsgHeartbeat:
+		return nil
+	case MsgSnapshot:
+		var snapshot SnapshotPayload
+		if err := json.Unmarshal(env.Payload, &snapshot); err != nil {
+			return fmt.Errorf("decode snapshot: %w", err)
+		}
+		if snapshot.SentAt.IsZero() {
+			snapshot.SentAt = time.Now().UTC()
+		}
+		return s.store.ReplaceSnapshot(nodeID, snapshot)
+	case MsgCommand, MsgCommandResult, MsgAttachOpen, MsgAttachReady, MsgAttachData, MsgAttachResize, MsgAttachClose, MsgAttachClosed:
+		return nil
+	default:
+		return nil
 	}
 }
 

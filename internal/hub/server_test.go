@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestHubHealthz(t *testing.T) {
@@ -107,6 +109,98 @@ func TestHubNodeWebSocketRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketPersistsSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	conn := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret")
+	defer conn.Close()
+	readTestWelcome(t, conn)
+
+	snapshot, err := MarshalEnvelope(MsgSnapshot, "node_1", SnapshotPayload{
+		SentAt: time.Unix(123, 0).UTC(),
+		Sessions: []SessionInfo{{
+			ID:        "s1",
+			Title:     "worker",
+			GroupPath: "default",
+			Status:    "waiting",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope: %v", err)
+	}
+	if err := conn.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON snapshot: %v", err)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("snapshot was not persisted")
+		default:
+		}
+		got, err := server.store.LatestSessions()
+		if err != nil {
+			t.Fatalf("LatestSessions: %v", err)
+		}
+		if len(got) == 1 && len(got[0].Sessions) == 1 && got[0].Sessions[0].ID == "s1" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHubNodeWebSocketAcceptsHeartbeat(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	conn := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret")
+	defer conn.Close()
+	readTestWelcome(t, conn)
+
+	heartbeat, err := MarshalEnvelope(MsgHeartbeat, "node_1", nil)
+	if err != nil {
+		t.Fatalf("MarshalEnvelope heartbeat: %v", err)
+	}
+	if err := conn.WriteJSON(heartbeat); err != nil {
+		t.Fatalf("WriteJSON heartbeat: %v", err)
+	}
+	snapshot, err := MarshalEnvelope(MsgSnapshot, "node_1", SnapshotPayload{
+		SentAt:   time.Unix(124, 0).UTC(),
+		Sessions: []SessionInfo{{ID: "after-heartbeat", Title: "worker"}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope snapshot: %v", err)
+	}
+	if err := conn.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON after heartbeat: %v", err)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("connection did not accept snapshot after heartbeat")
+		default:
+		}
+		got, err := server.store.LatestSessions()
+		if err != nil {
+			t.Fatalf("LatestSessions: %v", err)
+		}
+		if len(got) == 1 && len(got[0].Sessions) == 1 && got[0].Sessions[0].ID == "after-heartbeat" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestServerServeRequiresTLSCertAndKey(t *testing.T) {
 	server := newTestServer(t)
 	err := server.Serve()
@@ -132,4 +226,27 @@ func newTestServer(t *testing.T) *Server {
 func strconvQuote(s string) string {
 	data, _ := json.Marshal(s)
 	return string(data)
+}
+
+func dialTestNodeWebSocket(t *testing.T, serverURL, nodeID, token string) *websocket.Conn {
+	t.Helper()
+	u := "ws://" + strings.TrimPrefix(serverURL, "http://") + "/ws/node?node_id=" + nodeID
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+	conn, _, err := websocket.DefaultDialer.Dial(u, header)
+	if err != nil {
+		t.Fatalf("Dial node websocket: %v", err)
+	}
+	return conn
+}
+
+func readTestWelcome(t *testing.T, conn *websocket.Conn) {
+	t.Helper()
+	var env Envelope
+	if err := conn.ReadJSON(&env); err != nil {
+		t.Fatalf("ReadJSON welcome: %v", err)
+	}
+	if env.Type != MsgWelcome {
+		t.Fatalf("welcome type = %q, want %q", env.Type, MsgWelcome)
+	}
 }

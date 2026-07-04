@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -12,9 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/agentpaths"
@@ -53,7 +56,6 @@ type hubNodeOutput struct {
 }
 
 func handleHub(profile string, args []string) {
-	_ = profile
 	if len(args) == 0 {
 		printHubUsage(os.Stderr)
 		os.Exit(1)
@@ -69,6 +71,8 @@ func handleHub(profile string, args []string) {
 		err = handleHubJoin(args[1:])
 	case "nodes":
 		err = handleHubNodes(args[1:])
+	case "connect":
+		err = handleHubConnect(profile, args[1:])
 	case "help", "--help", "-h":
 		printHubUsage(os.Stdout)
 		return
@@ -268,6 +272,65 @@ func handleHubNodes(args []string) error {
 	return nil
 }
 
+func handleHubConnect(profile string, args []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return handleHubConnectWithContext(ctx, profile, args)
+}
+
+func handleHubConnectWithContext(ctx context.Context, profile string, args []string) error {
+	fs := flag.NewFlagSet("hub connect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+	hubConfig := config.Hub
+	if !hubConfig.Enabled() {
+		return fmt.Errorf("hub is not configured; run agent-deck hub join first")
+	}
+	tokenFile := strings.TrimSpace(hubConfig.TokenFile)
+	if tokenFile == "" {
+		return fmt.Errorf("hub token file is not configured; run agent-deck hub join again")
+	}
+	tokenData, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return fmt.Errorf("read hub token file: %w", err)
+	}
+	token := strings.TrimSpace(string(tokenData))
+	if token == "" {
+		return fmt.Errorf("hub token file is empty; run agent-deck hub join again")
+	}
+
+	nodeName := strings.TrimSpace(hubConfig.NodeName)
+	if nodeName == "" {
+		nodeName = strings.TrimSpace(hubConfig.NodeID)
+	}
+	client := hub.NewClient(hub.ClientConfig{
+		URL:           strings.TrimSpace(hubConfig.URL),
+		NodeID:        strings.TrimSpace(hubConfig.NodeID),
+		NodeName:      nodeName,
+		Token:         token,
+		Version:       Version,
+		TLSSkipVerify: hubConfig.TLSSkipVerify,
+		CAPemFile:     strings.TrimSpace(hubConfig.CAPemFile),
+		ServerName:    strings.TrimSpace(hubConfig.ServerName),
+	}, hub.LocalSessionSource{Profile: profile})
+
+	fmt.Printf("Connecting to hub %s as %s\n", strings.TrimSpace(hubConfig.URL), nodeName)
+	return client.Connect(ctx)
+}
+
 func saveHubJoinConfig(config *session.UserConfig, result hubJoinResult) error {
 	if config == nil {
 		return fmt.Errorf("config is required")
@@ -464,4 +527,5 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  invite  Create a single-use join invite")
 	fmt.Fprintln(w, "  join    Join this agent-deck node to a hub")
 	fmt.Fprintln(w, "  nodes   List registered hub nodes")
+	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }
