@@ -46,7 +46,7 @@ agent-deck hub join wss://hub.example:8421 --token invite_...
 That first joined node becomes a hub admin. Admin nodes can create more invites from their own machine:
 
 ```bash
-agent-deck hub invite work-laptop
+agent-deck hub invite desktop
 ```
 
 The invite command prints the exact command to run on the joining machine:
@@ -101,13 +101,26 @@ Common TUI actions route to the owner node:
 
 ## Docker Deployment
 
-The deployment files in `deploy/hub/` run only the hub server. Build and start from the repository root:
+The deployment files in `deploy/hub/` run only the hub server. The default compose file pulls the published GHCR image:
 
 ```bash
-docker compose -f deploy/hub/docker-compose.yml up --build -d
+docker compose -f deploy/hub/docker-compose.yml pull
+docker compose -f deploy/hub/docker-compose.yml up -d
 ```
 
-The compose file uses the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join` and `/api/invites`.
+If the package is private, log in to GHCR on the Docker host first:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+```
+
+For local development, build the image directly from the repository root:
+
+```bash
+docker build -f deploy/hub/Dockerfile -t agent-deck-hub:local .
+```
+
+The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join` and `/api/invites`.
 
 ```yaml
 command:

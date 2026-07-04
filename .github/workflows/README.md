@@ -23,6 +23,7 @@ file an issue and fix it, don't merge through it.
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `release.yml` | push tag `v*` | Validates the tag matches `cmd/agent-deck/main.go`'s `Version`, runs `go test -race ./...`, runs `goreleaser --clean` to build Darwin/Linux × amd64/arm64 tarballs, publishes the GitHub Release, and asserts the expected five assets + `checksums.txt` landed. Replaces the pre-#332 manual `make release-local` step. |
+| `hub-image.yml` | branch push, push tag `v*`, PRs touching hub image inputs, or `workflow_dispatch` | Builds the `deploy/hub/Dockerfile` image for linux/amd64 and linux/arm64. PRs build only; pushes publish `ghcr.io/lbr88/agent-deck-hub` with branch, short-SHA, semver, and `latest` tags. |
 | `pages.yml` | push to `main` touching `site/**`, or `workflow_dispatch` | Deploys the static landing site under `site/` to GitHub Pages. |
 
 ## Notification-only (no gate, no build)

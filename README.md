@@ -834,7 +834,7 @@ agent-deck hub serve --listen :8421 --bootstrap-admin laptop --data ~/.local/sha
 agent-deck hub join wss://hub.example:8421 --token invite_...
 
 # From that admin client, create more single-use invites:
-agent-deck hub invite work-laptop
+agent-deck hub invite desktop
 
 # Run the printed command on the joining machine:
 agent-deck hub join wss://hub.example:8421 --token invite_...

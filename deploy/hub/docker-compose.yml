@@ -1,9 +1,7 @@
 services:
   agent-deck-hub:
-    build:
-      context: ../..
-      dockerfile: deploy/hub/Dockerfile
-    image: agent-deck-hub:local
+    image: ghcr.io/lbr88/agent-deck-hub:latest
+    pull_policy: always
     command:
       - --listen=:8421
       - --data=/data
