@@ -19,7 +19,7 @@
 
 </div>
 
-**Agent Deck is mission control for your AI coding agents.** Running Claude Code on ten projects, OpenCode on five more, another agent somewhere in the background? One terminal shows every session — running, waiting, or done — and one keystroke switches between them. Groups, search, forking, git worktrees, cost tracking, and a phone-controlled [conductor](#conductor) keep a whole fleet manageable.
+**Agent Deck is mission control for your AI coding agents.** Running Claude Code on ten projects, OpenCode or Kiro on five more, another agent somewhere in the background? One terminal shows every session — running, waiting, or done — and one keystroke switches between them. Groups, search, forking, git worktrees, cost tracking, and a phone-controlled [conductor](#conductor) keep a whole fleet manageable.
 
 https://github.com/user-attachments/assets/e4f55917-435c-45ba-92cc-89737d0d1401
 
@@ -70,7 +70,8 @@ See [Troubleshooting](skills/agent-deck/references/troubleshooting.md#uninstalli
 ```bash
 agent-deck                        # Launch TUI
 agent-deck add . -c claude        # Add current dir with Claude
-agent-deck session import-codex <id-or-name> # Import an existing saved Codex session
+agent-deck session import-codex <id-or-name> # Import saved sessions; also import-claude/opencode/kiro
+agent-deck session handover my-proj --to codex # Create a target-tool session with handover context
 agent-deck session fork my-proj   # Fork a supported session
 agent-deck session remove my-proj # Remove stopped/errored session from registry (transcripts preserved)
 agent-deck mcp attach my-proj exa # Attach MCP to session
@@ -86,8 +87,9 @@ agent-deck web                    # Start web UI on http://127.0.0.1:8420
 |-----|--------|
 | `Enter` | Attach to session |
 | `n` | New session |
-| `i` | Import existing tmux or saved Codex session |
+| `i` | Import existing tmux or saved Codex/Claude/OpenCode/Kiro session |
 | `f` / `F` | Fork (quick / dialog) |
+| `P h` | Handover to another supported tool |
 | `A` / `Shift+U` | Archive / unarchive session |
 | `^` | Show archived sessions |
 | `m` | MCP Manager |
@@ -441,9 +443,13 @@ branch_prefix       = "fork/" # auto branch name = <branch_prefix><sanitized-tit
 > **Web/API fork** (`POST /api/sessions/{id}/fork`) is plain tool-native fork — it does **not** apply `[fork]` worktree/state/Docker defaults (those are TUI quick-fork/dialog scope).
 > **Codex** forking requires a codex CLI with `codex fork <session-id>` support.
 
-### Import Codex Sessions
+### Import Saved Sessions
 
-Bring a Codex conversation that was started outside Agent Deck into the registry with `agent-deck session import-codex <session-id-or-name>`. The import validates that Codex has a matching rollout file, creates a stopped Codex-compatible Agent Deck session, and resumes it later through the normal `codex resume <session-id>` path. In the TUI, press `i`, choose **Saved Codex sessions**, and select the session to import.
+Bring conversations that were started outside Agent Deck into the registry with `agent-deck session import-codex`, `import-claude`, `import-opencode`, or `import-kiro`. Imports create stopped Agent Deck sessions that resume through each tool's native resume path; add `--start` to launch immediately. In the TUI, press `i`, choose the saved-session source, search/select the session, and import it.
+
+### Handover Between Tools
+
+Create a new session for another supported tool with `agent-deck session handover <source> --to <claude|codex|opencode|kiro>`. Handover builds a deterministic context packet from the source session, latest visible output, and git context; it does not migrate or modify the source tool's native transcript. Use `--start` to launch the target and send the handover packet immediately.
 
 ### Archive Sessions
 

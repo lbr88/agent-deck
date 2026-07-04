@@ -173,6 +173,104 @@ In the TUI, quick fork (`f`) is comprehensive by default: it creates a new git w
 - Claude sessions must have a valid Claude session ID
 - Pi sessions use Agent Deck's per-instance Pi session directory and Pi's native `pi --fork`
 
+### session import-codex
+
+```bash
+agent-deck session import-codex <session-id-or-name> [-t "title"] [-g "group"] [--path <path>] [-c "command"] [--start] [--json] [-q]
+```
+
+Imports an existing saved Codex conversation into Agent Deck as a stopped
+Codex-compatible session, unless `--start` is passed.
+
+| Flag | Description |
+|------|-------------|
+| `-t, --title` | Agent Deck title; defaults to the Codex thread name or ID fallback |
+| `-g, --group` | Group path |
+| `--path` | Project path; defaults to the current directory |
+| `-c, --command` | Codex command/alias; defaults to `[codex].command` or `codex` |
+| `--start` | Start the imported session immediately |
+| `--json` | JSON output |
+| `-q, --quiet` | Minimal output |
+
+### session import-claude
+
+```bash
+agent-deck session import-claude <session-id-or-name> [-t "title"] [-g "group"] [--path <path>] [--start] [--json] [-q]
+```
+
+Imports an existing Claude Code session by ID or name without reading
+transcript content.
+
+| Flag | Description |
+|------|-------------|
+| `-t, --title` | Agent Deck title |
+| `-g, --group` | Group path |
+| `--path` | Project path |
+| `--start` | Start the imported session immediately |
+| `--json` | JSON output |
+| `-q, --quiet` | Minimal output |
+
+### session import-opencode
+
+```bash
+agent-deck session import-opencode <session-id-or-title> [-t "title"] [-g "group"] [--path <path>] [--start] [--json] [-q]
+```
+
+Imports an existing saved OpenCode session. The project path defaults to
+OpenCode metadata when available, then the current directory.
+
+| Flag | Description |
+|------|-------------|
+| `-t, --title` | Agent Deck title; defaults to the OpenCode title |
+| `-g, --group` | Group path |
+| `--path` | Project path override |
+| `--start` | Start the imported session immediately |
+| `--json` | JSON output |
+| `-q, --quiet` | Minimal output |
+
+### session import-kiro
+
+```bash
+agent-deck session import-kiro <session-id-or-title> [-t "title"] [-g "group"] [--path <path>] [-c "command"] [--start] [--json] [-q]
+```
+
+Imports an existing saved Kiro CLI session from Kiro's saved-session index.
+The project path defaults to Kiro metadata when available, then the current
+directory.
+
+| Flag | Description |
+|------|-------------|
+| `-t, --title` | Agent Deck title; defaults to the Kiro title |
+| `-g, --group` | Group path |
+| `--path` | Project path override |
+| `-c, --command` | Kiro command; defaults to `[kiro].command` or `kiro-cli chat --tui` |
+| `--start` | Start the imported session immediately |
+| `--json` | JSON output |
+| `-q, --quiet` | Minimal output |
+
+### session handover
+
+```bash
+agent-deck session handover <source-session> --to <claude|codex|opencode|kiro> [-t "title"] [-g "group"] [--path <path>] [-m "message"] [--start] [--json] [-q]
+```
+
+Creates a new target-tool session with a deterministic handover packet. This
+is not native transcript migration: the source session is unchanged, and the
+target receives context assembled from the source metadata, latest visible
+output, git context, and optional operator message.
+
+| Flag | Description |
+|------|-------------|
+| `--to` | Target tool: `claude`, `codex`, `opencode`, or `kiro` |
+| `-t, --title` | Title for the new target session |
+| `-g, --group` | Group path for the new target session |
+| `--path` | Project path for the new target session |
+| `-m, --message` | Operator instruction appended to the handover packet |
+| `--start` | Start the target session and send the handover packet immediately |
+| `--no-start` | Explicitly create the target session stopped |
+| `--json` | JSON output |
+| `-q, --quiet` | Minimal output |
+
 ### session attach
 
 ```bash

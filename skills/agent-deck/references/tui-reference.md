@@ -35,6 +35,7 @@ Complete reference for agent-deck Terminal UI features.
 | `u` | Mark unread (idle -> waiting) |
 | `f` | Quick fork (Claude/OpenCode/Pi/Codex) |
 | `F` | Fork with options (Claude/OpenCode/Pi/Codex) |
+| `P h` | Handover selected session to another supported tool |
 
 ### Group Actions
 
@@ -62,7 +63,7 @@ Complete reference for agent-deck Terminal UI features.
 | Key | Action |
 |-----|--------|
 | `?` | Help overlay |
-| `i` | Import existing tmux sessions |
+| `i` | Import existing tmux or saved Codex/Claude/OpenCode/Kiro sessions |
 | `Ctrl+R` | Manual refresh |
 | `Ctrl+Q` | Detach (keep tmux running) |
 | `q` / `Ctrl+C` | Quit |
@@ -152,6 +153,39 @@ Claude New Session defaults are remembered in `~/.agent-deck/config.toml` under 
 
 **Controls:** `Enter` fork | `Esc` cancel
 
+### Import Dialog (`i`)
+
+Imports sessions that already exist outside the Agent Deck registry.
+
+**Sources:**
+- Existing tmux sessions
+- Saved Codex sessions
+- Saved Claude Code sessions
+- Saved OpenCode sessions
+- Saved Kiro CLI sessions
+
+The saved-session picker supports search and a details preview so you can
+confirm the session ID/title, project path, and recency before importing.
+
+**Controls:** type to search | `↑/↓` navigate | `Enter` import/select | `Esc` cancel
+
+### Handover Dialog (`P h`)
+
+Creates a new Claude, Codex, OpenCode, or Kiro session from a deterministic
+handover packet. The source session and its native transcript are unchanged;
+the target receives context from the source metadata, latest visible output,
+git context, and optional operator message.
+
+**Fields:**
+- Target tool (all supported handover tools except the source tool)
+- Session title
+- Group
+- Project path
+- Optional handover message
+- Start now toggle
+
+**Controls:** `Tab` move fields | `Enter` create | `Esc` cancel
+
 ### Delete Confirmation (`d`)
 
 **For sessions:** Warning about tmux kill, process termination
@@ -188,7 +222,7 @@ recent_days = 30
 ## Preview Pane
 
 - Shows last ~500 lines of session's tmux pane
-- Auto-updates every 2 seconds
+- Auto-updates every 2 seconds by default for the selected local session; tune with `[ui].preview_refresh_ms`
 - Launch animation: 6-15s for Claude/Gemini
 
 ## Layout
@@ -205,6 +239,7 @@ recent_days = 30
 | Gemini | ✨ | Purple |
 | OpenCode | 🌐 | Cyan |
 | Codex | 💻 | Cyan |
+| Kiro | K | Cyan |
 | Cursor | 📝 | Blue |
 | Shell | 🐚 | Default |
 

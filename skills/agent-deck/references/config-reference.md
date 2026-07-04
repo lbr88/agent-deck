@@ -12,6 +12,7 @@ All options for `~/.agent-deck/config.toml`.
 - [[gemini] Section](#gemini-section)
 - [[opencode] Section](#opencode-section)
 - [[codex] Section](#codex-section)
+- [[kiro] Section](#kiro-section)
 - [[copilot] Section](#copilot-section)
 - [[hermes] Section](#hermes-section)
 - [[docker] Section](#docker-section)
@@ -297,6 +298,29 @@ Status detection: process-alive/dead only. Content-sniffing planned for future r
 
 When using a different Codex home, prefer an inline command such as `CODEX_HOME=~/.codex-work codex` or export `CODEX_HOME` before starting agent-deck. Shell aliases are allowed, but agent-deck cannot infer `CODEX_HOME` hidden inside an alias for resume-file discovery.
 
+## [kiro] Section
+
+Kiro CLI integration settings. New Kiro sessions launch with
+`kiro-cli chat --tui` by default. Sessions with a known Kiro session ID resume
+with `kiro-cli chat --resume-id <id> --tui`, plus any configured options.
+
+```toml
+[kiro]
+command = "kiro-cli chat --tui"
+default_agent = ""
+default_model = ""
+trust_all_tools = false
+trust_tools = []
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `command` | string | `"kiro-cli chat --tui"` | Kiro CLI command or alias. Commands containing `kiro-cli` get Agent Deck's resume/options handling; custom non-Kiro commands are launched unchanged. |
+| `default_agent` | string | `""` | Agent to use for new/restarted Kiro sessions. Empty uses Kiro CLI's own default. |
+| `default_model` | string | `""` | Model to use for new/restarted Kiro sessions. Empty uses Kiro CLI's own default. |
+| `trust_all_tools` | bool | `false` | Adds `--trust-all-tools` for Kiro sessions. |
+| `trust_tools` | []string | `[]` | Adds repeated `--trust-tools <tool>` values for Kiro sessions. |
+
 ## [docker] Section
 
 Docker sandbox settings. Run sessions inside isolated containers. Toggle per-session when creating, or set defaults here. Access in TUI via `S` (Settings).
@@ -486,6 +510,7 @@ footer = "full"                               # Footer hint bar: "full", "curate
 hidden_tools = ["gemini", "opencode", "pi"]   # Denylist: hide these from the picker
 show_only_installed_tools = true              # Also hide tools not found on PATH
 new_session_enter_advances = false            # Opt OUT: restore Enter-submits behavior
+preview_refresh_ms = 2000                     # Selected local preview recapture cadence; minimum 100
 ```
 
 | Key | Type | Default | Description |
@@ -494,6 +519,7 @@ new_session_enter_advances = false            # Opt OUT: restore Enter-submits b
 | `hidden_tools` | []string | `[]` | Tool names to hide from the new-session picker. `shell` is always shown and cannot be hidden. Unknown names log a warning and are ignored. Edit via TUI **Settings (`S`) → Visible tools…** or by hand in `config.toml`. |
 | `show_only_installed_tools` | bool | `false` | When `true`, hides built-in and custom tools whose command does not resolve on the host `PATH`. `shell` stays visible. If nothing else resolves, the picker falls back to showing all tools with a one-line hint. Toggle in TUI Settings under **TOOL PICKER**. |
 | `new_session_enter_advances` | bool | `true` | Controls what **Enter** does on the free-text **Name** / **Branch** fields of the new-session dialog. Default `true`: Enter **advances** to the next field, so typing a name and pressing Enter no longer silently creates a session with all defaults. **Ctrl+S** is the explicit "create now" shortcut and submits from any field in both modes. Set `false` to restore the legacy behavior where Enter on Name/Branch submits the form. |
+| `preview_refresh_ms` | int | `2000` | Recapture cadence, in milliseconds, for the selected local preview pane. Values below 100 are clamped to 100. |
 
 Filters compose: `hidden_tools` is applied first, then `show_only_installed_tools` (when enabled).
 

@@ -223,8 +223,10 @@ git commit -m "feat(kiro): add built-in launch support"
 - Modify: `internal/statedb/statedb_test.go`
 
 **Interfaces:**
-- Consumes: `Instance.KiroSessionID`, `Instance.KiroDetectedAt`, and `Instance.KiroStartedAt`.
+- Consumes: `Instance.KiroSessionID` and `Instance.KiroDetectedAt`.
 - Produces: JSON and SQLite round trip for `kiro_session_id` and `kiro_detected_at`.
+
+`Instance.KiroStartedAt` is runtime-only future matching state (`json:"-"`) and is not persisted.
 
 - [ ] **Step 1: Write failing persistence tests**
 

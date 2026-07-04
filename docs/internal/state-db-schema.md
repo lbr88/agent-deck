@@ -209,6 +209,8 @@ justify a column-per-field schema. The typed shape is defined by
 | `opencode_detected_at` | int (Unix s) | When the OpenCode token was first observed |
 | `codex_session_id` | string | Codex session token |
 | `codex_detected_at` | int (Unix s) | When the Codex token was first observed |
+| `kiro_session_id` | string | Kiro CLI session token |
+| `kiro_detected_at` | int (Unix s) | When the Kiro session token was first observed |
 | `latest_prompt` | string | Last user input shown in the TUI preview |
 | `notes` | string | Free-form user notes |
 | `loaded_mcp_names` | string[] | MCP servers attached at last spawn |

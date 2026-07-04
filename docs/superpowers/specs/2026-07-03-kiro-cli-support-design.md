@@ -114,14 +114,13 @@ Extend Agent Deck's typed instance state with:
 
 - `KiroSessionID string`
 - `KiroDetectedAt time.Time`
-- `KiroStartedAt int64`
+- `KiroStartedAt int64` as runtime-only future matching state (`json:"-"`)
 
-Persist these through existing JSON and SQLite `tool_data` mechanisms using
-snake_case keys:
+Persist only the durable Kiro binding fields through existing JSON and SQLite
+`tool_data` mechanisms using snake_case keys:
 
 - `kiro_session_id`
 - `kiro_detected_at`
-- `kiro_started_at`
 
 `Instance.DisplaySessionID()` should return `KiroSessionID` for Kiro sessions.
 `Instance.SyncSessionIDsToTmux()` should write `KIRO_SESSION_ID` when present.
