@@ -43,10 +43,12 @@ Start the hub with `--bootstrap-admin <node-name>`. The hub prints the exact com
 agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
 
-That first joined node becomes a hub admin. Admin nodes can create more invites from their own machine:
+That first joined node becomes a hub admin. Admin nodes can manage the hub from their own machine:
 
 ```bash
 agent-deck hub invite desktop
+agent-deck hub nodes
+agent-deck hub nodes promote node_...
 ```
 
 The invite command prints the exact command to run on the joining machine:
@@ -55,19 +57,21 @@ The invite command prints the exact command to run on the joining machine:
 agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
 
-Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to create invites. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create hub invites.
+Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to administer the hub. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create invites or manage registered nodes.
 
-If you are on the hub host and want to create an invite from the local hub database instead of the configured joined hub, use:
+If you are on the hub host and want to manage the local hub database instead of the configured joined hub, use:
 
 ```bash
 agent-deck hub invite --local laptop
 agent-deck hub invite --data /data laptop
+agent-deck hub nodes --local
+agent-deck hub nodes --data /data
 ```
 
 If you need to recover admin access from the hub host, promote an already joined node:
 
 ```bash
-agent-deck hub nodes promote node_...
+agent-deck hub nodes promote --local node_...
 ```
 
 On first join with the default self-signed certificate, `agent-deck` shows the hub certificate fingerprint and asks whether to trust it. The accepted fingerprint is stored in `config.toml`, like an SSH known-host key. Future connects reject the hub if that certificate changes.
@@ -120,7 +124,7 @@ For local development, build the image directly from the repository root:
 docker build -f deploy/hub/Dockerfile -t agent-deck-hub:local .
 ```
 
-The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join` and `/api/invites`.
+The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`, `/api/invites`, `/api/nodes`, and `/api/nodes/promote`.
 
 ```yaml
 command:
@@ -136,7 +140,7 @@ command:
 - The hub creates a self-signed certificate by default. You can override it with `--tls-cert` and `--tls-key`.
 - Join uses a single-use invite token over HTTPS and pins the accepted certificate fingerprint.
 - Joined nodes receive long-lived node credentials stored locally with file mode `0600`.
-- Admin nodes can create more invites. Bootstrap admin invite creation only happens while the hub has no registered nodes.
+- Admin nodes can create more invites and manage registered nodes. Bootstrap admin invite creation only happens while the hub has no registered nodes.
 - Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes. A non-admin node cannot create invites.
 - There is no offline queue. Actions require the owner node to be connected.
 - No SSH connectivity between nodes is required.

@@ -199,6 +199,119 @@ func TestServerInviteAPICreatesInviteForAdminNode(t *testing.T) {
 	}
 }
 
+func TestServerNodesAPIRequiresAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/nodes?node_id=node_1", nil)
+	req.Header.Set("Authorization", "Bearer node_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /api/nodes status = %d, want %d; body=%q", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestServerNodesAPIListsNodesForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "desktop", hashSecret("node_secret"), "1.0.0", "linux", "arm64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/nodes?node_id=node_admin", nil)
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/nodes status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Nodes []Node `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode nodes response: %v", err)
+	}
+	if len(got.Nodes) != 2 {
+		t.Fatalf("nodes length = %d, want 2: %+v", len(got.Nodes), got.Nodes)
+	}
+	for _, node := range got.Nodes {
+		if node.TokenHash != "" {
+			t.Fatalf("nodes response exposed token hash: %+v", node)
+		}
+		if node.ID == "node_admin" && !node.Admin {
+			t.Fatalf("admin node response = %+v, want admin=true", node)
+		}
+	}
+}
+
+func TestServerNodesPromoteAPIRequiresAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode node_1: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "desktop", hashSecret("target_secret"), "1.0.0", "linux", "arm64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/promote?node_id=node_1", strings.NewReader(`{"node_id":"node_2"}`))
+	req.Header.Set("Authorization", "Bearer node_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/nodes/promote status = %d, want %d; body=%q", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestServerNodesPromoteAPIUpdatesNodeForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "desktop", hashSecret("node_secret"), "1.0.0", "linux", "arm64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/promote?node_id=node_admin", strings.NewReader(`{"node_id":"node_2"}`))
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/nodes/promote status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got Node
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if got.ID != "node_2" || !got.Admin || got.TokenHash != "" {
+		t.Fatalf("promote response = %+v, want promoted node without token hash", got)
+	}
+	nodes, err := server.store.Nodes()
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	found := false
+	for _, node := range nodes {
+		if node.ID == "node_2" {
+			found = true
+			if !node.Admin {
+				t.Fatalf("stored node_2 admin = false, want true")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("node_2 not found after promote")
+	}
+}
+
 func TestHubNodeWebSocketRequiresAuthentication(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {

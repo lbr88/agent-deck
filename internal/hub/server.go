@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +164,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/api/join", s.handleJoin)
 	mux.HandleFunc("/api/invites", s.handleCreateInvite)
+	mux.HandleFunc("/api/nodes", s.handleListNodes)
+	mux.HandleFunc("/api/nodes/promote", s.handlePromoteNode)
 	mux.HandleFunc("/ws/node", s.handleNodeWebSocket)
 	return mux
 }
@@ -314,6 +317,112 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		InviteToken: token,
 		ExpiresAt:   expiresAt,
 	})
+}
+
+type listNodesResponse struct {
+	Nodes []nodeResponse `json:"nodes"`
+}
+
+type promoteNodeRequest struct {
+	NodeID string `json:"node_id"`
+}
+
+type nodeResponse struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Version    string     `json:"version,omitempty"`
+	OS         string     `json:"os,omitempty"`
+	Arch       string     `json:"arch,omitempty"`
+	Status     string     `json:"status"`
+	Admin      bool       `json:"admin"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+}
+
+func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	nodes, err := s.store.Nodes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, listNodesResponse{Nodes: nodeResponses(nodes)})
+}
+
+func (s *Server) handlePromoteNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	var req promoteNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid node promote request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.SetNodeAdmin(req.NodeID, true); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "hub node not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	node, err := s.store.nodeByID(req.NodeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
+}
+
+func (s *Server) authenticateAdminNodeRequest(w http.ResponseWriter, r *http.Request) bool {
+	node, err := s.authenticateNodeRequest(r)
+	if err != nil {
+		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
+		return false
+	}
+	if !node.Admin {
+		http.Error(w, "hub admin node is required", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func nodeResponses(nodes []Node) []nodeResponse {
+	out := make([]nodeResponse, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, nodeResponseFromNode(node))
+	}
+	return out
+}
+
+func nodeResponseFromNode(node Node) nodeResponse {
+	return nodeResponse{
+		ID:         node.ID,
+		Name:       node.Name,
+		Version:    node.Version,
+		OS:         node.OS,
+		Arch:       node.Arch,
+		Status:     node.Status,
+		Admin:      node.Admin,
+		LastSeenAt: node.LastSeenAt,
+	}
 }
 
 func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {

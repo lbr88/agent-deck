@@ -557,10 +557,17 @@ Starts the hub server. The data directory stores the SQLite hub database, the hu
 ### hub invite
 
 ```bash
-agent-deck hub invite [--data <dir>] [--ttl 24h] <node-name>
+agent-deck hub invite [--admin] [--local] [--data <dir>] [--ttl 24h] <node-name>
 ```
 
-Creates a single-use invite and prints the exact `agent-deck hub join ... --token ...` command to run on the joining client. The hub URL comes from the hub metadata written by `hub serve`.
+Creates a single-use invite and prints the exact `agent-deck hub join ... --token ...` command to run on the joining client. Joined admin nodes create invites through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine.
+
+| Flag | Description |
+|------|-------------|
+| `--admin` | Invite the new node as a hub admin |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
+| `--ttl <duration>` | Invite lifetime |
 
 ### hub join
 
@@ -590,10 +597,17 @@ Connects this node to the configured hub without starting the TUI. Useful for se
 ### hub nodes
 
 ```bash
-agent-deck hub nodes [--data <dir>] [--json]
+agent-deck hub nodes [--local] [--data <dir>] [--json]
+agent-deck hub nodes promote [--local] [--data <dir>] <node-id>
 ```
 
-Lists registered hub nodes and their online/offline status.
+Lists registered hub nodes and their online/offline status. Joined admin nodes manage nodes through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output nodes as JSON |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
 
 ## Session Resolution
 

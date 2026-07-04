@@ -66,6 +66,14 @@ type hubInviteResult struct {
 	ExpiresAt   time.Time `json:"expires_at,omitempty"`
 }
 
+type hubNodesResult struct {
+	Nodes []hubNodeOutput `json:"nodes"`
+}
+
+type hubPromoteNodeRequest struct {
+	NodeID string `json:"node_id"`
+}
+
 type hubBootstrapInviteResult struct {
 	Created     bool
 	InviteToken string
@@ -483,17 +491,9 @@ func createRemoteHubInvite(settings session.HubSettings, nodeName string, ttl ti
 	if err != nil {
 		return hubInviteResult{}, err
 	}
-	tokenFile := strings.TrimSpace(settings.TokenFile)
-	if tokenFile == "" {
-		return hubInviteResult{}, fmt.Errorf("hub token file is not configured; run agent-deck hub join again")
-	}
-	tokenData, err := os.ReadFile(tokenFile)
+	nodeToken, err := hubNodeToken(settings)
 	if err != nil {
-		return hubInviteResult{}, fmt.Errorf("read hub token file: %w", err)
-	}
-	nodeToken := strings.TrimSpace(string(tokenData))
-	if nodeToken == "" {
-		return hubInviteResult{}, fmt.Errorf("hub token file is empty; run agent-deck hub join again")
+		return hubInviteResult{}, err
 	}
 	body, err := json.Marshal(hubInviteRequest{
 		NodeName:   strings.TrimSpace(nodeName),
@@ -546,6 +546,10 @@ func createRemoteHubInvite(settings session.HubSettings, nodeName string, ttl ti
 }
 
 func hubInviteEndpoint(rawHubURL, nodeID string) (string, error) {
+	return hubAuthenticatedEndpoint(rawHubURL, nodeID, "/api/invites")
+}
+
+func hubAuthenticatedEndpoint(rawHubURL, nodeID, path string) (string, error) {
 	if err := validateHubJoinURL(rawHubURL); err != nil {
 		return "", err
 	}
@@ -558,12 +562,28 @@ func hubInviteEndpoint(rawHubURL, nodeID string) (string, error) {
 		return "", fmt.Errorf("parse hub URL: %w", err)
 	}
 	u.Scheme = "https"
-	u.Path = "/api/invites"
+	u.Path = path
 	q := u.Query()
 	q.Set("node_id", nodeID)
 	u.RawQuery = q.Encode()
 	u.Fragment = ""
 	return u.String(), nil
+}
+
+func hubNodeToken(settings session.HubSettings) (string, error) {
+	tokenFile := strings.TrimSpace(settings.TokenFile)
+	if tokenFile == "" {
+		return "", fmt.Errorf("hub token file is not configured; run agent-deck hub join again")
+	}
+	tokenData, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return "", fmt.Errorf("read hub token file: %w", err)
+	}
+	nodeToken := strings.TrimSpace(string(tokenData))
+	if nodeToken == "" {
+		return "", fmt.Errorf("hub token file is empty; run agent-deck hub join again")
+	}
+	return nodeToken, nil
 }
 
 func handleHubJoin(args []string) error {
@@ -647,6 +667,7 @@ func handleHubNodes(args []string) error {
 	fs.SetOutput(io.Discard)
 	dataDir := fs.String("data", defaultData, "Hub data directory")
 	jsonOutput := fs.Bool("json", false, "Output nodes as JSON")
+	local := fs.Bool("local", false, "List nodes from the local hub data directory instead of the configured hub")
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -655,6 +676,19 @@ func handleHubNodes(args []string) error {
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			nodeViews, err := listRemoteHubNodes(config.Hub)
+			if err != nil {
+				return err
+			}
+			return printHubNodes(nodeViews, *jsonOutput)
+		}
 	}
 
 	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
@@ -668,7 +702,11 @@ func handleHubNodes(args []string) error {
 		return err
 	}
 	nodeViews := hubNodeOutputs(nodes)
-	if *jsonOutput {
+	return printHubNodes(nodeViews, *jsonOutput)
+}
+
+func printHubNodes(nodeViews []hubNodeOutput, jsonOutput bool) error {
+	if jsonOutput {
 		return json.NewEncoder(os.Stdout).Encode(nodeViews)
 	}
 	if len(nodeViews) == 0 {
@@ -693,6 +731,7 @@ func handleHubNodesPromote(args []string) error {
 	fs := flag.NewFlagSet("hub nodes promote", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dataDir := fs.String("data", defaultData, "Hub data directory")
+	local := fs.Bool("local", false, "Promote the node in the local hub data directory instead of the configured hub")
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -700,11 +739,25 @@ func handleHubNodesPromote(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: agent-deck hub nodes promote [--data dir] <node-id>")
+		return fmt.Errorf("usage: agent-deck hub nodes promote [--local] [--data dir] <node-id>")
 	}
 	nodeID := strings.TrimSpace(fs.Arg(0))
 	if nodeID == "" {
 		return fmt.Errorf("node id is required")
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			node, err := promoteRemoteHubNode(config.Hub, nodeID)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Promoted %s to hub admin\n", node.ID)
+			return nil
+		}
 	}
 	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
 	if err != nil {
@@ -719,6 +772,92 @@ func handleHubNodesPromote(args []string) error {
 	}
 	fmt.Printf("Promoted %s to hub admin\n", nodeID)
 	return nil
+}
+
+func listRemoteHubNodes(settings session.HubSettings) ([]hubNodeOutput, error) {
+	endpoint, err := hubAuthenticatedEndpoint(strings.TrimSpace(settings.URL), strings.TrimSpace(settings.NodeID), "/api/nodes")
+	if err != nil {
+		return nil, err
+	}
+	nodeToken, err := hubNodeToken(settings)
+	if err != nil {
+		return nil, err
+	}
+	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		TLSSkipVerify:    settings.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
+		ServerName:       strings.TrimSpace(settings.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("hub nodes failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var result hubNodesResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode hub nodes response: %w", err)
+	}
+	return result.Nodes, nil
+}
+
+func promoteRemoteHubNode(settings session.HubSettings, nodeID string) (hubNodeOutput, error) {
+	endpoint, err := hubAuthenticatedEndpoint(strings.TrimSpace(settings.URL), strings.TrimSpace(settings.NodeID), "/api/nodes/promote")
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	nodeToken, err := hubNodeToken(settings)
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	body, err := json.Marshal(hubPromoteNodeRequest{NodeID: strings.TrimSpace(nodeID)})
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		TLSSkipVerify:    settings.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
+		ServerName:       strings.TrimSpace(settings.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
+	})
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return hubNodeOutput{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return hubNodeOutput{}, fmt.Errorf("hub nodes promote failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var result hubNodeOutput
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return hubNodeOutput{}, fmt.Errorf("decode hub nodes promote response: %w", err)
+	}
+	if strings.TrimSpace(result.ID) == "" {
+		return hubNodeOutput{}, fmt.Errorf("hub nodes promote response missing node id")
+	}
+	return result, nil
 }
 
 func handleHubConnect(profile string, args []string) error {
@@ -1031,6 +1170,7 @@ func hubNodeOutputs(nodes []hub.Node) []hubNodeOutput {
 			OS:         node.OS,
 			Arch:       node.Arch,
 			Status:     node.Status,
+			Admin:      node.Admin,
 			LastSeenAt: node.LastSeenAt,
 		})
 	}

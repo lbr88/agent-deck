@@ -442,6 +442,124 @@ func TestHubInviteUsesConfiguredAdminNode(t *testing.T) {
 	}
 }
 
+func TestHubNodesUsesConfiguredAdminNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		seen <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"nodes": []map[string]any{{
+				"id":      "node_remote",
+				"name":    "desktop",
+				"version": "1.0.0",
+				"os":      "linux",
+				"arch":    "amd64",
+				"status":  "online",
+				"admin":   true,
+			}},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubNodes([]string{"--json"}); err != nil {
+			t.Fatalf("handleHubNodes: %v", err)
+		}
+	})
+	if !strings.Contains(out, "node_remote") || !strings.Contains(out, "desktop") || !strings.Contains(out, `"admin":true`) {
+		t.Fatalf("remote nodes output = %s, want remote admin node data", out)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("hub nodes did not call configured hub")
+	}
+}
+
+func TestHubNodesPromoteUsesConfiguredAdminNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/nodes/promote" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		var req struct {
+			NodeID string `json:"node_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		seen <- req.NodeID
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(hubNodeOutput{
+			ID:     req.NodeID,
+			Name:   "desktop",
+			Status: "offline",
+			Admin:  true,
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubNodes([]string{"promote", "node_remote"}); err != nil {
+			t.Fatalf("handleHubNodes promote: %v", err)
+		}
+	})
+	if !strings.Contains(out, "node_remote") || !strings.Contains(strings.ToLower(out), "admin") {
+		t.Fatalf("remote promote output = %q, want node/admin confirmation", out)
+	}
+	select {
+	case got := <-seen:
+		if got != "node_remote" {
+			t.Fatalf("promote request node_id = %q, want node_remote", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hub nodes promote did not call configured hub")
+	}
+}
+
 func TestHubInviteErrorsWhenHubURLIsNotConfigured(t *testing.T) {
 	err := handleHubInvite([]string{"--data", t.TempDir(), "laptop"})
 	if err == nil {
@@ -532,8 +650,8 @@ func TestHubNodesJSONDoesNotExposeTokenHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if _, err := store.UpsertNode("node_1", "laptop", "secret_hash", "1.0.0", "linux", "amd64"); err != nil {
-		t.Fatalf("UpsertNode: %v", err)
+	if _, err := store.UpsertNodeWithAdmin("node_1", "laptop", "secret_hash", "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin: %v", err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -550,6 +668,9 @@ func TestHubNodesJSONDoesNotExposeTokenHash(t *testing.T) {
 	}
 	if !strings.Contains(out, "node_1") || !strings.Contains(out, "laptop") {
 		t.Fatalf("nodes JSON missing expected node data: %s", out)
+	}
+	if !strings.Contains(out, `"admin":true`) {
+		t.Fatalf("nodes JSON missing admin=true: %s", out)
 	}
 }
 
@@ -742,4 +863,25 @@ func waitConnectString(t *testing.T, ch <-chan string) string {
 		t.Fatal("timed out waiting for string")
 		return ""
 	}
+}
+
+func writeTestHubConfig(t *testing.T, home string, server *httptest.Server, nodeID, token string) {
+	t.Helper()
+	tokenFile := filepath.Join(home, ".config", "agent-deck", "hub-node-token")
+	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
+		t.Fatalf("mkdir token dir: %v", err)
+	}
+	if err := os.WriteFile(tokenFile, []byte(" "+token+" \n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if err := session.SaveUserConfig(&session.UserConfig{Hub: session.HubSettings{
+		URL:           "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:        nodeID,
+		NodeName:      "admin",
+		TokenFile:     tokenFile,
+		TLSSkipVerify: true,
+	}}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+	session.ClearUserConfigCache()
 }
