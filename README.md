@@ -827,10 +827,14 @@ Agent Deck Hub connects multiple trusted agent-deck instances through one encryp
 
 ```bash
 # Run the hub. It creates and reuses a self-signed TLS cert by default.
-agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
+# --bootstrap-admin prints the first admin join command only while no nodes exist.
+agent-deck hub serve --listen :8421 --bootstrap-admin laptop --data ~/.local/share/agent-deck-hub
 
-# Create a single-use invite on the hub host. This prints the client command.
-agent-deck hub invite laptop
+# Run the printed command on the first client:
+agent-deck hub join wss://hub.example:8421 --token invite_...
+
+# From that admin client, create more single-use invites:
+agent-deck hub invite work-laptop
 
 # Run the printed command on the joining machine:
 agent-deck hub join wss://hub.example:8421 --token invite_...
@@ -838,7 +842,7 @@ agent-deck hub join wss://hub.example:8421 --token invite_...
 
 `hub serve` stores the hub URL that invites print. By default it derives this from `--listen`; if the hub is behind Docker, Authentik, or another reverse proxy, start it with `--url wss://hub.example:8421`. `AGENT_DECK_HUB_URL` is also accepted as a fallback for container setups, but local runs do not need it.
 
-After join, the TUI auto-connects on startup. The first join prompts you to accept the hub certificate fingerprint, then stores that pin like an SSH host key. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required.
+After join, the TUI auto-connects on startup. The first join prompts you to accept the hub certificate fingerprint, then stores that pin like an SSH host key. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required. Only admin nodes can create more invites; use `agent-deck hub invite --admin <node>` when the invited node should also administer the hub.
 
 See [Agent Deck Hub](docs/AGENT-DECK-HUB.md) for Docker deployment and the security model.
 

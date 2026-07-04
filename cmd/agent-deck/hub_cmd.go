@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -53,6 +54,24 @@ type hubJoinRequest struct {
 	Arch        string `json:"arch,omitempty"`
 }
 
+type hubInviteRequest struct {
+	NodeName   string `json:"node_name"`
+	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
+	Admin      bool   `json:"admin,omitempty"`
+}
+
+type hubInviteResult struct {
+	URL         string    `json:"url"`
+	InviteToken string    `json:"invite_token"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+}
+
+type hubBootstrapInviteResult struct {
+	Created     bool
+	InviteToken string
+	JoinCommand string
+}
+
 type hubServerCertInfo struct {
 	Host     string
 	SHA256   string
@@ -67,6 +86,7 @@ type hubNodeOutput struct {
 	OS         string     `json:"os,omitempty"`
 	Arch       string     `json:"arch,omitempty"`
 	Status     string     `json:"status"`
+	Admin      bool       `json:"admin"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
@@ -112,8 +132,9 @@ func handleHubServe(args []string) error {
 	advertiseURL := fs.String("url", "", "Public wss:// hub URL printed by invites")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file; defaults to a generated self-signed cert in --data")
 	tlsKey := fs.String("tls-key", "", "TLS private key file; defaults to a generated self-signed key in --data")
+	bootstrapAdmin := fs.String("bootstrap-admin", "", "Create a first-run admin invite for this node name when no nodes exist")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--url wss://host:port] [--data dir] [--tls-cert cert.pem --tls-key key.pem]")
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--url wss://host:port] [--bootstrap-admin node-name] [--data dir] [--tls-cert cert.pem --tls-key key.pem]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -152,6 +173,17 @@ func handleHubServe(args []string) error {
 	}
 	fmt.Printf("Agent Deck Hub listening on %s\n", *listen)
 	fmt.Printf("Agent Deck Hub URL: %s\n", hubURL)
+	if strings.TrimSpace(*bootstrapAdmin) != "" {
+		result, err := createBootstrapAdminInviteIfNeeded(*dataDir, hubURL, *bootstrapAdmin, 24*time.Hour)
+		if err != nil {
+			return err
+		}
+		if result.Created {
+			fmt.Printf("Bootstrap admin invite for %s:\n%s\n", strings.TrimSpace(*bootstrapAdmin), result.JoinCommand)
+		} else {
+			fmt.Println("Bootstrap admin invite skipped: hub already has registered nodes.")
+		}
+	}
 	return server.Serve()
 }
 
@@ -325,6 +357,45 @@ func hubJoinCommand(hubURL, token string) string {
 	return fmt.Sprintf("agent-deck hub join %s --token %s", strings.TrimSpace(hubURL), strings.TrimSpace(token))
 }
 
+func createBootstrapAdminInviteIfNeeded(dataDir, hubURL, nodeName string, ttl time.Duration) (hubBootstrapInviteResult, error) {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return hubBootstrapInviteResult{}, fmt.Errorf("--bootstrap-admin requires a node name")
+	}
+	if ttl <= 0 {
+		return hubBootstrapInviteResult{}, fmt.Errorf("bootstrap invite ttl must be greater than zero")
+	}
+	hubURL, err := normalizeHubAdvertiseURL(hubURL)
+	if err != nil {
+		return hubBootstrapInviteResult{}, err
+	}
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		return hubBootstrapInviteResult{}, err
+	}
+	defer store.Close()
+	count, err := store.NodeCount()
+	if err != nil {
+		return hubBootstrapInviteResult{}, err
+	}
+	if count != 0 {
+		return hubBootstrapInviteResult{}, nil
+	}
+	token, err := store.CreateInviteWithOptions(hub.CreateInviteOptions{
+		NodeName: nodeName,
+		TTL:      ttl,
+		Admin:    true,
+	})
+	if err != nil {
+		return hubBootstrapInviteResult{}, err
+	}
+	return hubBootstrapInviteResult{
+		Created:     true,
+		InviteToken: token,
+		JoinCommand: hubJoinCommand(hubURL, token),
+	}, nil
+}
+
 func handleHubInvite(args []string) error {
 	defaultData, err := defaultHubDataDir()
 	if err != nil {
@@ -334,6 +405,8 @@ func handleHubInvite(args []string) error {
 	fs.SetOutput(io.Discard)
 	dataDir := fs.String("data", defaultData, "Hub data directory")
 	ttl := fs.Duration("ttl", 24*time.Hour, "Invite lifetime")
+	admin := fs.Bool("admin", false, "Invite the node as a hub admin")
+	local := fs.Bool("local", false, "Create the invite from the local hub data directory instead of the configured hub")
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -341,10 +414,28 @@ func handleHubInvite(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: agent-deck hub invite [--data dir] [--ttl duration] <node-name>")
+		return fmt.Errorf("usage: agent-deck hub invite [--admin] [--local] [--data dir] [--ttl duration] <node-name>")
 	}
 	if *ttl <= 0 {
 		return fmt.Errorf("--ttl must be greater than zero")
+	}
+	nodeName := strings.TrimSpace(fs.Arg(0))
+	if nodeName == "" {
+		return fmt.Errorf("node name is required")
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			result, err := createRemoteHubInvite(config.Hub, nodeName, *ttl, *admin)
+			if err != nil {
+				return err
+			}
+			fmt.Println(hubJoinCommand(result.URL, result.InviteToken))
+			return nil
+		}
 	}
 
 	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
@@ -364,12 +455,115 @@ func handleHubInvite(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := store.CreateInvite(strings.TrimSpace(fs.Arg(0)), *ttl)
+	token, err := store.CreateInviteWithOptions(hub.CreateInviteOptions{
+		NodeName: nodeName,
+		TTL:      *ttl,
+		Admin:    *admin,
+	})
 	if err != nil {
 		return err
 	}
 	fmt.Println(hubJoinCommand(hubURL, token))
 	return nil
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	wasSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			wasSet = true
+		}
+	})
+	return wasSet
+}
+
+func createRemoteHubInvite(settings session.HubSettings, nodeName string, ttl time.Duration, admin bool) (hubInviteResult, error) {
+	rawHubURL := strings.TrimSpace(settings.URL)
+	inviteURL, err := hubInviteEndpoint(rawHubURL, strings.TrimSpace(settings.NodeID))
+	if err != nil {
+		return hubInviteResult{}, err
+	}
+	tokenFile := strings.TrimSpace(settings.TokenFile)
+	if tokenFile == "" {
+		return hubInviteResult{}, fmt.Errorf("hub token file is not configured; run agent-deck hub join again")
+	}
+	tokenData, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return hubInviteResult{}, fmt.Errorf("read hub token file: %w", err)
+	}
+	nodeToken := strings.TrimSpace(string(tokenData))
+	if nodeToken == "" {
+		return hubInviteResult{}, fmt.Errorf("hub token file is empty; run agent-deck hub join again")
+	}
+	body, err := json.Marshal(hubInviteRequest{
+		NodeName:   strings.TrimSpace(nodeName),
+		TTLSeconds: int64(ttl / time.Second),
+		Admin:      admin,
+	})
+	if err != nil {
+		return hubInviteResult{}, err
+	}
+	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		TLSSkipVerify:    settings.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
+		ServerName:       strings.TrimSpace(settings.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
+	})
+	if err != nil {
+		return hubInviteResult{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, inviteURL, bytes.NewReader(body))
+	if err != nil {
+		return hubInviteResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return hubInviteResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return hubInviteResult{}, fmt.Errorf("hub invite failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var result hubInviteResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return hubInviteResult{}, fmt.Errorf("decode hub invite response: %w", err)
+	}
+	if strings.TrimSpace(result.URL) == "" {
+		result.URL = rawHubURL
+	}
+	result.URL, err = normalizeHubAdvertiseURL(result.URL)
+	if err != nil {
+		return hubInviteResult{}, fmt.Errorf("invalid hub invite response URL: %w", err)
+	}
+	result.InviteToken = strings.TrimSpace(result.InviteToken)
+	if result.InviteToken == "" {
+		return hubInviteResult{}, fmt.Errorf("hub invite response missing invite_token")
+	}
+	return result, nil
+}
+
+func hubInviteEndpoint(rawHubURL, nodeID string) (string, error) {
+	if err := validateHubJoinURL(rawHubURL); err != nil {
+		return "", err
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return "", fmt.Errorf("hub node id is not configured; run agent-deck hub join again")
+	}
+	u, err := url.Parse(strings.TrimSpace(rawHubURL))
+	if err != nil {
+		return "", fmt.Errorf("parse hub URL: %w", err)
+	}
+	u.Scheme = "https"
+	u.Path = "/api/invites"
+	q := u.Query()
+	q.Set("node_id", nodeID)
+	u.RawQuery = q.Encode()
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 func handleHubJoin(args []string) error {
@@ -442,6 +636,9 @@ func handleHubJoin(args []string) error {
 }
 
 func handleHubNodes(args []string) error {
+	if len(args) > 0 && args[0] == "promote" {
+		return handleHubNodesPromote(args[1:])
+	}
 	defaultData, err := defaultHubDataDir()
 	if err != nil {
 		return err
@@ -479,8 +676,48 @@ func handleHubNodes(args []string) error {
 		return nil
 	}
 	for _, node := range nodeViews {
-		fmt.Printf("%s\t%s\t%s\n", node.ID, node.Name, node.Status)
+		role := "node"
+		if node.Admin {
+			role = "admin"
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\n", node.ID, node.Name, node.Status, role)
 	}
+	return nil
+}
+
+func handleHubNodesPromote(args []string) error {
+	defaultData, err := defaultHubDataDir()
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("hub nodes promote", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", defaultData, "Hub data directory")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub nodes promote [--data dir] <node-id>")
+	}
+	nodeID := strings.TrimSpace(fs.Arg(0))
+	if nodeID == "" {
+		return fmt.Errorf("node id is required")
+	}
+	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.SetNodeAdmin(nodeID, true); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("hub node %s not found", nodeID)
+		}
+		return err
+	}
+	fmt.Printf("Promoted %s to hub admin\n", nodeID)
 	return nil
 }
 

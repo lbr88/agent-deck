@@ -62,6 +62,71 @@ func TestStoreAdvertiseURLPersists(t *testing.T) {
 	}
 }
 
+func TestStoreAdminInviteCreatesAdminNode(t *testing.T) {
+	store := openTestStore(t)
+	token, err := store.CreateInviteWithOptions(CreateInviteOptions{
+		NodeName: "laptop",
+		TTL:      time.Hour,
+		Admin:    true,
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteWithOptions: %v", err)
+	}
+	invite, err := store.ConsumeInvite(token)
+	if err != nil {
+		t.Fatalf("ConsumeInvite: %v", err)
+	}
+	if !invite.Admin {
+		t.Fatalf("Invite.Admin = false, want true")
+	}
+
+	node, err := store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64", invite.Admin)
+	if err != nil {
+		t.Fatalf("UpsertNodeWithAdmin: %v", err)
+	}
+	if !node.Admin {
+		t.Fatalf("Node.Admin = false, want true")
+	}
+	got, err := store.AuthenticateNode(node.ID, "node_secret")
+	if err != nil {
+		t.Fatalf("AuthenticateNode: %v", err)
+	}
+	if !got.Admin {
+		t.Fatalf("authenticated Node.Admin = false, want true")
+	}
+}
+
+func TestStoreNodeCountAndAdminPromotion(t *testing.T) {
+	store := openTestStore(t)
+	count, err := store.NodeCount()
+	if err != nil {
+		t.Fatalf("NodeCount empty: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("NodeCount empty = %d, want 0", count)
+	}
+	if _, err := store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	count, err = store.NodeCount()
+	if err != nil {
+		t.Fatalf("NodeCount populated: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("NodeCount populated = %d, want 1", count)
+	}
+	if err := store.SetNodeAdmin("node_1", true); err != nil {
+		t.Fatalf("SetNodeAdmin: %v", err)
+	}
+	got, err := store.AuthenticateNode("node_1", "node_secret")
+	if err != nil {
+		t.Fatalf("AuthenticateNode: %v", err)
+	}
+	if !got.Admin {
+		t.Fatalf("Node.Admin = false, want true after promotion")
+	}
+}
+
 func TestStoreAuthenticateNodeComparesTokenHash(t *testing.T) {
 	store := openTestStore(t)
 	token := "node_secret"

@@ -68,6 +68,41 @@ func TestServerJoinConsumesInviteAndReturnsNodeCredentials(t *testing.T) {
 	}
 }
 
+func TestServerJoinAdminInviteCreatesAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	inviteToken, err := server.store.CreateInviteWithOptions(CreateInviteOptions{
+		NodeName: "laptop",
+		TTL:      time.Hour,
+		Admin:    true,
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteWithOptions: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/join", bytes.NewBufferString(`{"invite_token":`+strconvQuote(inviteToken)+`}`))
+	req.Host = "hub.local:8421"
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/join status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		NodeID    string `json:"node_id"`
+		NodeToken string `json:"node_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode join response: %v", err)
+	}
+	node, err := server.store.AuthenticateNode(got.NodeID, got.NodeToken)
+	if err != nil {
+		t.Fatalf("AuthenticateNode returned credentials: %v", err)
+	}
+	if !node.Admin {
+		t.Fatalf("joined node Admin = false, want true")
+	}
+}
+
 func TestServerJoinUsesConfiguredAdvertiseURL(t *testing.T) {
 	server, err := NewServer(ServerConfig{
 		DataDir:      t.TempDir(),
@@ -110,6 +145,57 @@ func TestServerJoinRequiresInviteToken(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /api/join missing token status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestServerInviteAPIRequiresAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/invites?node_id=node_1", strings.NewReader(`{"node_name":"work-laptop"}`))
+	req.Header.Set("Authorization", "Bearer node_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST /api/invites status = %d, want %d; body=%q", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestServerInviteAPICreatesInviteForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/invites?node_id=node_admin", strings.NewReader(`{"node_name":"work-laptop","ttl_seconds":3600,"admin":true}`))
+	req.Host = "hub.local:8421"
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/invites status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		URL         string    `json:"url"`
+		InviteToken string    `json:"invite_token"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode invite response: %v", err)
+	}
+	if got.URL != "wss://hub.local:8421" || !strings.HasPrefix(got.InviteToken, "invite_") || got.ExpiresAt.IsZero() {
+		t.Fatalf("invite response = %+v", got)
+	}
+	invite, err := server.store.ConsumeInvite(got.InviteToken)
+	if err != nil {
+		t.Fatalf("ConsumeInvite returned token: %v", err)
+	}
+	if invite.NodeName != "work-laptop" || !invite.Admin {
+		t.Fatalf("created invite = %+v, want admin invite for work-laptop", invite)
 	}
 }
 

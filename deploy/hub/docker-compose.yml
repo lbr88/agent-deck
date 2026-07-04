@@ -9,6 +9,8 @@ services:
       - --data=/data
     # Set this when the hub is reached through a reverse proxy.
     #  - --url=wss://hub.example:8421
+    # Set this for first startup to print the initial admin join command.
+    #  - --bootstrap-admin=laptop
     ports:
       - "8421:8421"
     volumes:

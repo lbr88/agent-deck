@@ -11,6 +11,7 @@ The hub always uses TLS. If you do not provide a certificate, `hub serve` create
 ```bash
 agent-deck hub serve \
   --listen :8421 \
+  --bootstrap-admin laptop \
   --data ~/.local/share/agent-deck-hub
 ```
 
@@ -20,10 +21,13 @@ The data directory stores `hub.db`, node credentials, invite state, latest sessi
 agent-deck hub serve \
   --listen :8421 \
   --url wss://hub.example:8421 \
+  --bootstrap-admin laptop \
   --data ~/.local/share/agent-deck-hub
 ```
 
 `AGENT_DECK_HUB_URL` is also accepted as a fallback for container setups. The `--url` flag takes precedence, and local runs can omit both if the derived `--listen` URL is correct.
+
+`--bootstrap-admin <node-name>` is the first-run path. It creates and prints a single-use admin invite only when the hub has no registered nodes. After the first admin node joins, later restarts skip bootstrap invite creation.
 
 To use your own certificate, pass both files:
 
@@ -31,18 +35,39 @@ To use your own certificate, pass both files:
 agent-deck hub serve --tls-cert cert.pem --tls-key key.pem
 ```
 
-## Join A Node
+## Join The First Node
 
-On the hub host, create a single-use invite:
+Start the hub with `--bootstrap-admin <node-name>`. The hub prints the exact command to run on the first client:
 
 ```bash
-agent-deck hub invite laptop
+agent-deck hub join wss://hub.example:8421 --token invite_...
+```
+
+That first joined node becomes a hub admin. Admin nodes can create more invites from their own machine:
+
+```bash
+agent-deck hub invite work-laptop
 ```
 
 The invite command prints the exact command to run on the joining machine:
 
 ```bash
 agent-deck hub join wss://hub.example:8421 --token invite_...
+```
+
+Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to create invites. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create hub invites.
+
+If you are on the hub host and want to create an invite from the local hub database instead of the configured joined hub, use:
+
+```bash
+agent-deck hub invite --local laptop
+agent-deck hub invite --data /data laptop
+```
+
+If you need to recover admin access from the hub host, promote an already joined node:
+
+```bash
+agent-deck hub nodes promote node_...
 ```
 
 On first join with the default self-signed certificate, `agent-deck` shows the hub certificate fingerprint and asks whether to trust it. The accepted fingerprint is stored in `config.toml`, like an SSH known-host key. Future connects reject the hub if that certificate changes.
@@ -82,12 +107,13 @@ The deployment files in `deploy/hub/` run only the hub server. Build and start f
 docker compose -f deploy/hub/docker-compose.yml up --build -d
 ```
 
-The compose file uses the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`.
+The compose file uses the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join` and `/api/invites`.
 
 ```yaml
 command:
   - --listen=:8421
   - --url=wss://hub.example:8421
+  - --bootstrap-admin=laptop
   - --data=/data
 ```
 
@@ -97,6 +123,7 @@ command:
 - The hub creates a self-signed certificate by default. You can override it with `--tls-cert` and `--tls-key`.
 - Join uses a single-use invite token over HTTPS and pins the accepted certificate fingerprint.
 - Joined nodes receive long-lived node credentials stored locally with file mode `0600`.
-- Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes.
+- Admin nodes can create more invites. Bootstrap admin invite creation only happens while the hub has no registered nodes.
+- Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes. A non-admin node cannot create invites.
 - There is no offline queue. Actions require the owner node to be connected.
 - No SSH connectivity between nodes is required.

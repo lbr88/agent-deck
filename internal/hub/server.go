@@ -97,7 +97,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 func (s *Store) Nodes() ([]Node, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, token_hash, version, os, arch, status, last_seen_at
+		`SELECT id, name, token_hash, version, os, arch, status, last_seen_at, admin
 		 FROM nodes
 		 ORDER BY name, id`,
 	)
@@ -162,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/api/join", s.handleJoin)
+	mux.HandleFunc("/api/invites", s.handleCreateInvite)
 	mux.HandleFunc("/ws/node", s.handleNodeWebSocket)
 	return mux
 }
@@ -236,7 +237,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create node token", http.StatusInternalServerError)
 		return
 	}
-	node, err := s.store.UpsertNode(nodeID, nodeName, hashSecret(nodeToken), req.Version, req.OS, req.Arch)
+	node, err := s.store.UpsertNodeWithAdmin(nodeID, nodeName, hashSecret(nodeToken), req.Version, req.OS, req.Arch, invite.Admin)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -250,18 +251,77 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type createInviteRequest struct {
+	NodeName   string `json:"node_name"`
+	TTLSeconds int64  `json:"ttl_seconds,omitempty"`
+	Admin      bool   `json:"admin,omitempty"`
+}
+
+type createInviteResponse struct {
+	URL         string    `json:"url"`
+	InviteToken string    `json:"invite_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	node, err := s.authenticateNodeRequest(r)
+	if err != nil {
+		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
+		return
+	}
+	if !node.Admin {
+		http.Error(w, "hub admin node is required", http.StatusForbidden)
+		return
+	}
+
+	var req createInviteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid invite request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeName = strings.TrimSpace(req.NodeName)
+	if req.NodeName == "" {
+		http.Error(w, "node_name is required", http.StatusBadRequest)
+		return
+	}
+	ttl := 24 * time.Hour
+	if req.TTLSeconds != 0 {
+		if req.TTLSeconds < 0 {
+			http.Error(w, "ttl_seconds must be greater than zero", http.StatusBadRequest)
+			return
+		}
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	expiresAt := time.Now().Add(ttl)
+	token, err := s.store.CreateInviteWithOptions(CreateInviteOptions{
+		NodeName:        req.NodeName,
+		TTL:             ttl,
+		Admin:           req.Admin,
+		CreatedByNodeID: node.ID,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, createInviteResponse{
+		URL:         s.hubURLForRequest(r),
+		InviteToken: token,
+		ExpiresAt:   expiresAt,
+	})
+}
+
 func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
-	token := bearerToken(r.Header.Get("Authorization"))
-	if nodeID == "" || token == "" {
-		http.Error(w, "node credentials are required", http.StatusUnauthorized)
-		return
-	}
-	node, err := s.store.AuthenticateNode(nodeID, token)
+	node, err := s.authenticateNodeRequest(r)
 	if err != nil {
 		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
 		return
@@ -304,6 +364,15 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (s *Server) authenticateNodeRequest(r *http.Request) (Node, error) {
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	token := bearerToken(r.Header.Get("Authorization"))
+	if nodeID == "" || token == "" {
+		return Node{}, ErrNodeNotAuthenticated
+	}
+	return s.store.AuthenticateNode(nodeID, token)
 }
 
 func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPeer, env Envelope) error {

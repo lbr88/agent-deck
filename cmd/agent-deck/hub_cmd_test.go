@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -283,6 +284,56 @@ func TestHubServeRejectsPlaintextAdvertiseURL(t *testing.T) {
 	}
 }
 
+func TestHubServeBootstrapAdminCreatesFirstInvite(t *testing.T) {
+	dataDir := t.TempDir()
+
+	result, err := createBootstrapAdminInviteIfNeeded(dataDir, "wss://hub.example:8421", "lbr-lap", time.Hour)
+	if err != nil {
+		t.Fatalf("createBootstrapAdminInviteIfNeeded: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("bootstrap invite Created = false, want true for empty hub")
+	}
+	if !strings.HasPrefix(result.JoinCommand, "agent-deck hub join wss://hub.example:8421 --token invite_") {
+		t.Fatalf("bootstrap join command = %q", result.JoinCommand)
+	}
+
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	invite, err := store.ConsumeInvite(result.InviteToken)
+	if err != nil {
+		t.Fatalf("ConsumeInvite bootstrap token: %v", err)
+	}
+	if invite.NodeName != "lbr-lap" || !invite.Admin {
+		t.Fatalf("bootstrap invite = %+v, want admin invite for lbr-lap", invite)
+	}
+}
+
+func TestHubServeBootstrapAdminSkipsWhenNodesExist(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, err := store.UpsertNode("node_1", "existing", "secret_hash", "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	result, err := createBootstrapAdminInviteIfNeeded(dataDir, "wss://hub.example:8421", "lbr-lap", time.Hour)
+	if err != nil {
+		t.Fatalf("createBootstrapAdminInviteIfNeeded: %v", err)
+	}
+	if result.Created || result.JoinCommand != "" || result.InviteToken != "" {
+		t.Fatalf("bootstrap result = %+v, want skipped when nodes exist", result)
+	}
+}
+
 func TestHubInvitePrintsJoinCommandFromHubMetadata(t *testing.T) {
 	dataDir := t.TempDir()
 	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
@@ -307,6 +358,87 @@ func TestHubInvitePrintsJoinCommandFromHubMetadata(t *testing.T) {
 	}
 	if strings.Contains(out, "\n") {
 		t.Fatalf("invite output should be one command, got %q", out)
+	}
+}
+
+func TestHubInviteUsesConfiguredAdminNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	type remoteInviteRequest struct {
+		NodeName   string `json:"node_name"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+		Admin      bool   `json:"admin"`
+	}
+	seen := make(chan remoteInviteRequest, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/invites" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		var req remoteInviteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		seen <- req
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"url":          "wss://hub.example:8421",
+			"invite_token": "invite_remote",
+			"expires_at":   time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	tokenFile := filepath.Join(home, ".config", "agent-deck", "hub-node-token")
+	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
+		t.Fatalf("mkdir token dir: %v", err)
+	}
+	if err := os.WriteFile(tokenFile, []byte(" admin_secret \n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if err := session.SaveUserConfig(&session.UserConfig{Hub: session.HubSettings{
+		URL:           "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:        "node_admin",
+		NodeName:      "laptop",
+		TokenFile:     tokenFile,
+		TLSSkipVerify: true,
+	}}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+	session.ClearUserConfigCache()
+
+	out := captureStdout(t, func() {
+		if err := handleHubInvite([]string{"--admin", "work-laptop"}); err != nil {
+			t.Fatalf("handleHubInvite: %v", err)
+		}
+	})
+	if strings.TrimSpace(out) != "agent-deck hub join wss://hub.example:8421 --token invite_remote" {
+		t.Fatalf("invite output = %q, want full remote join command", out)
+	}
+	select {
+	case req := <-seen:
+		if req.NodeName != "work-laptop" || req.TTLSeconds <= 0 || !req.Admin {
+			t.Fatalf("remote invite request = %+v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hub invite did not call configured hub")
 	}
 }
 
@@ -418,6 +550,42 @@ func TestHubNodesJSONDoesNotExposeTokenHash(t *testing.T) {
 	}
 	if !strings.Contains(out, "node_1") || !strings.Contains(out, "laptop") {
 		t.Fatalf("nodes JSON missing expected node data: %s", out)
+	}
+}
+
+func TestHubNodesPromoteMarksNodeAdmin(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, err := store.UpsertNode("node_1", "laptop", "secret_hash", "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := handleHubNodes([]string{"promote", "--data", dataDir, "node_1"}); err != nil {
+			t.Fatalf("handleHubNodes promote: %v", err)
+		}
+	})
+	if !strings.Contains(out, "node_1") || !strings.Contains(strings.ToLower(out), "admin") {
+		t.Fatalf("promote output = %q, want node/admin confirmation", out)
+	}
+
+	store, err = hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore after promote: %v", err)
+	}
+	defer store.Close()
+	nodes, err := store.Nodes()
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	if len(nodes) != 1 || !nodes[0].Admin {
+		t.Fatalf("Node.Admin = false, want true after promote")
 	}
 }
 

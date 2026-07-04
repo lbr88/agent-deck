@@ -31,10 +31,12 @@ type Store struct {
 }
 
 type Invite struct {
-	TokenHash  string
-	NodeName   string
-	ExpiresAt  time.Time
-	ConsumedAt *time.Time
+	TokenHash       string
+	NodeName        string
+	ExpiresAt       time.Time
+	ConsumedAt      *time.Time
+	Admin           bool
+	CreatedByNodeID string
 }
 
 type Node struct {
@@ -46,12 +48,20 @@ type Node struct {
 	Arch       string
 	Status     string
 	LastSeenAt *time.Time
+	Admin      bool
 }
 
 type NodeSessions struct {
 	Node     Node
 	SentAt   time.Time
 	Sessions []SessionInfo
+}
+
+type CreateInviteOptions struct {
+	NodeName        string
+	TTL             time.Duration
+	Admin           bool
+	CreatedByNodeID string
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -82,14 +92,19 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) CreateInvite(nodeName string, ttl time.Duration) (plainToken string, err error) {
+	return s.CreateInviteWithOptions(CreateInviteOptions{NodeName: nodeName, TTL: ttl})
+}
+
+func (s *Store) CreateInviteWithOptions(opts CreateInviteOptions) (plainToken string, err error) {
 	token, err := newSecret("invite_")
 	if err != nil {
 		return "", err
 	}
 	now := time.Now()
 	_, err = s.db.Exec(
-		`INSERT INTO invites (token_hash, node_name, expires_at) VALUES (?, ?, ?)`,
-		hashSecret(token), nodeName, now.Add(ttl).UnixNano(),
+		`INSERT INTO invites (token_hash, node_name, expires_at, admin, created_by_node_id)
+		 VALUES (?, ?, ?, ?, ?)`,
+		hashSecret(token), opts.NodeName, now.Add(opts.TTL).UnixNano(), boolInt(opts.Admin), nullString(opts.CreatedByNodeID),
 	)
 	if err != nil {
 		return "", fmt.Errorf("create invite: %w", err)
@@ -157,7 +172,7 @@ func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
 	}
 
 	invite, err := scanInvite(tx.QueryRow(
-		`SELECT token_hash, node_name, expires_at, consumed_at FROM invites WHERE token_hash = ?`,
+		`SELECT token_hash, node_name, expires_at, consumed_at, admin, created_by_node_id FROM invites WHERE token_hash = ?`,
 		tokenHash,
 	))
 	if err != nil {
@@ -170,6 +185,32 @@ func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
 }
 
 func (s *Store) UpsertNode(id, name, tokenHash, version, osName, arch string) (Node, error) {
+	return s.upsertNode(id, name, tokenHash, version, osName, arch, false, false)
+}
+
+func (s *Store) UpsertNodeWithAdmin(id, name, tokenHash, version, osName, arch string, admin bool) (Node, error) {
+	return s.upsertNode(id, name, tokenHash, version, osName, arch, admin, true)
+}
+
+func (s *Store) upsertNode(id, name, tokenHash, version, osName, arch string, admin, setAdmin bool) (Node, error) {
+	if setAdmin {
+		_, err := s.db.Exec(
+			`INSERT INTO nodes (id, name, token_hash, version, os, arch, admin)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   name = excluded.name,
+			   token_hash = excluded.token_hash,
+			   version = excluded.version,
+			   os = excluded.os,
+			   arch = excluded.arch,
+			   admin = excluded.admin`,
+			id, name, tokenHash, version, osName, arch, boolInt(admin),
+		)
+		if err != nil {
+			return Node{}, fmt.Errorf("upsert node: %w", err)
+		}
+		return s.nodeByID(id)
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO nodes (id, name, token_hash, version, os, arch)
 		 VALUES (?, ?, ?, ?, ?, ?)
@@ -185,6 +226,29 @@ func (s *Store) UpsertNode(id, name, tokenHash, version, osName, arch string) (N
 		return Node{}, fmt.Errorf("upsert node: %w", err)
 	}
 	return s.nodeByID(id)
+}
+
+func (s *Store) NodeCount() (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count nodes: %w", err)
+	}
+	return count, nil
+}
+
+func (s *Store) SetNodeAdmin(nodeID string, admin bool) error {
+	res, err := s.db.Exec(`UPDATE nodes SET admin = ? WHERE id = ?`, boolInt(admin), nodeID)
+	if err != nil {
+		return fmt.Errorf("set node admin: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set node admin rows affected: %w", err)
+	}
+	if rows != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) AuthenticateNode(nodeID, plainToken string) (Node, error) {
@@ -237,7 +301,7 @@ func (s *Store) ReplaceSnapshot(nodeID string, snapshot SnapshotPayload) error {
 
 func (s *Store) LatestSessions() ([]NodeSessions, error) {
 	rows, err := s.db.Query(
-		`SELECT n.id, n.name, n.token_hash, n.version, n.os, n.arch, n.status, n.last_seen_at,
+		`SELECT n.id, n.name, n.token_hash, n.version, n.os, n.arch, n.status, n.last_seen_at, n.admin,
 		        s.sent_at, s.payload_json
 		 FROM snapshots s
 		 JOIN nodes n ON n.id = s.node_id
@@ -288,7 +352,9 @@ CREATE TABLE IF NOT EXISTS invites (
   token_hash TEXT PRIMARY KEY,
   node_name TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
-  consumed_at INTEGER
+  consumed_at INTEGER,
+  admin INTEGER NOT NULL DEFAULT 0,
+  created_by_node_id TEXT
 );
 CREATE TABLE IF NOT EXISTS nodes (
   id TEXT PRIMARY KEY,
@@ -298,7 +364,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   os TEXT,
   arch TEXT,
   status TEXT NOT NULL DEFAULT 'offline',
-  last_seen_at INTEGER
+  last_seen_at INTEGER,
+  admin INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS snapshots (
   node_id TEXT PRIMARY KEY,
@@ -320,15 +387,52 @@ CREATE TABLE IF NOT EXISTS hub_settings (
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate hub db: %w", err)
 	}
+	if err := s.ensureColumn("invites", "admin", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("invites", "created_by_node_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("nodes", "admin", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (s *Store) nodeByID(id string) (Node, error) {
 	return scanNode(s.db.QueryRow(
-		`SELECT id, name, token_hash, version, os, arch, status, last_seen_at
+		`SELECT id, name, token_hash, version, os, arch, status, last_seen_at, admin
 		 FROM nodes WHERE id = ?`,
 		id,
 	))
+}
+
+func (s *Store) ensureColumn(table, column, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan %s column info: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s column info: %w", table, err)
+	}
+	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s column: %w", table, column, err)
+	}
+	return nil
 }
 
 func (s *Store) setNodeStatus(nodeID, status string, lastSeenAt int64) error {
@@ -356,7 +460,9 @@ func scanInvite(row *sql.Row) (Invite, error) {
 	var invite Invite
 	var expiresAt int64
 	var consumedAt sql.NullInt64
-	if err := row.Scan(&invite.TokenHash, &invite.NodeName, &expiresAt, &consumedAt); err != nil {
+	var admin int
+	var createdBy sql.NullString
+	if err := row.Scan(&invite.TokenHash, &invite.NodeName, &expiresAt, &consumedAt, &admin, &createdBy); err != nil {
 		return Invite{}, err
 	}
 	invite.ExpiresAt = time.Unix(0, expiresAt)
@@ -364,6 +470,8 @@ func scanInvite(row *sql.Row) (Invite, error) {
 		t := time.Unix(0, consumedAt.Int64)
 		invite.ConsumedAt = &t
 	}
+	invite.Admin = admin != 0
+	invite.CreatedByNodeID = createdBy.String
 	return invite, nil
 }
 
@@ -382,6 +490,7 @@ type rowScanner interface {
 func scanNodeValues(row rowScanner, node *Node) error {
 	var version, osName, arch sql.NullString
 	var lastSeenAt sql.NullInt64
+	var admin int
 	if err := row.Scan(
 		&node.ID,
 		&node.Name,
@@ -391,6 +500,7 @@ func scanNodeValues(row rowScanner, node *Node) error {
 		&arch,
 		&node.Status,
 		&lastSeenAt,
+		&admin,
 	); err != nil {
 		return err
 	}
@@ -401,12 +511,14 @@ func scanNodeValues(row rowScanner, node *Node) error {
 		t := time.Unix(0, lastSeenAt.Int64)
 		node.LastSeenAt = &t
 	}
+	node.Admin = admin != 0
 	return nil
 }
 
 func scanNodeFields(rows *sql.Rows, node *Node, extra ...any) error {
 	var version, osName, arch sql.NullString
 	var lastSeenAt sql.NullInt64
+	var admin int
 	dest := []any{
 		&node.ID,
 		&node.Name,
@@ -416,6 +528,7 @@ func scanNodeFields(rows *sql.Rows, node *Node, extra ...any) error {
 		&arch,
 		&node.Status,
 		&lastSeenAt,
+		&admin,
 	}
 	dest = append(dest, extra...)
 	if err := rows.Scan(dest...); err != nil {
@@ -428,6 +541,7 @@ func scanNodeFields(rows *sql.Rows, node *Node, extra ...any) error {
 		t := time.Unix(0, lastSeenAt.Int64)
 		node.LastSeenAt = &t
 	}
+	node.Admin = admin != 0
 	return nil
 }
 
@@ -442,4 +556,19 @@ func newSecret(prefix string) (string, error) {
 func hashSecret(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func nullString(s string) any {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	return s
 }
