@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/agentpaths"
+	"github.com/asheshgoplani/agent-deck/internal/atomicfile"
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
@@ -39,6 +40,16 @@ type hubJoinRequest struct {
 	Version     string `json:"version,omitempty"`
 	OS          string `json:"os,omitempty"`
 	Arch        string `json:"arch,omitempty"`
+}
+
+type hubNodeOutput struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Version    string     `json:"version,omitempty"`
+	OS         string     `json:"os,omitempty"`
+	Arch       string     `json:"arch,omitempty"`
+	Status     string     `json:"status"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
 func handleHub(profile string, args []string) {
@@ -179,6 +190,11 @@ func handleHubJoin(args []string) error {
 		return fmt.Errorf("--token is required")
 	}
 
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+
 	result, err := exchangeHubInvite(hubURL, hubJoinRequest{
 		InviteToken: strings.TrimSpace(*token),
 		NodeName:    strings.TrimSpace(*nodeName),
@@ -198,10 +214,6 @@ func handleHubJoin(args []string) error {
 	result.CAPemFile = strings.TrimSpace(*caPemFile)
 	result.ServerName = strings.TrimSpace(*serverName)
 
-	config, err := session.LoadUserConfig()
-	if err != nil {
-		config = &session.UserConfig{}
-	}
 	if err := saveHubJoinConfig(config, result); err != nil {
 		return err
 	}
@@ -242,14 +254,15 @@ func handleHubNodes(args []string) error {
 	if err != nil {
 		return err
 	}
+	nodeViews := hubNodeOutputs(nodes)
 	if *jsonOutput {
-		return json.NewEncoder(os.Stdout).Encode(nodes)
+		return json.NewEncoder(os.Stdout).Encode(nodeViews)
 	}
-	if len(nodes) == 0 {
+	if len(nodeViews) == 0 {
 		fmt.Println("No hub nodes registered.")
 		return nil
 	}
-	for _, node := range nodes {
+	for _, node := range nodeViews {
 		fmt.Printf("%s\t%s\t%s\n", node.ID, node.Name, node.Status)
 	}
 	return nil
@@ -259,9 +272,13 @@ func saveHubJoinConfig(config *session.UserConfig, result hubJoinResult) error {
 	if config == nil {
 		return fmt.Errorf("config is required")
 	}
+	var err error
+	result, err = normalizeHubJoinResult(result, "")
+	if err != nil {
+		return err
+	}
 	tokenPath := strings.TrimSpace(result.TokenPath)
 	if tokenPath == "" {
-		var err error
 		tokenPath, err = defaultHubTokenPath()
 		if err != nil {
 			return err
@@ -270,13 +287,16 @@ func saveHubJoinConfig(config *session.UserConfig, result hubJoinResult) error {
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
 		return fmt.Errorf("create hub token dir: %w", err)
 	}
-	if err := os.WriteFile(tokenPath, []byte(result.NodeToken+"\n"), 0o600); err != nil {
+	if err := atomicfile.WriteFileDurable(tokenPath, []byte(result.NodeToken+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write hub token file: %w", err)
 	}
+	if err := os.Chmod(tokenPath, 0o600); err != nil {
+		return fmt.Errorf("chmod hub token file: %w", err)
+	}
 	config.Hub = session.HubSettings{
-		URL:           strings.TrimSpace(result.URL),
-		NodeID:        strings.TrimSpace(result.NodeID),
-		NodeName:      strings.TrimSpace(result.NodeName),
+		URL:           result.URL,
+		NodeID:        result.NodeID,
+		NodeName:      result.NodeName,
 		TokenFile:     tokenPath,
 		AutoConnect:   true,
 		TLSSkipVerify: result.TLSSkipVerify,
@@ -329,6 +349,29 @@ func exchangeHubInvite(rawHubURL string, req hubJoinRequest, tlsOptions hubJoinT
 	}
 	if strings.TrimSpace(result.URL) == "" {
 		result.URL = strings.TrimSpace(rawHubURL)
+	}
+	return normalizeHubJoinResult(result, rawHubURL)
+}
+
+func normalizeHubJoinResult(result hubJoinResult, fallbackURL string) (hubJoinResult, error) {
+	result.URL = strings.TrimSpace(result.URL)
+	if result.URL == "" {
+		result.URL = strings.TrimSpace(fallbackURL)
+	}
+	if err := validateHubJoinURL(result.URL); err != nil {
+		return hubJoinResult{}, fmt.Errorf("invalid hub join response URL: %w", err)
+	}
+	result.NodeID = strings.TrimSpace(result.NodeID)
+	if result.NodeID == "" {
+		return hubJoinResult{}, fmt.Errorf("hub join response missing node_id")
+	}
+	result.NodeName = strings.TrimSpace(result.NodeName)
+	if result.NodeName == "" {
+		return hubJoinResult{}, fmt.Errorf("hub join response missing node_name")
+	}
+	result.NodeToken = strings.TrimSpace(result.NodeToken)
+	if result.NodeToken == "" {
+		return hubJoinResult{}, fmt.Errorf("hub join response missing node_token")
 	}
 	return result, nil
 }
@@ -395,6 +438,22 @@ func defaultNodeName() string {
 		return "local"
 	}
 	return strings.TrimSpace(name)
+}
+
+func hubNodeOutputs(nodes []hub.Node) []hubNodeOutput {
+	out := make([]hubNodeOutput, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, hubNodeOutput{
+			ID:         node.ID,
+			Name:       node.Name,
+			Version:    node.Version,
+			OS:         node.OS,
+			Arch:       node.Arch,
+			Status:     node.Status,
+			LastSeenAt: node.LastSeenAt,
+		})
+	}
+	return out
 }
 
 func printHubUsage(w io.Writer) {
