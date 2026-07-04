@@ -1,11 +1,13 @@
-FROM golang:1.25-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o /out/agent-deck ./cmd/agent-deck
+ARG TARGETOS=linux
+ARG TARGETARCH
+RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o /out/agent-deck ./cmd/agent-deck
 
 FROM gcr.io/distroless/base-debian12
 
