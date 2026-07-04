@@ -175,17 +175,106 @@ func TestAttachRouterOpenNotifiesRequesterWhenOwnerUnavailable(t *testing.T) {
 	}
 }
 
+func TestAttachRouterRejectsDuplicateStreamID(t *testing.T) {
+	router := NewAttachRouter()
+	requesterA := newFakePeerConn("laptop", "laptop-a")
+	requesterB := newFakePeerConn("laptop", "laptop-b")
+	owner := newFakePeer("workstation")
+	router.Register(requesterA)
+	router.Register(requesterB)
+	router.Register(owner)
+
+	if err := router.OpenFromPeer(context.Background(), requesterA, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"}); err != nil {
+		t.Fatalf("first OpenFromPeer: %v", err)
+	}
+	_ = owner.pop(t)
+
+	err := router.OpenFromPeer(context.Background(), requesterB, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_2"})
+	if err == nil {
+		t.Fatal("second OpenFromPeer succeeded, want duplicate stream error")
+	}
+	closed := requesterB.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester B msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	var closePayload AttachClosePayload
+	if err := json.Unmarshal(closed.Payload, &closePayload); err != nil {
+		t.Fatalf("decode closed payload: %v", err)
+	}
+	if closePayload.StreamID != "stream_1" || !strings.Contains(closePayload.Reason, "already exists") {
+		t.Fatalf("closed payload = %+v", closePayload)
+	}
+	if len(owner.messages) != 0 {
+		t.Fatalf("owner received duplicate open, messages=%d", len(owner.messages))
+	}
+
+	if err := router.ForwardFromOwner(owner.ID, NewAttachData("stream_1", []byte("first-stream"))); err != nil {
+		t.Fatalf("ForwardFromOwner after duplicate reject: %v", err)
+	}
+	output := requesterA.pop(t)
+	if output.Type != MsgAttachData {
+		t.Fatalf("requester A output msg = %s, want %s", output.Type, MsgAttachData)
+	}
+	assertAttachDataBytes(t, output, "first-stream")
+}
+
+func TestAttachRouterPinsStreamToOpeningRequesterConnection(t *testing.T) {
+	router := NewAttachRouter()
+	requesterA := newFakePeerConn("laptop", "laptop-a")
+	requesterB := newFakePeerConn("laptop", "laptop-b")
+	owner := newFakePeer("workstation")
+	router.Register(requesterA)
+	router.Register(owner)
+	router.Register(requesterB)
+
+	if err := router.OpenFromPeer(context.Background(), requesterA, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"}); err != nil {
+		t.Fatalf("OpenFromPeer: %v", err)
+	}
+	_ = owner.pop(t)
+
+	if err := router.ForwardReadyFromOwnerPeer(owner, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"}); err != nil {
+		t.Fatalf("ForwardReadyFromOwnerPeer: %v", err)
+	}
+	ready := requesterA.pop(t)
+	if ready.Type != MsgAttachReady {
+		t.Fatalf("requester A msg = %s, want %s", ready.Type, MsgAttachReady)
+	}
+	if len(requesterB.messages) != 0 {
+		t.Fatalf("requester B received %d messages, want none", len(requesterB.messages))
+	}
+
+	router.UnregisterPeer(requesterB)
+
+	if err := router.ForwardFromOwner(owner.ID, NewAttachData("stream_1", []byte("still-open"))); err != nil {
+		t.Fatalf("ForwardFromOwner after other peer unregister: %v", err)
+	}
+	output := requesterA.pop(t)
+	if output.Type != MsgAttachData {
+		t.Fatalf("requester A output msg = %s, want %s", output.Type, MsgAttachData)
+	}
+	assertAttachDataBytes(t, output, "still-open")
+}
+
 type fakePeer struct {
 	ID       string
+	peerID   string
 	messages []Envelope
 }
 
 func newFakePeer(id string) *fakePeer {
-	return &fakePeer{ID: id}
+	return newFakePeerConn(id, id)
+}
+
+func newFakePeerConn(nodeID, peerID string) *fakePeer {
+	return &fakePeer{ID: nodeID, peerID: peerID}
 }
 
 func (p *fakePeer) NodeID() string {
 	return p.ID
+}
+
+func (p *fakePeer) PeerID() string {
+	return p.peerID
 }
 
 func (p *fakePeer) Send(env Envelope) error {

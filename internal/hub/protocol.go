@@ -9,6 +9,11 @@ import (
 
 const ProtocolVersion = 1
 
+const (
+	MaxAttachFrameBytes = 256 * 1024
+	maxHubEnvelopeBytes = 8 * 1024 * 1024
+)
+
 type MessageType string
 
 const (
@@ -98,9 +103,15 @@ func NewAttachData(streamID string, data []byte) AttachDataPayload {
 }
 
 func (p AttachDataPayload) Bytes() ([]byte, error) {
+	if len(p.DataB64) > base64.StdEncoding.EncodedLen(MaxAttachFrameBytes) {
+		return nil, fmt.Errorf("attach data exceeds %d bytes", MaxAttachFrameBytes)
+	}
 	data, err := base64.StdEncoding.DecodeString(p.DataB64)
 	if err != nil {
 		return nil, fmt.Errorf("decode attach data: %w", err)
+	}
+	if len(data) > MaxAttachFrameBytes {
+		return nil, fmt.Errorf("attach data exceeds %d bytes", MaxAttachFrameBytes)
 	}
 	return data, nil
 }

@@ -950,6 +950,10 @@ type hubSnapshotMsg struct {
 	snapshot hub.NodeSessions
 }
 
+type hubAttachResultMsg struct {
+	err error
+}
+
 // openSwitcherMsg is emitted when the user pressed the session-switch key while
 // attached. It carries the same post-attach reconciliation data as
 // statusUpdateMsg; the switcher always opens pre-highlighted on the session we
@@ -6033,6 +6037,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Continue listening for next change
 		return h, tea.Batch(cmd, listenForReloads(h.storageWatcher))
+
+	case hubAttachResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub attach failed")
+			h.setError(fmt.Errorf("hub attach: %w", msg.err))
+		}
+		return h.Update(statusUpdateMsg{})
 
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
@@ -12766,12 +12777,7 @@ func (h *Home) attachHubSession(nodeID, sessionID string) tea.Cmd {
 	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
 	h.isAttaching.Store(true)
 	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size}, func(err error) tea.Msg {
-		h.isAttaching.Store(false)
-		if err != nil {
-			h.setHubStatus("hub attach failed")
-			h.setError(fmt.Errorf("hub attach: %w", err))
-		}
-		return statusUpdateMsg{}
+		return hubAttachResultMsg{err: err}
 	})
 }
 

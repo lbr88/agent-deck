@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -51,6 +52,13 @@ func TestAttachDataIsBase64TerminalBytes(t *testing.T) {
 	}
 	if string(data) != "\x1b[A" {
 		t.Fatalf("decoded = %q", string(data))
+	}
+}
+
+func TestAttachDataRejectsOversizedPayload(t *testing.T) {
+	frame := NewAttachData("str_1", bytes.Repeat([]byte("x"), MaxAttachFrameBytes+1))
+	if _, err := frame.Bytes(); err == nil {
+		t.Fatal("Bytes succeeded for oversized payload, want error")
 	}
 }
 

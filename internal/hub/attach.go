@@ -162,6 +162,7 @@ func startPTYWithSize(cmd *exec.Cmd, size TerminalSize) (*os.File, error) {
 
 type Peer interface {
 	NodeID() string
+	PeerID() string
 	Send(Envelope) error
 }
 
@@ -174,6 +175,8 @@ type AttachRouter struct {
 type attachRoute struct {
 	requesterNodeID string
 	ownerNodeID     string
+	requesterPeer   Peer
+	ownerPeer       Peer
 }
 
 func NewAttachRouter() *AttachRouter {
@@ -191,9 +194,55 @@ func (r *AttachRouter) Register(peer Peer) {
 	if nodeID == "" {
 		return
 	}
+	if strings.TrimSpace(peer.PeerID()) == "" {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.peers[nodeID] = peer
+}
+
+func (r *AttachRouter) UnregisterPeer(peer Peer) {
+	if r == nil || peer == nil {
+		return
+	}
+	nodeID := strings.TrimSpace(peer.NodeID())
+	if nodeID == "" || strings.TrimSpace(peer.PeerID()) == "" {
+		return
+	}
+	type notification struct {
+		peer Peer
+		env  Envelope
+	}
+	var notifications []notification
+
+	r.mu.Lock()
+	if samePeer(r.peers[nodeID], peer) {
+		delete(r.peers, nodeID)
+	}
+	for streamID, route := range r.streams {
+		switch {
+		case samePeer(route.requesterPeer, peer):
+			if route.ownerPeer != nil {
+				if env, err := MarshalEnvelope(MsgAttachClose, nodeID, AttachClosePayload{StreamID: streamID, Reason: "attach requester disconnected"}); err == nil {
+					notifications = append(notifications, notification{peer: route.ownerPeer, env: env})
+				}
+			}
+			delete(r.streams, streamID)
+		case samePeer(route.ownerPeer, peer):
+			if route.requesterPeer != nil {
+				if env, err := MarshalEnvelope(MsgAttachClosed, nodeID, AttachClosePayload{StreamID: streamID, Reason: "attach owner disconnected"}); err == nil {
+					notifications = append(notifications, notification{peer: route.requesterPeer, env: env})
+				}
+			}
+			delete(r.streams, streamID)
+		}
+	}
+	r.mu.Unlock()
+
+	for _, msg := range notifications {
+		_ = msg.peer.Send(msg.env)
+	}
 }
 
 func (r *AttachRouter) Unregister(nodeID string) {
@@ -236,6 +285,14 @@ func (r *AttachRouter) Unregister(nodeID string) {
 }
 
 func (r *AttachRouter) Open(ctx context.Context, requesterNodeID, ownerNodeID string, payload AttachOpenPayload) error {
+	requester := r.peer(requesterNodeID)
+	if requester == nil {
+		return fmt.Errorf("attach requester node %q is not connected", strings.TrimSpace(requesterNodeID))
+	}
+	return r.OpenFromPeer(ctx, requester, ownerNodeID, payload)
+}
+
+func (r *AttachRouter) OpenFromPeer(ctx context.Context, requester Peer, ownerNodeID string, payload AttachOpenPayload) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -243,13 +300,19 @@ func (r *AttachRouter) Open(ctx context.Context, requesterNodeID, ownerNodeID st
 		return err
 	}
 	streamID := strings.TrimSpace(payload.StreamID)
-	requesterNodeID = strings.TrimSpace(requesterNodeID)
+	requesterNodeID := ""
+	if requester != nil {
+		requesterNodeID = strings.TrimSpace(requester.NodeID())
+	}
 	ownerNodeID = strings.TrimSpace(ownerNodeID)
 	if streamID == "" {
 		return fmt.Errorf("attach stream id is required")
 	}
 	if requesterNodeID == "" {
 		return fmt.Errorf("attach requester node id is required")
+	}
+	if requester == nil || strings.TrimSpace(requester.PeerID()) == "" {
+		return fmt.Errorf("attach requester peer is required")
 	}
 	if ownerNodeID == "" {
 		return fmt.Errorf("attach owner node id is required")
@@ -268,7 +331,20 @@ func (r *AttachRouter) Open(ctx context.Context, requesterNodeID, ownerNodeID st
 		}
 		return err
 	}
-	r.streams[streamID] = attachRoute{requesterNodeID: requesterNodeID, ownerNodeID: ownerNodeID}
+	if _, exists := r.streams[streamID]; exists {
+		r.mu.Unlock()
+		err := fmt.Errorf("attach stream %q already exists", streamID)
+		if env, marshalErr := MarshalEnvelope(MsgAttachClosed, ownerNodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()}); marshalErr == nil {
+			_ = requester.Send(env)
+		}
+		return err
+	}
+	r.streams[streamID] = attachRoute{
+		requesterNodeID: requesterNodeID,
+		ownerNodeID:     ownerNodeID,
+		requesterPeer:   requester,
+		ownerPeer:       owner,
+	}
 	r.mu.Unlock()
 
 	payload.NodeID = ownerNodeID
@@ -305,20 +381,44 @@ func (r *AttachRouter) ForwardDataFromNode(nodeID string, payload AttachDataPayl
 	return r.forwardData(nodeID, payload.StreamID, MsgAttachData, payload, direction)
 }
 
+func (r *AttachRouter) ForwardDataFromPeer(peer Peer, payload AttachDataPayload) error {
+	direction, err := r.directionForPeer(peer, payload.StreamID)
+	if err != nil {
+		return err
+	}
+	return r.forwardDataFromPeer(peer, payload.StreamID, MsgAttachData, payload, direction)
+}
+
 func (r *AttachRouter) ForwardResizeFromRequester(requesterNodeID string, payload AttachResizePayload) error {
 	return r.forwardData(requesterNodeID, payload.StreamID, MsgAttachResize, payload, routeRequesterToOwner)
+}
+
+func (r *AttachRouter) ForwardResizeFromRequesterPeer(peer Peer, payload AttachResizePayload) error {
+	return r.forwardDataFromPeer(peer, payload.StreamID, MsgAttachResize, payload, routeRequesterToOwner)
 }
 
 func (r *AttachRouter) ForwardCloseFromRequester(requesterNodeID string, payload AttachClosePayload) error {
 	return r.forwardClose(requesterNodeID, payload.StreamID, MsgAttachClose, payload, routeRequesterToOwner)
 }
 
+func (r *AttachRouter) ForwardCloseFromRequesterPeer(peer Peer, payload AttachClosePayload) error {
+	return r.forwardCloseFromPeer(peer, payload.StreamID, MsgAttachClose, payload, routeRequesterToOwner)
+}
+
 func (r *AttachRouter) ForwardReadyFromOwner(ownerNodeID string, payload AttachOpenPayload) error {
 	return r.forwardData(ownerNodeID, payload.StreamID, MsgAttachReady, payload, routeOwnerToRequester)
 }
 
+func (r *AttachRouter) ForwardReadyFromOwnerPeer(peer Peer, payload AttachOpenPayload) error {
+	return r.forwardDataFromPeer(peer, payload.StreamID, MsgAttachReady, payload, routeOwnerToRequester)
+}
+
 func (r *AttachRouter) ForwardClosedFromOwner(ownerNodeID string, payload AttachClosePayload) error {
 	return r.forwardClose(ownerNodeID, payload.StreamID, MsgAttachClosed, payload, routeOwnerToRequester)
+}
+
+func (r *AttachRouter) ForwardClosedFromOwnerPeer(peer Peer, payload AttachClosePayload) error {
+	return r.forwardCloseFromPeer(peer, payload.StreamID, MsgAttachClosed, payload, routeOwnerToRequester)
 }
 
 func (r *AttachRouter) directionForNode(nodeID, streamID string) (routeDirection, error) {
@@ -349,6 +449,33 @@ func (r *AttachRouter) directionForNode(nodeID, streamID string) (routeDirection
 	}
 }
 
+func (r *AttachRouter) directionForPeer(peer Peer, streamID string) (routeDirection, error) {
+	if r == nil {
+		return routeRequesterToOwner, fmt.Errorf("attach router is nil")
+	}
+	if peer == nil || strings.TrimSpace(peer.NodeID()) == "" || strings.TrimSpace(peer.PeerID()) == "" {
+		return routeRequesterToOwner, fmt.Errorf("attach source peer is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return routeRequesterToOwner, fmt.Errorf("attach stream id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	route, ok := r.streams[streamID]
+	if !ok {
+		return routeRequesterToOwner, fmt.Errorf("attach stream %q is not open", streamID)
+	}
+	switch {
+	case samePeer(peer, route.requesterPeer):
+		return routeRequesterToOwner, nil
+	case samePeer(peer, route.ownerPeer):
+		return routeOwnerToRequester, nil
+	default:
+		return routeRequesterToOwner, fmt.Errorf("attach stream %q does not belong to peer %q", streamID, peer.PeerID())
+	}
+}
+
 type routeDirection int
 
 const (
@@ -372,12 +499,42 @@ func (r *AttachRouter) forwardData(fromNodeID, streamID string, typ MessageType,
 	return nil
 }
 
+func (r *AttachRouter) forwardDataFromPeer(from Peer, streamID string, typ MessageType, payload any, direction routeDirection) error {
+	peer, _, err := r.targetPeerFromPeer(from, streamID, direction)
+	if err != nil {
+		return err
+	}
+	env, err := MarshalEnvelope(typ, strings.TrimSpace(from.NodeID()), payload)
+	if err != nil {
+		return err
+	}
+	if err := peer.Send(env); err != nil {
+		r.removeStream(streamID)
+		return err
+	}
+	return nil
+}
+
 func (r *AttachRouter) forwardClose(fromNodeID, streamID string, typ MessageType, payload any, direction routeDirection) error {
 	peer, _, err := r.targetPeer(fromNodeID, streamID, direction)
 	if err != nil {
 		return err
 	}
 	env, err := MarshalEnvelope(typ, strings.TrimSpace(fromNodeID), payload)
+	if err != nil {
+		return err
+	}
+	sendErr := peer.Send(env)
+	r.removeStream(streamID)
+	return sendErr
+}
+
+func (r *AttachRouter) forwardCloseFromPeer(from Peer, streamID string, typ MessageType, payload any, direction routeDirection) error {
+	peer, _, err := r.targetPeerFromPeer(from, streamID, direction)
+	if err != nil {
+		return err
+	}
+	env, err := MarshalEnvelope(typ, strings.TrimSpace(from.NodeID()), payload)
 	if err != nil {
 		return err
 	}
@@ -416,12 +573,56 @@ func (r *AttachRouter) targetPeer(fromNodeID, streamID string, direction routeDi
 	if fromNodeID != expectedFrom {
 		return nil, attachRoute{}, fmt.Errorf("attach stream %q does not belong to node %q", streamID, fromNodeID)
 	}
-	peer := r.peers[targetNodeID]
+	var peer Peer
+	if direction == routeRequesterToOwner {
+		peer = route.ownerPeer
+	} else {
+		peer = route.requesterPeer
+	}
 	if peer == nil {
 		delete(r.streams, streamID)
 		return nil, attachRoute{}, fmt.Errorf("attach target node %q is not connected", targetNodeID)
 	}
 	return peer, route, nil
+}
+
+func (r *AttachRouter) targetPeerFromPeer(from Peer, streamID string, direction routeDirection) (Peer, attachRoute, error) {
+	if r == nil {
+		return nil, attachRoute{}, fmt.Errorf("attach router is nil")
+	}
+	if from == nil || strings.TrimSpace(from.NodeID()) == "" || strings.TrimSpace(from.PeerID()) == "" {
+		return nil, attachRoute{}, fmt.Errorf("attach source peer is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return nil, attachRoute{}, fmt.Errorf("attach stream id is required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	route, ok := r.streams[streamID]
+	if !ok {
+		return nil, attachRoute{}, fmt.Errorf("attach stream %q is not open", streamID)
+	}
+	var expectedFrom, target Peer
+	var targetNodeID string
+	if direction == routeRequesterToOwner {
+		expectedFrom = route.requesterPeer
+		target = route.ownerPeer
+		targetNodeID = route.ownerNodeID
+	} else {
+		expectedFrom = route.ownerPeer
+		target = route.requesterPeer
+		targetNodeID = route.requesterNodeID
+	}
+	if !samePeer(from, expectedFrom) {
+		return nil, attachRoute{}, fmt.Errorf("attach stream %q does not belong to peer %q", streamID, from.PeerID())
+	}
+	if target == nil {
+		delete(r.streams, streamID)
+		return nil, attachRoute{}, fmt.Errorf("attach target node %q is not connected", targetNodeID)
+	}
+	return target, route, nil
 }
 
 func (r *AttachRouter) removeStream(streamID string) {
@@ -448,4 +649,12 @@ func (r *AttachRouter) peer(nodeID string) Peer {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.peers[nodeID]
+}
+
+func samePeer(a, b Peer) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.TrimSpace(a.NodeID()) == strings.TrimSpace(b.NodeID()) &&
+		strings.TrimSpace(a.PeerID()) == strings.TrimSpace(b.PeerID())
 }

@@ -32,6 +32,7 @@ type Server struct {
 }
 
 type hubPeer struct {
+	id     string
 	nodeID string
 	conn   *websocket.Conn
 	mu     sync.Mutex
@@ -44,13 +45,20 @@ func (p *hubPeer) NodeID() string {
 	return p.nodeID
 }
 
+func (p *hubPeer) PeerID() string {
+	if p == nil {
+		return ""
+	}
+	return p.id
+}
+
 func (p *hubPeer) Send(env Envelope) error {
 	if p == nil || p.conn == nil {
 		return nil
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.conn.WriteJSON(env)
+	return writeWebSocketJSON(p.conn, env)
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -244,8 +252,13 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxHubEnvelopeBytes)
 
-	peer := &hubPeer{nodeID: node.ID, conn: conn}
+	peerID, err := newSecret("peer_")
+	if err != nil {
+		return
+	}
+	peer := &hubPeer{id: peerID, nodeID: node.ID, conn: conn}
 	s.retainNodeConnection(node.ID, peer)
 	defer s.releaseNodeConnection(node.ID, peer)
 
@@ -264,7 +277,7 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err := conn.ReadJSON(&env); err != nil {
 			return
 		}
-		if err := s.handleNodeEnvelope(r.Context(), node, env); err != nil {
+		if err := s.handleNodeEnvelope(r.Context(), node, peer, env); err != nil {
 			errEnv, marshalErr := MarshalEnvelope(MsgError, node.ID, ErrorPayload{Message: err.Error()})
 			if marshalErr == nil {
 				_ = s.writePeerJSON(peer, errEnv)
@@ -273,7 +286,7 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, env Envelope) error {
+func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPeer, env Envelope) error {
 	if env.Version != 0 && env.Version != ProtocolVersion {
 		return fmt.Errorf("unsupported protocol version %d", env.Version)
 	}
@@ -300,37 +313,37 @@ func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, env Envelope
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach open: %w", err)
 		}
-		return s.attachRouter.Open(ctx, node.ID, payload.NodeID, payload)
+		return s.attachRouter.OpenFromPeer(ctx, peer, payload.NodeID, payload)
 	case MsgAttachReady:
 		var payload AttachOpenPayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach ready: %w", err)
 		}
-		return s.attachRouter.ForwardReadyFromOwner(node.ID, payload)
+		return s.attachRouter.ForwardReadyFromOwnerPeer(peer, payload)
 	case MsgAttachData:
 		var payload AttachDataPayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach data: %w", err)
 		}
-		return s.attachRouter.ForwardDataFromNode(node.ID, payload)
+		return s.attachRouter.ForwardDataFromPeer(peer, payload)
 	case MsgAttachResize:
 		var payload AttachResizePayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach resize: %w", err)
 		}
-		return s.attachRouter.ForwardResizeFromRequester(node.ID, payload)
+		return s.attachRouter.ForwardResizeFromRequesterPeer(peer, payload)
 	case MsgAttachClose:
 		var payload AttachClosePayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach close: %w", err)
 		}
-		return s.attachRouter.ForwardCloseFromRequester(node.ID, payload)
+		return s.attachRouter.ForwardCloseFromRequesterPeer(peer, payload)
 	case MsgAttachClosed:
 		var payload AttachClosePayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach closed: %w", err)
 		}
-		return s.attachRouter.ForwardClosedFromOwner(node.ID, payload)
+		return s.attachRouter.ForwardClosedFromOwnerPeer(peer, payload)
 	case MsgCommand, MsgCommandResult:
 		return nil
 	default:
@@ -380,7 +393,10 @@ func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 	}
 	s.mu.Unlock()
 	if replacement != nil && s.attachRouter != nil {
+		s.attachRouter.UnregisterPeer(peer)
 		s.attachRouter.Register(replacement)
+	} else if s.attachRouter != nil {
+		s.attachRouter.UnregisterPeer(peer)
 	}
 }
 
@@ -438,7 +454,7 @@ func (s *Server) writePeerJSON(peer *hubPeer, v any) error {
 	}
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
-	return peer.conn.WriteJSON(v)
+	return writeWebSocketJSON(peer.conn, v)
 }
 
 var nodeWSUpgrader = websocket.Upgrader{

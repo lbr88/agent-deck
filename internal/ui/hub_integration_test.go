@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -262,6 +263,28 @@ func TestHubEnterOnSessionStartsAttachCommand(t *testing.T) {
 	}
 	if !h.isAttaching.Load() {
 		t.Fatal("Enter on hub session did not mark Home as attaching")
+	}
+}
+
+func TestHubAttachResultMsgRecordsErrorThroughUpdate(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.isAttaching.Store(true)
+
+	model, cmd := h.Update(hubAttachResultMsg{err: errors.New("relay closed")})
+	h = model.(*Home)
+
+	if h.isAttaching.Load() {
+		t.Fatal("hub attach result did not clear attach flag")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "hub attach: relay closed") {
+		t.Fatalf("hub attach result error = %v", h.err)
+	}
+	if got := h.hubStatusText(); got != "hub attach failed" {
+		t.Fatalf("hub status = %q, want hub attach failed", got)
+	}
+	if cmd == nil {
+		t.Fatal("hub attach result did not return post-attach refresh command")
 	}
 }
 

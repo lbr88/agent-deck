@@ -81,7 +81,7 @@ func (c *clientConn) writeEnvelope(typ MessageType, nodeID string, payload any) 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.conn.WriteJSON(env); err != nil {
+	if err := writeWebSocketJSON(c.conn, env); err != nil {
 		return fmt.Errorf("write hub %s: %w", typ, err)
 	}
 	return nil
@@ -215,6 +215,7 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 		return fmt.Errorf("connect hub websocket: %w", err)
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxHubEnvelopeBytes)
 	hubConn := &clientConn{conn: conn}
 	c.setActiveConn(hubConn)
 	defer c.clearActiveConn(hubConn)
@@ -339,11 +340,11 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 	case MsgAttachReady:
 		c.handleAttachReady(env)
 	case MsgAttachData:
-		c.handleAttachData(env)
+		c.handleAttachData(conn, env)
 	case MsgAttachResize:
-		c.handleAttachResize(env)
+		c.handleAttachResize(conn, env)
 	case MsgAttachClose:
-		c.handleAttachClose(env)
+		c.handleAttachClose(conn, env)
 	case MsgAttachClosed:
 		c.handleAttachClosed(env)
 	case MsgWelcome, MsgHeartbeat, MsgCommand, MsgCommandResult, MsgError:
@@ -366,6 +367,13 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 	if streamID == "" || sessionID == "" {
 		return
 	}
+	if !c.reserveOwnerStream(streamID) {
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{
+			StreamID: streamID,
+			Reason:   fmt.Sprintf("attach stream %q already exists", streamID),
+		})
+		return
+	}
 	backend := c.cfg.AttachBackend
 	if backend == nil {
 		backend = NewTmuxAttachBackend("")
@@ -374,11 +382,12 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 	stream, err := backend.Open(streamCtx, sessionID, TerminalSize{Cols: payload.Cols, Rows: payload.Rows})
 	if err != nil {
 		cancel()
+		c.unregisterOwnerStream(streamID)
 		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()})
 		return
 	}
 	ownerStream := &ownerAttachStream{streamID: streamID, stream: stream, cancel: cancel}
-	c.registerOwnerStream(ownerStream)
+	c.setReservedOwnerStream(ownerStream)
 	if err := conn.writeEnvelope(MsgAttachReady, c.cfg.NodeID, AttachOpenPayload{
 		StreamID:  streamID,
 		NodeID:    c.cfg.NodeID,
@@ -394,7 +403,6 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 }
 
 func (c *Client) pumpOwnerAttachOutput(ctx context.Context, conn *clientConn, ownerStream *ownerAttachStream) {
-	defer c.unregisterOwnerStream(ownerStream.streamID)
 	defer ownerStream.close()
 
 	buf := make([]byte, 32*1024)
@@ -403,6 +411,7 @@ func (c *Client) pumpOwnerAttachOutput(ctx context.Context, conn *clientConn, ow
 		if n > 0 {
 			data := append([]byte(nil), buf[:n]...)
 			if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(ownerStream.streamID, data)); writeErr != nil {
+				c.unregisterOwnerStream(ownerStream.streamID)
 				return
 			}
 		}
@@ -411,7 +420,9 @@ func (c *Client) pumpOwnerAttachOutput(ctx context.Context, conn *clientConn, ow
 			if ctx.Err() == nil && err != io.EOF {
 				reason = err.Error()
 			}
-			_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: ownerStream.streamID, Reason: reason})
+			if c.unregisterOwnerStream(ownerStream.streamID) == ownerStream {
+				_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: ownerStream.streamID, Reason: reason})
+			}
 			return
 		}
 	}
@@ -432,7 +443,7 @@ func (c *Client) handleAttachReady(env Envelope) {
 	}
 }
 
-func (c *Client) handleAttachData(env Envelope) {
+func (c *Client) handleAttachData(conn *clientConn, env Envelope) {
 	var payload AttachDataPayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return
@@ -442,7 +453,9 @@ func (c *Client) handleAttachData(env Envelope) {
 		return
 	}
 	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
-		_, _ = ownerStream.stream.Write(data)
+		if _, err := ownerStream.stream.Write(data); err != nil {
+			c.closeOwnerAttachWithReason(conn, payload.StreamID, err.Error())
+		}
 		return
 	}
 	if requesterStream := c.requesterStream(payload.StreamID); requesterStream != nil {
@@ -450,17 +463,19 @@ func (c *Client) handleAttachData(env Envelope) {
 	}
 }
 
-func (c *Client) handleAttachResize(env Envelope) {
+func (c *Client) handleAttachResize(conn *clientConn, env Envelope) {
 	var payload AttachResizePayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return
 	}
 	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
-		_ = ownerStream.stream.Resize(TerminalSize{Cols: payload.Cols, Rows: payload.Rows})
+		if err := ownerStream.stream.Resize(TerminalSize{Cols: payload.Cols, Rows: payload.Rows}); err != nil {
+			c.closeOwnerAttachWithReason(conn, payload.StreamID, err.Error())
+		}
 	}
 }
 
-func (c *Client) handleAttachClose(env Envelope) {
+func (c *Client) handleAttachClose(conn *clientConn, env Envelope) {
 	var payload AttachClosePayload
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return
@@ -470,6 +485,9 @@ func (c *Client) handleAttachClose(env Envelope) {
 		return
 	}
 	ownerStream.close()
+	if conn != nil {
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: payload.StreamID})
+	}
 }
 
 func (c *Client) handleAttachClosed(env Envelope) {
@@ -487,7 +505,38 @@ func (c *Client) handleAttachClosed(env Envelope) {
 	}
 }
 
-func (c *Client) registerOwnerStream(stream *ownerAttachStream) {
+func (c *Client) closeOwnerAttachWithReason(conn *clientConn, streamID, reason string) {
+	ownerStream := c.unregisterOwnerStream(streamID)
+	if ownerStream == nil {
+		return
+	}
+	ownerStream.close()
+	if conn != nil {
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: reason})
+	}
+}
+
+func (c *Client) reserveOwnerStream(streamID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return false
+	}
+	if c.ownerStreams == nil {
+		c.ownerStreams = make(map[string]*ownerAttachStream)
+	}
+	if _, exists := c.ownerStreams[streamID]; exists {
+		return false
+	}
+	c.ownerStreams[streamID] = nil
+	return true
+}
+
+func (c *Client) setReservedOwnerStream(stream *ownerAttachStream) {
+	if stream == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ownerStreams == nil {
@@ -595,7 +644,11 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: err.Error()})
 		return fmt.Errorf("set terminal raw mode: %w", err)
 	}
-	defer func() { _ = term.Restore(stdinFD, oldState) }()
+	var restoreOnce sync.Once
+	restoreTerminal := func() {
+		restoreOnce.Do(func() { _ = term.Restore(stdinFD, oldState) })
+	}
+	defer restoreTerminal()
 
 	attachCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -686,16 +739,19 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 	}()
 
 	err = <-errCh
+	cancel()
+	restoreTerminal()
 	if errors.Is(err, errAttachClosedByOwner) {
 		return nil
 	}
-	if err == nil || ctx.Err() != nil {
-		reason := "detached"
-		if ctx.Err() != nil {
-			reason = ctx.Err().Error()
-		}
-		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: reason})
+	reason := "detached"
+	switch {
+	case ctx.Err() != nil:
+		reason = ctx.Err().Error()
+	case err != nil:
+		reason = err.Error()
 	}
+	_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: reason})
 	return err
 }
 

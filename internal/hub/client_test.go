@@ -319,6 +319,98 @@ func TestClientOwnerAttachOpenUsesBackendAndBridgesFrames(t *testing.T) {
 	}
 }
 
+func TestClientOwnerAttachOpenRejectsDuplicateStreamID(t *testing.T) {
+	backend := newFakeAttachBackend()
+	messages := make(chan observedMessage, 16)
+	serverReady := make(chan *websocket.Conn, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverReady <- conn
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_owner", WelcomePayload{NodeID: "node_owner", NodeName: "workstation"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_owner",
+		NodeName:          "workstation",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+		AttachBackend:     backend,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	conn := waitWebSocketConn(t, serverReady)
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+
+	first, err := MarshalEnvelope(MsgAttachOpen, "node_requester", AttachOpenPayload{
+		StreamID:  "stream_1",
+		SessionID: "sess_1",
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope first open: %v", err)
+	}
+	if err := conn.WriteJSON(first); err != nil {
+		t.Fatalf("server WriteJSON first open: %v", err)
+	}
+	_ = backend.waitOpen(t)
+	assertNextMessageType(t, messages, MsgAttachReady)
+
+	duplicate, err := MarshalEnvelope(MsgAttachOpen, "node_requester", AttachOpenPayload{
+		StreamID:  "stream_1",
+		SessionID: "sess_2",
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope duplicate open: %v", err)
+	}
+	if err := conn.WriteJSON(duplicate); err != nil {
+		t.Fatalf("server WriteJSON duplicate open: %v", err)
+	}
+	closed := assertNextMessageType(t, messages, MsgAttachClosed)
+	var closePayload AttachClosePayload
+	if err := json.Unmarshal(closed.payload, &closePayload); err != nil {
+		t.Fatalf("decode closed payload: %v", err)
+	}
+	if closePayload.StreamID != "stream_1" || !strings.Contains(closePayload.Reason, "already exists") {
+		t.Fatalf("closed payload = %+v", closePayload)
+	}
+	backend.assertNoOpen(t)
+
+	input, err := MarshalEnvelope(MsgAttachData, "node_requester", NewAttachData("stream_1", []byte("requester-input")))
+	if err != nil {
+		t.Fatalf("MarshalEnvelope input: %v", err)
+	}
+	if err := conn.WriteJSON(input); err != nil {
+		t.Fatalf("server WriteJSON input: %v", err)
+	}
+	if got := backend.stream.waitWrite(t); string(got) != "requester-input" {
+		t.Fatalf("stream write = %q, want requester-input", got)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
 func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -544,6 +636,15 @@ func (b *fakeAttachBackend) waitOpen(t *testing.T) fakeAttachOpenCall {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for backend Open")
 		return fakeAttachOpenCall{}
+	}
+}
+
+func (b *fakeAttachBackend) assertNoOpen(t *testing.T) {
+	t.Helper()
+	select {
+	case call := <-b.opens:
+		t.Fatalf("unexpected backend Open call: %+v", call)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
