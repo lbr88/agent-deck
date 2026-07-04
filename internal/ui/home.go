@@ -571,6 +571,7 @@ type Home struct {
 	hubSessionsMu    sync.RWMutex
 	hubStatus        string
 	hubStatusMu      sync.Mutex
+	hubSnapshotCh    chan hubSnapshotMsg
 
 	// Cost tracking
 	costStore            *costs.Store
@@ -680,6 +681,10 @@ type selectedItemIdentity struct {
 	remoteSessionID       string
 	remoteGroupPath       string
 	remoteGroupOccurrence int
+	hubNodeID             string
+	hubSessionID          string
+	hubGroupPath          string
+	hubGroupOccurrence    int
 }
 
 func (h *Home) saveToolVisibilityConfig() error {
@@ -938,7 +943,11 @@ type hubClientAPI interface {
 	Close() error
 }
 
-type hubStarter func(context.Context, session.HubSettings, string, func(string)) (hubClientAPI, error)
+type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions)) (hubClientAPI, error)
+
+type hubSnapshotMsg struct {
+	snapshot hub.NodeSessions
+}
 
 // openSwitcherMsg is emitted when the user pressed the session-switch key while
 // attached. It carries the same post-attach reconciliation data as
@@ -1223,6 +1232,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		lastClickIndex:            -1,
 		hubSessions:               make(map[string]hub.NodeSessions),
 		hubStarter:                startHubClient,
+		hubSnapshotCh:             make(chan hubSnapshotMsg, 64),
 	}
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
 
@@ -1528,20 +1538,74 @@ func (h *Home) configureHubFromConfig(config *session.UserConfig) {
 	if starter == nil {
 		starter = startHubClient
 	}
-	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus)
+	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus, h.handleHubSnapshot)
 	if err != nil {
 		h.setHubStatus("hub offline")
 		uiLog.Warn("hub_autoconnect_start_failed", slog.String("error", err.Error()))
 		return
 	}
 	h.hubClient = client
-	h.setHubStatus("hub connected")
 }
 
 func (h *Home) setHubStatus(status string) {
 	h.hubStatusMu.Lock()
 	h.hubStatus = status
 	h.hubStatusMu.Unlock()
+}
+
+func (h *Home) hubStatusText() string {
+	if !h.hubConfigured {
+		return ""
+	}
+	h.hubStatusMu.Lock()
+	defer h.hubStatusMu.Unlock()
+	return strings.TrimSpace(h.hubStatus)
+}
+
+func (h *Home) handleHubSnapshot(snapshot hub.NodeSessions) {
+	if h.hubSnapshotCh == nil {
+		return
+	}
+	select {
+	case h.hubSnapshotCh <- hubSnapshotMsg{snapshot: snapshot}:
+	default:
+		uiLog.Warn("hub_snapshot_queue_full", slog.String("node_id", snapshot.Node.ID))
+	}
+}
+
+func (h *Home) applyHubSnapshot(snapshot hub.NodeSessions) {
+	nodeID := strings.TrimSpace(snapshot.Node.ID)
+	if nodeID == "" {
+		return
+	}
+	if strings.TrimSpace(snapshot.Node.Name) == "" {
+		snapshot.Node.Name = nodeID
+	}
+	snapshot.Sessions = append([]hub.SessionInfo(nil), snapshot.Sessions...)
+
+	h.hubSessionsMu.Lock()
+	if h.hubSessions == nil {
+		h.hubSessions = make(map[string]hub.NodeSessions)
+	}
+	h.hubSessions[nodeID] = snapshot
+	h.hubSessionsMu.Unlock()
+	h.cachedStatusCounts.valid.Store(false)
+}
+
+func (h *Home) drainHubSnapshots() bool {
+	if h.hubSnapshotCh == nil {
+		return false
+	}
+	changed := false
+	for {
+		select {
+		case msg := <-h.hubSnapshotCh:
+			h.applyHubSnapshot(msg.snapshot)
+			changed = true
+		default:
+			return changed
+		}
+	}
 }
 
 type runningHubClient struct {
@@ -1562,7 +1626,7 @@ func (c *runningHubClient) Close() error {
 	return nil
 }
 
-func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string)) (hubClientAPI, error) {
+func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions)) (hubClientAPI, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -1593,13 +1657,21 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 		TLSSkipVerify: cfg.TLSSkipVerify,
 		CAPemFile:     strings.TrimSpace(cfg.CAPemFile),
 		ServerName:    strings.TrimSpace(cfg.ServerName),
+		OnStatus: func(status string) {
+			if setStatus != nil {
+				setStatus("hub " + strings.TrimSpace(status))
+			}
+		},
+		OnSnapshot: onSnapshot,
 	}, hub.LocalSessionSource{Profile: profile})
 
 	handle := &runningHubClient{cancel: cancel, done: make(chan struct{})}
 	safego.Go(uiLog, "hub_autoconnect", func() {
 		defer close(handle.done)
 		if err := client.Connect(hubCtx); err != nil && hubCtx.Err() == nil {
-			setStatus("hub offline")
+			if setStatus != nil {
+				setStatus("hub offline")
+			}
 			uiLog.Warn("hub_autoconnect_failed", slog.String("error", err.Error()))
 		}
 	})
@@ -1990,6 +2062,19 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 			identity.remoteName = item.RemoteName
 			identity.remoteSessionID = item.RemoteSession.ID
 		}
+	case session.ItemTypeHubGroup:
+		identity.hubNodeID = item.HubNodeID
+		identity.hubGroupPath = item.HubGroupPath
+		for i := 0; i < h.cursor; i++ {
+			if h.flatItems[i].Type == session.ItemTypeHubGroup && h.flatItems[i].HubNodeID == item.HubNodeID && h.flatItems[i].HubGroupPath == item.HubGroupPath {
+				identity.hubGroupOccurrence++
+			}
+		}
+	case session.ItemTypeHubSession:
+		if item.HubSession != nil {
+			identity.hubNodeID = item.HubNodeID
+			identity.hubSessionID = item.HubSession.ID
+		}
 	}
 	return identity
 }
@@ -1997,6 +2082,7 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 	groupOccurrence := identity.groupOccurrence
 	remoteGroupOccurrence := identity.remoteGroupOccurrence
+	hubGroupOccurrence := identity.hubGroupOccurrence
 	for i, item := range h.flatItems {
 		switch {
 		case identity.windowSessionID != "" && item.Type == session.ItemTypeWindow && item.WindowSessionID == identity.windowSessionID && item.WindowIndex == identity.windowIndex:
@@ -2018,6 +2104,16 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 		case identity.remoteGroupPath != "" && item.Type == session.ItemTypeRemoteGroup && item.RemoteName == identity.remoteName && item.Path == identity.remoteGroupPath:
 			if remoteGroupOccurrence > 0 {
 				remoteGroupOccurrence--
+				continue
+			}
+			h.cursor = i
+			return true
+		case identity.hubSessionID != "" && item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubNodeID == identity.hubNodeID && item.HubSession.ID == identity.hubSessionID:
+			h.cursor = i
+			return true
+		case identity.hubGroupPath != "" && item.Type == session.ItemTypeHubGroup && item.HubNodeID == identity.hubNodeID && item.HubGroupPath == identity.hubGroupPath:
+			if hubGroupOccurrence > 0 {
+				hubGroupOccurrence--
 				continue
 			}
 			h.cursor = i
@@ -2302,22 +2398,21 @@ func (h *Home) rebuildFlatItems() {
 }
 
 func (h *Home) prefixLocalHubGroups(items []session.Item) []session.Item {
-	nodeName := h.localHubNodeName()
-	out := make([]session.Item, len(items))
-	for i, item := range items {
-		out[i] = item
-		if item.Type != session.ItemTypeGroup || item.Group == nil {
-			continue
-		}
-		groupCopy := *item.Group
-		groupPath := item.Path
-		if groupPath == "" {
-			groupPath = groupCopy.Path
-		}
-		groupCopy.Name = hubDisplayGroupPath(nodeName, groupPath)
-		out[i].Group = &groupCopy
+	return items
+}
+
+func (h *Home) localGroupDisplayName(item session.Item) string {
+	if item.Group == nil {
+		return ""
 	}
-	return out
+	if !h.hubConfigured {
+		return item.Group.Name
+	}
+	groupPath := item.Path
+	if groupPath == "" {
+		groupPath = item.Group.Path
+	}
+	return hubDisplayGroupPath(h.localHubNodeName(), groupPath)
 }
 
 func (h *Home) localHubNodeName() string {
@@ -2434,6 +2529,9 @@ func (h *Home) projectHubItems() []session.Item {
 			if groupPath == "" {
 				groupPath = session.DefaultGroupPath
 			}
+			if h.groupScope != "" && !h.isInGroupScope(groupPath) {
+				continue
+			}
 			hubInfo.GroupPath = groupPath
 			if h.statusFilter != "" && h.statusFilter != FilterModeArchived && !h.matchesStatusFilter(h.statusFilter, hubSessionStatus(hubInfo)) {
 				continue
@@ -2471,6 +2569,11 @@ func (h *Home) projectHubItems() []session.Item {
 		}
 	}
 	return items
+}
+
+func (h *Home) rejectHubSessionCreation() {
+	h.setHubStatus("hub session creation unavailable")
+	h.setError(fmt.Errorf("hub session creation is not available yet"))
 }
 
 // syncViewport ensures the cursor is visible within the viewport
@@ -5695,6 +5798,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
+	case hubSnapshotMsg:
+		selectedBefore := h.captureSelectedItemIdentity()
+		h.applyHubSnapshot(msg.snapshot)
+		h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		return h, nil
+
 	case remoteLatenciesFetchedMsg:
 		h.remoteLatencyMu.Lock()
 		if h.remoteLatency == nil {
@@ -6356,6 +6465,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		var remoteFetchCmd tea.Cmd
 		var remoteLatencyCmd tea.Cmd
+
+		if h.drainHubSnapshots() {
+			selectedBefore := h.captureSelectedItemIdentity()
+			h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		}
 
 		// Auto-dismiss errors after 5 seconds
 		if h.err != nil && !h.errTime.IsZero() && time.Since(h.errTime) > 5*time.Second {
@@ -8451,6 +8565,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.showRemoteNewSessionDialog(item)
 				return h, nil
 			}
+			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+				h.rejectHubSessionCreation()
+				return h, nil
+			}
 		}
 
 		// Collect unique project paths sorted by most recently accessed
@@ -8555,6 +8673,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
 				return h, h.createRemoteSession(item.RemoteName)
+			}
+			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+				h.rejectHubSessionCreation()
+				return h, nil
 			}
 		}
 		// Quick create: auto-generated name, smart defaults from group context
@@ -13613,6 +13735,11 @@ func (h *Home) View() string {
 		}
 	}
 
+	if hubStatus := h.hubStatusText(); hubStatus != "" {
+		hubStyle := lipgloss.NewStyle().Foreground(ColorCyan)
+		stats += statsSep + hubStyle.Render(hubStatus)
+	}
+
 	// Version badge (right-aligned, subtle inline style - no border to keep single line)
 	versionStyle := lipgloss.NewStyle().
 		Foreground(ColorComment).
@@ -15687,6 +15814,7 @@ func (h *Home) renderGroupItem(
 	// Use precomputed recursive stats (group + descendants) for this render pass.
 	stats := groupStats[group.Path]
 	countStr := countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount))
+	displayName := h.localGroupDisplayName(item)
 
 	statusStr := ""
 	if stats.running > 0 {
@@ -15702,7 +15830,7 @@ func (h *Home) renderGroupItem(
 		gutter,
 		indent,
 		expandIcon,
-		nameStyle.Render(group.Name),
+		nameStyle.Render(displayName),
 		countStr,
 		statusStr,
 	)

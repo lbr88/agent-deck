@@ -178,6 +178,40 @@ func TestClientHelloDoesNotIncludeNodeToken(t *testing.T) {
 	}
 }
 
+func TestClientDispatchesSnapshotCallback(t *testing.T) {
+	snapshots := make(chan NodeSessions, 1)
+	client := NewClient(ClientConfig{
+		OnSnapshot: func(snapshot NodeSessions) {
+			snapshots <- snapshot
+		},
+	}, nil)
+	payload := SnapshotPayload{
+		NodeID:   "node_remote",
+		NodeName: "server1",
+		SentAt:   time.Unix(123, 0).UTC(),
+		Sessions: []SessionInfo{{
+			ID:        "s1",
+			Title:     "worker",
+			Status:    "waiting",
+			GroupPath: "ops",
+		}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal snapshot payload: %v", err)
+	}
+
+	client.dispatch(Envelope{Version: ProtocolVersion, Type: MsgSnapshot, NodeID: "node_remote", Payload: raw})
+
+	got := waitNodeSessions(t, snapshots)
+	if got.Node.ID != "node_remote" || got.Node.Name != "server1" {
+		t.Fatalf("snapshot node = %+v", got.Node)
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].Title != "worker" {
+		t.Fatalf("snapshot sessions = %+v", got.Sessions)
+	}
+}
+
 func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -351,6 +385,17 @@ func waitString(t *testing.T, ch <-chan string) string {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for string")
 		return ""
+	}
+}
+
+func waitNodeSessions(t *testing.T, ch <-chan NodeSessions) NodeSessions {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for node sessions")
+		return NodeSessions{}
 	}
 }
 

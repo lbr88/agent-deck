@@ -26,6 +26,13 @@ type Server struct {
 	httpServer      *http.Server
 	mu              sync.Mutex
 	nodeConnections map[string]int
+	peers           map[*hubPeer]struct{}
+}
+
+type hubPeer struct {
+	nodeID string
+	conn   *websocket.Conn
+	mu     sync.Mutex
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -220,31 +227,35 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	s.retainNodeConnection(node.ID)
-	defer s.releaseNodeConnection(node.ID)
+	peer := &hubPeer{nodeID: node.ID, conn: conn}
+	s.retainNodeConnection(node.ID, peer)
+	defer s.releaseNodeConnection(node.ID, peer)
 
 	welcome, err := MarshalEnvelope(MsgWelcome, node.ID, WelcomePayload{
 		NodeID:   node.ID,
 		NodeName: node.Name,
 	})
 	if err == nil {
-		_ = conn.WriteJSON(welcome)
+		_ = s.writePeerJSON(peer, welcome)
+	}
+	if err := s.sendLatestSnapshots(peer); err != nil {
+		return
 	}
 	for {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
 			return
 		}
-		if err := s.handleNodeEnvelope(node.ID, env); err != nil {
+		if err := s.handleNodeEnvelope(node, env); err != nil {
 			errEnv, marshalErr := MarshalEnvelope(MsgError, node.ID, ErrorPayload{Message: err.Error()})
 			if marshalErr == nil {
-				_ = conn.WriteJSON(errEnv)
+				_ = s.writePeerJSON(peer, errEnv)
 			}
 		}
 	}
 }
 
-func (s *Server) handleNodeEnvelope(nodeID string, env Envelope) error {
+func (s *Server) handleNodeEnvelope(node Node, env Envelope) error {
 	if env.Version != 0 && env.Version != ProtocolVersion {
 		return fmt.Errorf("unsupported protocol version %d", env.Version)
 	}
@@ -259,7 +270,13 @@ func (s *Server) handleNodeEnvelope(nodeID string, env Envelope) error {
 		if snapshot.SentAt.IsZero() {
 			snapshot.SentAt = time.Now().UTC()
 		}
-		return s.store.ReplaceSnapshot(nodeID, snapshot)
+		snapshot.NodeID = node.ID
+		snapshot.NodeName = node.Name
+		if err := s.store.ReplaceSnapshot(node.ID, snapshot); err != nil {
+			return err
+		}
+		s.broadcastSnapshot(node.ID, snapshot)
+		return nil
 	case MsgCommand, MsgCommandResult, MsgAttachOpen, MsgAttachReady, MsgAttachData, MsgAttachResize, MsgAttachClose, MsgAttachClosed:
 		return nil
 	default:
@@ -267,21 +284,26 @@ func (s *Server) handleNodeEnvelope(nodeID string, env Envelope) error {
 	}
 }
 
-func (s *Server) retainNodeConnection(nodeID string) {
+func (s *Server) retainNodeConnection(nodeID string, peer *hubPeer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.nodeConnections == nil {
 		s.nodeConnections = make(map[string]int)
 	}
+	if s.peers == nil {
+		s.peers = make(map[*hubPeer]struct{})
+	}
+	s.peers[peer] = struct{}{}
 	if s.nodeConnections[nodeID] == 0 {
 		_ = s.store.MarkNodeOnline(nodeID)
 	}
 	s.nodeConnections[nodeID]++
 }
 
-func (s *Server) releaseNodeConnection(nodeID string) {
+func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.peers, peer)
 	count := s.nodeConnections[nodeID]
 	if count <= 1 {
 		delete(s.nodeConnections, nodeID)
@@ -289,6 +311,59 @@ func (s *Server) releaseNodeConnection(nodeID string) {
 		return
 	}
 	s.nodeConnections[nodeID] = count - 1
+}
+
+func (s *Server) sendLatestSnapshots(peer *hubPeer) error {
+	snapshots, err := s.store.LatestSessions()
+	if err != nil {
+		return err
+	}
+	for _, latest := range snapshots {
+		payload := SnapshotPayload{
+			NodeID:   latest.Node.ID,
+			NodeName: latest.Node.Name,
+			SentAt:   latest.SentAt,
+			Sessions: append([]SessionInfo(nil), latest.Sessions...),
+		}
+		env, err := MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
+		if err != nil {
+			return err
+		}
+		if err := s.writePeerJSON(peer, env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload) {
+	env, err := MarshalEnvelope(MsgSnapshot, originNodeID, snapshot)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	peers := make([]*hubPeer, 0, len(s.peers))
+	for peer := range s.peers {
+		if peer.nodeID == originNodeID {
+			continue
+		}
+		peers = append(peers, peer)
+	}
+	s.mu.Unlock()
+
+	for _, peer := range peers {
+		_ = s.writePeerJSON(peer, env)
+	}
+}
+
+func (s *Server) writePeerJSON(peer *hubPeer, v any) error {
+	if peer == nil || peer.conn == nil {
+		return nil
+	}
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	return peer.conn.WriteJSON(v)
 }
 
 var nodeWSUpgrader = websocket.Upgrader{

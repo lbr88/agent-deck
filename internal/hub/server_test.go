@@ -154,6 +154,58 @@ func TestHubNodeWebSocketPersistsSnapshot(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret_1"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode node_1: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "server1", hashSecret("node_secret_2"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	first := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret_1")
+	defer first.Close()
+	readTestWelcome(t, first)
+	second := dialTestNodeWebSocket(t, httpServer.URL, "node_2", "node_secret_2")
+	defer second.Close()
+	readTestWelcome(t, second)
+
+	snapshot, err := MarshalEnvelope(MsgSnapshot, "node_1", SnapshotPayload{
+		SentAt: time.Unix(125, 0).UTC(),
+		Sessions: []SessionInfo{{
+			ID:        "s1",
+			Title:     "worker",
+			GroupPath: "ops",
+			Status:    "waiting",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope snapshot: %v", err)
+	}
+	if err := first.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON snapshot: %v", err)
+	}
+
+	var got Envelope
+	if err := second.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	if err := second.ReadJSON(&got); err != nil {
+		t.Fatalf("second node did not receive snapshot fanout: %v", err)
+	}
+	if got.Type != MsgSnapshot || got.NodeID != "node_1" {
+		t.Fatalf("fanout envelope = %+v", got)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("fanout payload: %v", err)
+	}
+	if payload.NodeName != "laptop" || len(payload.Sessions) != 1 || payload.Sessions[0].Title != "worker" {
+		t.Fatalf("fanout payload = %+v", payload)
+	}
+}
+
 func TestHubNodeWebSocketAcceptsHeartbeat(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {

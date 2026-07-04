@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
@@ -80,6 +82,135 @@ func TestHubSessionsRespectStatusFilterAndRenderWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+
+	h.handleHubSnapshot(hub.NodeSessions{
+		Node: hub.Node{ID: "node_server", Name: "server1"},
+		Sessions: []hub.SessionInfo{{
+			ID:        "r1",
+			Title:     "deploy",
+			Tool:      "claude",
+			Status:    "waiting",
+			GroupPath: "ops",
+		}},
+	})
+
+	var msg hubSnapshotMsg
+	select {
+	case msg = <-h.hubSnapshotCh:
+	default:
+		t.Fatal("hub snapshot callback did not enqueue an update message")
+	}
+	model, _ := h.Update(msg)
+	h = model.(*Home)
+
+	got := h.View()
+	if !strings.Contains(got, "server1 / ops") || !strings.Contains(got, "deploy") {
+		t.Fatalf("view missing callback-projected hub session:\n%s", got)
+	}
+}
+
+func TestHubStatusRendersWhenConfigured(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.setHubStatus("hub offline")
+
+	got := h.View()
+	if !strings.Contains(got, "hub offline") {
+		t.Fatalf("view missing hub status:\n%s", got)
+	}
+}
+
+func TestHubRowsRespectGroupScope(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.groupScope = "ops"
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{
+				{ID: "ops-remote", Title: "ops-worker", Tool: "claude", Status: "waiting", GroupPath: "ops"},
+				{ID: "personal-remote", Title: "personal-worker", Tool: "claude", Status: "waiting", GroupPath: "personal"},
+			},
+		},
+	}
+
+	h.rebuildFlatItems()
+
+	got := h.View()
+	if !strings.Contains(got, "server1 / ops") || !strings.Contains(got, "ops-worker") {
+		t.Fatalf("scoped view missing matching hub row:\n%s", got)
+	}
+	if strings.Contains(got, "personal-worker") || strings.Contains(got, "server1 / personal") {
+		t.Fatalf("scoped view included out-of-scope hub row:\n%s", got)
+	}
+}
+
+func TestHubLocalGroupRenameUsesStoredGroupName(t *testing.T) {
+	h := newHubProjectionHome(t, []*session.Instance{
+		{ID: "s1", Title: "api", GroupPath: "default", Tool: "claude", Status: session.StatusRunning},
+	})
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.rebuildFlatItems()
+
+	h.cursor = 0
+	if h.flatItems[h.cursor].Type != session.ItemTypeGroup {
+		t.Fatalf("test setup cursor item = %+v, want group", h.flatItems[h.cursor])
+	}
+	_, _ = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+
+	if got := h.groupDialog.GetValue(); got != "default" {
+		t.Fatalf("rename dialog value = %q, want stored group name without hub prefix", got)
+	}
+}
+
+func TestHubRowsDoNotCreateLocalSessions(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     "deploy",
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("n on hub session returned a command")
+	}
+	if h.newDialog.IsVisible() {
+		t.Fatal("n on hub session opened the local new-session dialog")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "hub session creation is not available yet") {
+		t.Fatalf("n on hub session error = %v", h.err)
+	}
+
+	h.err = nil
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("N on hub session returned a local creation command")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "hub session creation is not available yet") {
+		t.Fatalf("N on hub session error = %v", h.err)
+	}
+}
+
 func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	t.Helper()
 	setXDGTestHome(t)
@@ -94,4 +225,15 @@ func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	}
 	h.groupTree = session.NewGroupTree(instances)
 	return h
+}
+
+func indexHubSession(t *testing.T, h *Home, id string) int {
+	t.Helper()
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubSession.ID == id {
+			return i
+		}
+	}
+	t.Fatalf("hub session %q not found in flatItems: %+v", id, h.flatItems)
+	return -1
 }

@@ -61,6 +61,8 @@ type SessionInfo struct {
 }
 
 type SnapshotPayload struct {
+	NodeID   string        `json:"node_id,omitempty"`
+	NodeName string        `json:"node_name,omitempty"`
 	SentAt   time.Time     `json:"sent_at"`
 	Sessions []SessionInfo `json:"sessions"`
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -36,6 +37,9 @@ type ClientConfig struct {
 	SnapshotInterval   time.Duration
 	ReconnectBaseDelay time.Duration
 	ReconnectMaxDelay  time.Duration
+
+	OnStatus   func(string)
+	OnSnapshot func(NodeSessions)
 }
 
 type Client struct {
@@ -76,10 +80,12 @@ func (c *Client) Connect(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		notifyClientStatus(cfg, "connecting")
 		err = c.connectOnce(ctx, cfg, wsURL, tlsConfig)
 		if ctx.Err() != nil {
 			return nil
 		}
+		notifyClientStatus(cfg, "offline")
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
@@ -123,9 +129,10 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 	}); err != nil {
 		return err
 	}
-	if err := c.publishSnapshot(ctx, conn, cfg.NodeID); err != nil {
+	if err := c.publishSnapshot(ctx, conn, cfg.NodeID, cfg.NodeName); err != nil {
 		return err
 	}
+	notifyClientStatus(cfg, "connected")
 
 	readErr := make(chan error, 1)
 	go func() {
@@ -151,20 +158,26 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 				return err
 			}
 		case <-snapshotTicker.C:
-			if err := c.publishSnapshot(ctx, conn, cfg.NodeID); err != nil {
+			if err := c.publishSnapshot(ctx, conn, cfg.NodeID, cfg.NodeName); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (c *Client) publishSnapshot(ctx context.Context, conn *websocket.Conn, nodeID string) error {
+func (c *Client) publishSnapshot(ctx context.Context, conn *websocket.Conn, nodeID, nodeName string) error {
 	snapshot, err := c.buildSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("build snapshot: %w", err)
 	}
 	if snapshot.SentAt.IsZero() {
 		snapshot.SentAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(snapshot.NodeID) == "" {
+		snapshot.NodeID = nodeID
+	}
+	if strings.TrimSpace(snapshot.NodeName) == "" {
+		snapshot.NodeName = strings.TrimSpace(nodeName)
 	}
 	return writeEnvelope(conn, MsgSnapshot, nodeID, snapshot)
 }
@@ -184,10 +197,40 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 
 func (c *Client) dispatch(env Envelope) {
 	switch env.Type {
+	case MsgSnapshot:
+		if c.cfg.OnSnapshot == nil {
+			return
+		}
+		var snapshot SnapshotPayload
+		if err := json.Unmarshal(env.Payload, &snapshot); err != nil {
+			return
+		}
+		nodeID := strings.TrimSpace(snapshot.NodeID)
+		if nodeID == "" {
+			nodeID = strings.TrimSpace(env.NodeID)
+		}
+		if nodeID == "" {
+			return
+		}
+		nodeName := strings.TrimSpace(snapshot.NodeName)
+		if nodeName == "" {
+			nodeName = nodeID
+		}
+		c.cfg.OnSnapshot(NodeSessions{
+			Node:     Node{ID: nodeID, Name: nodeName},
+			SentAt:   snapshot.SentAt,
+			Sessions: append([]SessionInfo(nil), snapshot.Sessions...),
+		})
 	case MsgWelcome, MsgHeartbeat, MsgCommand, MsgAttachOpen, MsgAttachReady, MsgAttachData, MsgAttachResize, MsgAttachClose, MsgAttachClosed, MsgCommandResult, MsgError:
 		return
 	default:
 		return
+	}
+}
+
+func notifyClientStatus(cfg ClientConfig, status string) {
+	if cfg.OnStatus != nil {
+		cfg.OnStatus(status)
 	}
 }
 
