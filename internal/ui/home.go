@@ -17083,16 +17083,18 @@ func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selec
 	if item.IsLastInGroup {
 		treeConnector = treeLast
 	}
+	treeStyle := DimStyle
 
-	selPrefix := "  "
+	selPrefix := " "
 	if selected {
-		selPrefix = "▶ "
+		selPrefix = SessionSelectionPrefix.Render("▶")
+		treeStyle = TreeConnectorSelStyle
 	}
 
-	b.WriteString(fmt.Sprintf("%s%s  %s %s %s%s\n",
+	b.WriteString(fmt.Sprintf("%s%s%s %s %s%s\n",
 		strings.Repeat(" ", leftGutterWidth),
 		selPrefix,
-		DimStyle.Render(treeConnector),
+		treeStyle.Render(treeConnector),
 		sStyle.Render(statusIcon),
 		titleStyle.Render(titleStr),
 		toolStr,

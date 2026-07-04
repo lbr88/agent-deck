@@ -402,6 +402,66 @@ func TestRenderHubPreviewIncludesCachedResponse(t *testing.T) {
 	}
 }
 
+func TestHubSessionIndentMatchesLocalGroupedSession(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.width = 100
+	h.height = 30
+
+	local := session.NewInstanceWithTool("local-session", "/tmp", "claude")
+	local.Status = session.StatusWaiting
+	local.GroupPath = "ops"
+	localItem := session.Item{
+		Type:          session.ItemTypeSession,
+		Session:       local,
+		Level:         1,
+		IsLastInGroup: false,
+	}
+
+	hubItem := session.Item{
+		Type: session.ItemTypeHubSession,
+		HubSession: &session.HubSessionInfo{
+			ID:     "hub-session",
+			Title:  "hub-session",
+			Tool:   "claude",
+			Status: string(session.StatusWaiting),
+		},
+		Level:         1,
+		IsLastInGroup: false,
+	}
+
+	for _, selected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unselected", true: "selected"}[selected], func(t *testing.T) {
+			var localRow strings.Builder
+			h.renderSessionItem(&localRow, localItem, selected, map[string]sessionRenderState{
+				local.ID: {status: session.StatusWaiting, tool: "claude"},
+			}, h.width)
+
+			var hubRow strings.Builder
+			h.renderHubSessionItem(&hubRow, hubItem, selected)
+
+			localCol := renderedConnectorColumn(localRow.String())
+			hubCol := renderedConnectorColumn(hubRow.String())
+			if localCol < 0 || hubCol < 0 {
+				t.Fatalf("missing tree connector: local=%q hub=%q", stripAnsi(localRow.String()), stripAnsi(hubRow.String()))
+			}
+			if hubCol != localCol {
+				t.Fatalf("hub session connector column = %d, want local grouped session column %d\nlocal: %q\nhub:   %q",
+					hubCol, localCol, stripAnsi(localRow.String()), stripAnsi(hubRow.String()))
+			}
+		})
+	}
+}
+
+func renderedConnectorColumn(row string) int {
+	clean := stripAnsi(row)
+	for _, connector := range []string{treeBranch, treeLast} {
+		if idx := strings.Index(clean, connector); idx >= 0 {
+			return len([]rune(clean[:idx]))
+		}
+	}
+	return -1
+}
+
 func TestHubAttachCmdCallsClient(t *testing.T) {
 	client := &fakeHubAttachClient{}
 	cmd := hubAttachCmd{
