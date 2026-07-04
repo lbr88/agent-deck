@@ -255,6 +255,61 @@ func TestLocalSessionSourceMissingProfileDoesNotCreateStorage(t *testing.T) {
 	}
 }
 
+func TestLocalSessionSourceEmptyProfileUsesAgentDeckProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("AGENTDECK_PROFILE", "hub-env")
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	storage, err := session.NewStorageWithProfile("hub-env")
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	now := time.Unix(987, 0).UTC()
+	if err := storage.Save([]*session.Instance{{
+		ID:             "env-session",
+		Title:          "env worker",
+		ProjectPath:    "/repo",
+		GroupPath:      "default",
+		Tool:           "codex",
+		Status:         session.StatusRunning,
+		CreatedAt:      now.Add(-time.Hour),
+		LastAccessedAt: now,
+		CodexSessionID: "codex-env-session",
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	defaultProfileDir, err := session.GetProfileDir(session.DefaultProfile)
+	if err != nil {
+		t.Fatalf("GetProfileDir(default): %v", err)
+	}
+
+	snap, err := (LocalSessionSource{}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	if len(snap.Sessions) != 1 {
+		t.Fatalf("Sessions length = %d, want 1", len(snap.Sessions))
+	}
+	got := snap.Sessions[0]
+	if got.ID != "env-session" || got.Title != "env worker" || got.Status != "running" {
+		t.Fatalf("session mapping = %+v", got)
+	}
+	if got.DisplaySessionID != "codex-env-session" {
+		t.Fatalf("DisplaySessionID = %q, want codex-env-session", got.DisplaySessionID)
+	}
+	if _, err := os.Stat(filepath.Join(defaultProfileDir, "state.db")); !os.IsNotExist(err) {
+		t.Fatalf("default state.db stat = %v, want not exist", err)
+	}
+}
+
 type observedMessage struct {
 	envelope Envelope
 	payload  json.RawMessage

@@ -205,7 +205,8 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 	default:
 	}
 
-	profileDir, err := session.GetProfileDir(s.Profile)
+	effectiveProfile := session.GetEffectiveProfile(s.Profile)
+	profileDir, err := session.GetProfileDir(effectiveProfile)
 	if err != nil {
 		return SnapshotPayload{}, err
 	}
