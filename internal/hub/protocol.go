@@ -74,6 +74,7 @@ type SnapshotPayload struct {
 
 type CommandPayload struct {
 	CommandID string          `json:"command_id"`
+	NodeID    string          `json:"node_id,omitempty"`
 	Action    string          `json:"action"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -287,6 +288,105 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	gotClosed := readTestEnvelope(t, requester)
 	if gotClosed.Type != MsgAttachClosed || gotClosed.NodeID != "node_owner" {
 		t.Fatalf("requester closed envelope = %+v", gotClosed)
+	}
+}
+
+func TestHubNodeWebSocketRoutesCommandRelay(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_requester", "laptop", hashSecret("requester_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode requester: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
+	defer requester.Close()
+	readTestWelcome(t, requester)
+	owner := dialTestNodeWebSocket(t, httpServer.URL, "node_owner", "owner_secret")
+	defer owner.Close()
+	readTestWelcome(t, owner)
+
+	payload, err := json.Marshal(map[string]string{"session_id": "sess_1", "message": "run tests"})
+	if err != nil {
+		t.Fatalf("marshal action payload: %v", err)
+	}
+	command, err := MarshalEnvelope(MsgCommand, "node_requester", CommandPayload{
+		CommandID: "cmd_1",
+		NodeID:    "node_owner",
+		Action:    "send",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope command: %v", err)
+	}
+	if err := requester.WriteJSON(command); err != nil {
+		t.Fatalf("requester WriteJSON command: %v", err)
+	}
+	gotCommand := readTestEnvelope(t, owner)
+	if gotCommand.Type != MsgCommand || gotCommand.NodeID != "node_requester" {
+		t.Fatalf("owner command envelope = %+v", gotCommand)
+	}
+	var gotPayload CommandPayload
+	if err := json.Unmarshal(gotCommand.Payload, &gotPayload); err != nil {
+		t.Fatalf("decode command payload: %v", err)
+	}
+	if gotPayload.CommandID != "cmd_1" || gotPayload.Action != "send" {
+		t.Fatalf("command payload = %+v", gotPayload)
+	}
+
+	result, err := MarshalEnvelope(MsgCommandResult, "node_owner", CommandResultPayload{CommandID: "cmd_1", OK: true})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope result: %v", err)
+	}
+	if err := owner.WriteJSON(result); err != nil {
+		t.Fatalf("owner WriteJSON result: %v", err)
+	}
+	gotResult := readTestEnvelope(t, requester)
+	if gotResult.Type != MsgCommandResult || gotResult.NodeID != "node_owner" {
+		t.Fatalf("requester result envelope = %+v", gotResult)
+	}
+}
+
+func TestServerCommandResultFromWrongOwnerPeerDoesNotCloseRoute(t *testing.T) {
+	server := &Server{attachRouter: NewAttachRouter()}
+	requester := newFakePeerConn("node_requester", "requester-a")
+	owner := newFakePeerConn("node_owner", "owner-a")
+	wrongOwnerPeer := newFakePeerConn("node_owner", "owner-b")
+	server.attachRouter.Register(owner)
+
+	if err := server.routeCommandFromPeer(context.Background(), requester, CommandPayload{
+		CommandID: "cmd_1",
+		NodeID:    "node_owner",
+		Action:    "send",
+	}); err != nil {
+		t.Fatalf("routeCommandFromPeer: %v", err)
+	}
+	if len(owner.messages) != 1 || owner.messages[0].Type != MsgCommand {
+		t.Fatalf("owner messages = %+v, want command", owner.messages)
+	}
+
+	err := server.routeCommandResultFromPeer(wrongOwnerPeer, CommandResultPayload{CommandID: "cmd_1", OK: true})
+	if err == nil {
+		t.Fatal("wrong owner peer result succeeded, want error")
+	}
+	if len(requester.messages) != 0 {
+		t.Fatalf("requester received %+v from wrong owner peer", requester.messages)
+	}
+	server.mu.Lock()
+	_, stillOpen := server.commandRoutes["cmd_1"]
+	server.mu.Unlock()
+	if !stillOpen {
+		t.Fatal("wrong owner peer closed the command route")
+	}
+
+	if err := server.routeCommandResultFromPeer(owner, CommandResultPayload{CommandID: "cmd_1", OK: true}); err != nil {
+		t.Fatalf("correct owner result: %v", err)
+	}
+	got := requester.pop(t)
+	if got.Type != MsgCommandResult || got.NodeID != "node_owner" {
+		t.Fatalf("requester result = %+v, want command result from node_owner", got)
 	}
 }
 

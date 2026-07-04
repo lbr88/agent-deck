@@ -29,6 +29,7 @@ type Server struct {
 	nodeConnections map[string]int
 	peers           map[*hubPeer]struct{}
 	attachRouter    *AttachRouter
+	commandRoutes   map[string]commandRoute
 }
 
 type hubPeer struct {
@@ -36,6 +37,13 @@ type hubPeer struct {
 	nodeID string
 	conn   *websocket.Conn
 	mu     sync.Mutex
+}
+
+type commandRoute struct {
+	requesterPeer   Peer
+	ownerPeer       Peer
+	requesterNodeID string
+	ownerNodeID     string
 }
 
 func (p *hubPeer) NodeID() string {
@@ -344,8 +352,18 @@ func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPee
 			return fmt.Errorf("decode attach closed: %w", err)
 		}
 		return s.attachRouter.ForwardClosedFromOwnerPeer(peer, payload)
-	case MsgCommand, MsgCommandResult:
-		return nil
+	case MsgCommand:
+		var payload CommandPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode command: %w", err)
+		}
+		return s.routeCommandFromPeer(ctx, peer, payload)
+	case MsgCommandResult:
+		var payload CommandResultPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode command result: %w", err)
+		}
+		return s.routeCommandResultFromPeer(peer, payload)
 	default:
 		return nil
 	}
@@ -381,6 +399,7 @@ func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 		if s.attachRouter != nil {
 			s.attachRouter.Unregister(nodeID)
 		}
+		s.releaseCommandRoutesForPeer(peer)
 		return
 	}
 	s.nodeConnections[nodeID] = count - 1
@@ -397,6 +416,153 @@ func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 		s.attachRouter.Register(replacement)
 	} else if s.attachRouter != nil {
 		s.attachRouter.UnregisterPeer(peer)
+	}
+	s.releaseCommandRoutesForPeer(peer)
+}
+
+func (s *Server) routeCommandFromPeer(ctx context.Context, requester Peer, payload CommandPayload) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	commandID := strings.TrimSpace(payload.CommandID)
+	targetNodeID := strings.TrimSpace(payload.NodeID)
+	if commandID == "" {
+		return fmt.Errorf("command_id is required")
+	}
+	if targetNodeID == "" {
+		return fmt.Errorf("command node_id is required")
+	}
+	if requester == nil || strings.TrimSpace(requester.NodeID()) == "" || strings.TrimSpace(requester.PeerID()) == "" {
+		return fmt.Errorf("command requester peer is required")
+	}
+
+	if s.attachRouter == nil {
+		return fmt.Errorf("command router is not configured")
+	}
+	owner := s.attachRouter.peer(targetNodeID)
+	if owner == nil {
+		err := fmt.Errorf("command owner node %q is not connected", targetNodeID)
+		s.sendCommandFailure(requester, targetNodeID, commandID, err)
+		return err
+	}
+
+	s.mu.Lock()
+	if s.commandRoutes == nil {
+		s.commandRoutes = make(map[string]commandRoute)
+	}
+	if _, exists := s.commandRoutes[commandID]; exists {
+		s.mu.Unlock()
+		err := fmt.Errorf("command %q already exists", commandID)
+		s.sendCommandFailure(requester, targetNodeID, commandID, err)
+		return err
+	}
+	s.commandRoutes[commandID] = commandRoute{
+		requesterPeer:   requester,
+		ownerPeer:       owner,
+		requesterNodeID: requester.NodeID(),
+		ownerNodeID:     targetNodeID,
+	}
+	s.mu.Unlock()
+
+	payload.NodeID = targetNodeID
+	env, err := MarshalEnvelope(MsgCommand, requester.NodeID(), payload)
+	if err != nil {
+		s.removeCommandRoute(commandID)
+		return err
+	}
+	if err := owner.Send(env); err != nil {
+		s.removeCommandRoute(commandID)
+		s.sendCommandFailure(requester, targetNodeID, commandID, err)
+		return err
+	}
+	return nil
+}
+
+func (s *Server) routeCommandResultFromPeer(owner Peer, payload CommandResultPayload) error {
+	commandID := strings.TrimSpace(payload.CommandID)
+	if commandID == "" {
+		return fmt.Errorf("command_id is required")
+	}
+	if owner == nil || strings.TrimSpace(owner.NodeID()) == "" || strings.TrimSpace(owner.PeerID()) == "" {
+		return fmt.Errorf("command owner peer is required")
+	}
+
+	s.mu.Lock()
+	route, ok := s.commandRoutes[commandID]
+	if ok && samePeer(owner, route.ownerPeer) {
+		delete(s.commandRoutes, commandID)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("command %q is not open", commandID)
+	}
+	if !samePeer(owner, route.ownerPeer) {
+		return fmt.Errorf("command %q does not belong to peer %q", commandID, owner.PeerID())
+	}
+
+	env, err := MarshalEnvelope(MsgCommandResult, owner.NodeID(), payload)
+	if err != nil {
+		return err
+	}
+	return route.requesterPeer.Send(env)
+}
+
+func (s *Server) removeCommandRoute(commandID string) {
+	commandID = strings.TrimSpace(commandID)
+	if commandID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.commandRoutes, commandID)
+}
+
+func (s *Server) releaseCommandRoutesForPeer(peer Peer) {
+	if peer == nil || strings.TrimSpace(peer.NodeID()) == "" || strings.TrimSpace(peer.PeerID()) == "" {
+		return
+	}
+	type notification struct {
+		peer Peer
+		env  Envelope
+	}
+	var notifications []notification
+
+	s.mu.Lock()
+	for commandID, route := range s.commandRoutes {
+		switch {
+		case samePeer(route.requesterPeer, peer):
+			delete(s.commandRoutes, commandID)
+		case samePeer(route.ownerPeer, peer):
+			if route.requesterPeer != nil {
+				payload := CommandResultPayload{CommandID: commandID, OK: false, Error: "command owner disconnected"}
+				if env, err := MarshalEnvelope(MsgCommandResult, peer.NodeID(), payload); err == nil {
+					notifications = append(notifications, notification{peer: route.requesterPeer, env: env})
+				}
+			}
+			delete(s.commandRoutes, commandID)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, msg := range notifications {
+		_ = msg.peer.Send(msg.env)
+	}
+}
+
+func (s *Server) sendCommandFailure(requester Peer, ownerNodeID, commandID string, err error) {
+	if requester == nil || err == nil {
+		return
+	}
+	env, marshalErr := MarshalEnvelope(MsgCommandResult, ownerNodeID, CommandResultPayload{
+		CommandID: commandID,
+		OK:        false,
+		Error:     err.Error(),
+	})
+	if marshalErr == nil {
+		_ = requester.Send(env)
 	}
 }
 

@@ -411,6 +411,155 @@ func TestClientOwnerAttachOpenRejectsDuplicateStreamID(t *testing.T) {
 	}
 }
 
+func TestClientOwnerCommandDispatchesActionAndReturnsResult(t *testing.T) {
+	backend := &fakeActionBackend{}
+	messages := make(chan observedMessage, 16)
+	serverReady := make(chan *websocket.Conn, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverReady <- conn
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_owner", WelcomePayload{NodeID: "node_owner", NodeName: "workstation"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_owner",
+		NodeName:          "workstation",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+		ActionBackend:     backend,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	conn := waitWebSocketConn(t, serverReady)
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+
+	actionPayload, err := json.Marshal(map[string]string{"session_id": "sess_1", "message": "run tests"})
+	if err != nil {
+		t.Fatalf("marshal action payload: %v", err)
+	}
+	command, err := MarshalEnvelope(MsgCommand, "node_requester", CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "send",
+		Payload:   actionPayload,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope command: %v", err)
+	}
+	if err := conn.WriteJSON(command); err != nil {
+		t.Fatalf("server WriteJSON command: %v", err)
+	}
+	result := assertNextMessageType(t, messages, MsgCommandResult)
+	var resultPayload CommandResultPayload
+	if err := json.Unmarshal(result.payload, &resultPayload); err != nil {
+		t.Fatalf("decode command result: %v", err)
+	}
+	if !resultPayload.OK || resultPayload.CommandID != "cmd_1" {
+		t.Fatalf("command result = %+v", resultPayload)
+	}
+	if backend.sentSessionID != "sess_1" || backend.sentMessage != "run tests" {
+		t.Fatalf("backend = %+v", backend)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
+func TestClientCommandSendsCommandAndWaitsForResult(t *testing.T) {
+	messages := make(chan observedMessage, 16)
+	serverReady := make(chan *websocket.Conn, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverReady <- conn
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_requester", WelcomePayload{NodeID: "node_requester", NodeName: "laptop"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_requester",
+		NodeName:          "laptop",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	conn := waitWebSocketConn(t, serverReady)
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := client.Command(ctx, "node_owner", "send", map[string]string{
+			"session_id": "sess_1",
+			"message":    "run tests",
+		})
+		resultCh <- err
+	}()
+
+	command := assertNextMessageType(t, messages, MsgCommand)
+	var commandPayload CommandPayload
+	if err := json.Unmarshal(command.payload, &commandPayload); err != nil {
+		t.Fatalf("decode command payload: %v", err)
+	}
+	if commandPayload.CommandID == "" || commandPayload.NodeID != "node_owner" || commandPayload.Action != "send" {
+		t.Fatalf("command payload = %+v", commandPayload)
+	}
+	result, err := MarshalEnvelope(MsgCommandResult, "node_owner", CommandResultPayload{CommandID: commandPayload.CommandID, OK: true})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope result: %v", err)
+	}
+	if err := conn.WriteJSON(result); err != nil {
+		t.Fatalf("server WriteJSON result: %v", err)
+	}
+	if err := waitErr(t, resultCh); err != nil {
+		t.Fatalf("Command returned error: %v", err)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
 func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -941,6 +941,7 @@ type statusUpdateMsg struct {
 
 type hubClientAPI interface {
 	Attach(context.Context, string, string, hub.TerminalSize) error
+	Command(context.Context, string, string, any) (json.RawMessage, error)
 	Close() error
 }
 
@@ -952,6 +953,13 @@ type hubSnapshotMsg struct {
 
 type hubAttachResultMsg struct {
 	err error
+}
+
+type hubActionResultMsg struct {
+	action    string
+	nodeName  string
+	sessionID string
+	err       error
 }
 
 // openSwitcherMsg is emitted when the user pressed the session-switch key while
@@ -1626,6 +1634,13 @@ func (c *runningHubClient) Attach(ctx context.Context, nodeID, sessionID string,
 	return c.client.Attach(ctx, nodeID, sessionID, size)
 }
 
+func (c *runningHubClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.Command(ctx, nodeID, action, payload)
+}
+
 func (c *runningHubClient) Close() error {
 	if c == nil {
 		return nil
@@ -1671,6 +1686,7 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 		CAPemFile:     strings.TrimSpace(cfg.CAPemFile),
 		ServerName:    strings.TrimSpace(cfg.ServerName),
 		AttachBackend: hub.NewTmuxAttachBackend(profile),
+		ActionBackend: hub.LocalActionBackend{Profile: profile},
 		OnStatus: func(status string) {
 			if setStatus != nil {
 				setStatus("hub " + strings.TrimSpace(status))
@@ -5956,6 +5972,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case promptSubmitMsg:
+		if nodeID, hubSessionID, ok := parseHubPromptTarget(msg.instanceID); ok {
+			return h, h.hubCommand(nodeID, "", "send", map[string]string{
+				"session_id": hubSessionID,
+				"message":    msg.text,
+			})
+		}
+
 		// #1410: deliver a one-line prompt to the highlighted session without
 		// attaching, reusing the prompt-state-aware send path (the #1409/#1432
 		// composer-draft guard) so the prompt never merges with a half-typed
@@ -6044,6 +6067,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.setError(fmt.Errorf("hub attach: %w", msg.err))
 		}
 		return h.Update(statusUpdateMsg{})
+
+	case hubActionResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub action failed")
+			h.setError(fmt.Errorf("hub %s: %w", msg.action, msg.err))
+			return h, nil
+		}
+		if msg.action != "" {
+			h.setHubStatus("hub " + msg.action + " sent")
+		}
+		return h, nil
 
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
@@ -8504,6 +8538,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.groupDialog.ShowRenameSession(item.Session.ID, item.Session.Title)
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.groupDialog.ShowRenameSession("remote:"+item.RemoteName+":"+item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.groupDialog.ShowRenameSession(hubPromptTarget(item.HubNodeID, item.HubSession.ID), item.HubSession.Title)
 			}
 		}
 		return h, nil
@@ -8586,8 +8622,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return h, nil
 			}
 			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
-				h.rejectHubSessionCreation()
-				return h, nil
+				return h, h.createHubSession(item)
 			}
 		}
 
@@ -8695,8 +8730,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return h, h.createRemoteSession(item.RemoteName)
 			}
 			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
-				h.rejectHubSessionCreation()
-				return h, nil
+				return h, h.createHubSession(item)
 			}
 		}
 		// Quick create: auto-generated name, smart defaults from group context
@@ -8715,6 +8749,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.confirmDialog.ShowDeleteSession(item.Session.ID, item.Session.Title, item.Session.IsSandboxed(), item.Session.IsWorktree())
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowDeleteRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.setError(fmt.Errorf("hub delete is unavailable; close the remote session instead"))
 			} else if item.Type == session.ItemTypeGroup && item.Path == session.DefaultGroupPath {
 				// Protected default group: surface the block in the same centered modal
 				// used for the delete confirmation, so it can't be clamped off the bottom
@@ -8742,6 +8778,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.confirmDialog.ShowCloseSession(item.Session.ID, item.Session.Title, item.Session.IsSandboxed())
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowCloseRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.hubSessionCommand(item, "stop", nil)
 			}
 		}
 		return h, nil
@@ -8893,6 +8931,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if item.Session != nil && session.IsClaudeCompatible(item.Session.Tool) {
 					h.openPromptInput(item.Session)
 				}
+			case session.ItemTypeHubSession:
+				if item.HubSession != nil {
+					h.promptInputDialog.Show(hubPromptTarget(item.HubNodeID, item.HubSession.ID), item.HubSession.Title)
+				}
 			}
 		}
 		return h, nil
@@ -9011,6 +9053,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				return h, h.restartRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.hubSessionCommand(item, "restart", nil)
 			}
 		}
 		return h, nil
@@ -10386,6 +10430,18 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			newName := h.groupDialog.GetValue()
 			if newName != "" {
 				sessionID := h.groupDialog.GetSessionID()
+
+				if nodeID, hubSessionID, ok := parseHubPromptTarget(sessionID); ok {
+					cmd := h.hubCommand(nodeID, "", "rename", map[string]string{
+						"session_id": hubSessionID,
+						"title":      newName,
+					})
+					h.updateHubSessionTitle(nodeID, hubSessionID, newName)
+					h.rebuildFlatItems()
+					h.groupDialog.Hide()
+					h.lastGTime = time.Time{} // Reset gg-detection so next 'g' opens dialog, not jump-to-top
+					return h, cmd
+				}
 
 				// Handle remote session rename
 				if strings.HasPrefix(sessionID, "remote:") {
@@ -12779,6 +12835,96 @@ func (h *Home) attachHubSession(nodeID, sessionID string) tea.Cmd {
 	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size}, func(err error) tea.Msg {
 		return hubAttachResultMsg{err: err}
 	})
+}
+
+func (h *Home) hubCommand(nodeID, nodeName, action string, payload any) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	action = strings.TrimSpace(action)
+	if nodeID == "" || action == "" {
+		h.setError(fmt.Errorf("hub action target is incomplete"))
+		return nil
+	}
+	return func() tea.Msg {
+		_, err := h.hubClient.Command(h.ctx, nodeID, action, payload)
+		return hubActionResultMsg{action: action, nodeName: nodeName, err: err}
+	}
+}
+
+func (h *Home) hubSessionCommand(item session.Item, action string, extra map[string]string) tea.Cmd {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	payload := map[string]string{"session_id": item.HubSession.ID}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return h.hubCommand(item.HubNodeID, item.HubNodeName, action, payload)
+}
+
+func (h *Home) createHubSession(item session.Item) tea.Cmd {
+	if item.Type != session.ItemTypeHubGroup && item.Type != session.ItemTypeHubSession {
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	nodeName := strings.TrimSpace(item.HubNodeName)
+	groupPath := strings.TrimSpace(item.HubGroupPath)
+	projectPath := ""
+	tool := ""
+	if item.HubSession != nil {
+		if groupPath == "" {
+			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
+		}
+		projectPath = strings.TrimSpace(item.HubSession.ProjectPath)
+		tool = strings.TrimSpace(item.HubSession.Tool)
+	}
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	req := hub.CreateSessionRequest{
+		Title:       session.GenerateSessionName(),
+		Tool:        tool,
+		ProjectPath: projectPath,
+		GroupPath:   groupPath,
+	}
+	return h.hubCommand(nodeID, nodeName, "create", req)
+}
+
+func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			snapshot.Sessions[i].Title = title
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func hubPromptTarget(nodeID, sessionID string) string {
+	return "hub:" + nodeID + ":" + sessionID
+}
+
+func parseHubPromptTarget(target string) (nodeID, sessionID string, ok bool) {
+	parts := strings.SplitN(target, ":", 3)
+	if len(parts) != 3 || parts[0] != "hub" || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
 }
 
 // remoteAttachCmd implements tea.ExecCommand for remote SSH attach

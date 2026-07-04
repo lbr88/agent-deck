@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -171,19 +172,22 @@ func TestHubLocalGroupRenameUsesStoredGroupName(t *testing.T) {
 	}
 }
 
-func TestHubRowsDoNotCreateLocalSessions(t *testing.T) {
+func TestHubRowsCreateSessionsThroughHubCommand(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
 	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
 	h.hubSessions = map[string]hub.NodeSessions{
 		"node_server": {
 			Node: hub.Node{ID: "node_server", Name: "server1"},
 			Sessions: []hub.SessionInfo{{
-				ID:        "r1",
-				Title:     "deploy",
-				Tool:      "claude",
-				Status:    "waiting",
-				GroupPath: "ops",
+				ID:          "r1",
+				Title:       "deploy",
+				Tool:        "claude",
+				Status:      "waiting",
+				GroupPath:   "ops",
+				ProjectPath: "/srv/app",
 			}},
 		},
 	}
@@ -193,23 +197,129 @@ func TestHubRowsDoNotCreateLocalSessions(t *testing.T) {
 	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	h = model.(*Home)
 	if cmd != nil {
-		t.Fatal("n on hub session returned a command")
+		msg := cmd()
+		if result, ok := msg.(hubActionResultMsg); !ok || result.err != nil {
+			t.Fatalf("n hub command msg = %#v", msg)
+		}
+	} else {
+		t.Fatal("n on hub session returned no command")
 	}
 	if h.newDialog.IsVisible() {
 		t.Fatal("n on hub session opened the local new-session dialog")
 	}
-	if h.err == nil || !strings.Contains(h.err.Error(), "hub session creation is not available yet") {
-		t.Fatalf("n on hub session error = %v", h.err)
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands after n = %d, want 1", len(client.commands))
+	}
+	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "create" {
+		t.Fatalf("n command = %+v", got)
+	}
+	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
+	if !ok {
+		t.Fatalf("n payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	}
+	if req.GroupPath != "ops" || req.ProjectPath != "/srv/app" || req.Tool != "claude" || strings.TrimSpace(req.Title) == "" {
+		t.Fatalf("n create request = %+v", req)
 	}
 
-	h.err = nil
 	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
 	h = model.(*Home)
-	if cmd != nil {
-		t.Fatal("N on hub session returned a local creation command")
+	if cmd == nil {
+		t.Fatal("N on hub session returned no command")
 	}
-	if h.err == nil || !strings.Contains(h.err.Error(), "hub session creation is not available yet") {
-		t.Fatalf("N on hub session error = %v", h.err)
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("N hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if len(client.commands) != 2 {
+		t.Fatalf("hub commands after N = %d, want 2", len(client.commands))
+	}
+	if got := client.commands[1]; got.nodeID != "node_server" || got.action != "create" {
+		t.Fatalf("N command = %+v", got)
+	}
+}
+
+func TestHubSessionStopRestartAndPromptUseHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("D on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("D hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "stop", map[string]string{
+		"session_id": "r1",
+	})
+
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("R on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("R hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[1], "node_server", "restart", map[string]string{
+		"session_id": "r1",
+	})
+
+	key := defaultHotkeyBindings[hotkeyPromptSession]
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("prompt hotkey should open the dialog without returning a command")
+	}
+	if !h.promptInputDialog.IsVisible() {
+		t.Fatal("prompt hotkey on hub session did not open prompt dialog")
+	}
+	if got := h.promptInputDialog.instanceID; got != hubPromptTarget("node_server", "r1") {
+		t.Fatalf("prompt target = %q, want hub target", got)
+	}
+	model, cmd = h.updateInner(promptSubmitMsg{instanceID: h.promptInputDialog.instanceID, text: "run tests"})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub prompt submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("prompt hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[2], "node_server", "send", map[string]string{
+		"session_id": "r1",
+		"message":    "run tests",
+	})
+}
+
+func TestHubSessionRenameUsesHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("rename hotkey should only open the dialog")
+	}
+	if got := h.groupDialog.GetSessionID(); got != hubPromptTarget("node_server", "r1") {
+		t.Fatalf("rename target = %q, want hub target", got)
+	}
+	h.groupDialog.nameInput.SetValue("deploy renamed")
+
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub rename submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("rename hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "rename", map[string]string{
+		"session_id": "r1",
+		"title":      "deploy renamed",
+	})
+	if got := h.hubSessions["node_server"].Sessions[0].Title; got != "deploy renamed" {
+		t.Fatalf("cached hub title = %q, want deploy renamed", got)
+	}
+	if h.groupDialog.IsVisible() {
+		t.Fatal("rename dialog should hide after submit")
 	}
 }
 
@@ -304,10 +414,37 @@ func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	return h
 }
 
+func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
+	t.Helper()
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:          "r1",
+				Title:       "deploy",
+				Tool:        "claude",
+				Status:      "waiting",
+				GroupPath:   "ops",
+				ProjectPath: "/srv/app",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+	return h, client
+}
+
 type fakeHubAttachClient struct {
-	nodeID    string
-	sessionID string
-	size      hub.TerminalSize
+	nodeID     string
+	sessionID  string
+	size       hub.TerminalSize
+	commands   []hubCommandCall
+	commandErr error
 }
 
 func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
@@ -317,8 +454,38 @@ func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID stri
 	return nil
 }
 
+func (c *fakeHubAttachClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
+	c.commands = append(c.commands, hubCommandCall{nodeID: nodeID, action: action, payload: payload})
+	if c.commandErr != nil {
+		return nil, c.commandErr
+	}
+	return nil, nil
+}
+
 func (c *fakeHubAttachClient) Close() error {
 	return nil
+}
+
+type hubCommandCall struct {
+	nodeID  string
+	action  string
+	payload any
+}
+
+func assertHubCommand(t *testing.T, got hubCommandCall, nodeID, action string, wantPayload map[string]string) {
+	t.Helper()
+	if got.nodeID != nodeID || got.action != action {
+		t.Fatalf("hub command = %+v, want node=%q action=%q", got, nodeID, action)
+	}
+	payload, ok := got.payload.(map[string]string)
+	if !ok {
+		t.Fatalf("hub command payload type = %T, want map[string]string", got.payload)
+	}
+	for k, v := range wantPayload {
+		if payload[k] != v {
+			t.Fatalf("hub command payload[%q] = %q, want %q (payload=%v)", k, payload[k], v, payload)
+		}
+	}
 }
 
 func indexHubSession(t *testing.T, h *Home, id string) int {

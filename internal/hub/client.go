@@ -50,6 +50,7 @@ type ClientConfig struct {
 	OnSnapshot func(NodeSessions)
 
 	AttachBackend AttachBackend
+	ActionBackend ActionBackend
 }
 
 type Client struct {
@@ -60,6 +61,7 @@ type Client struct {
 	activeConn       *clientConn
 	ownerStreams     map[string]*ownerAttachStream
 	requesterStreams map[string]*requesterAttachStream
+	commandWaiters   map[string]*commandWaiter
 }
 
 func NewClient(cfg ClientConfig, source SessionSource) *Client {
@@ -115,6 +117,11 @@ type requesterAttachStream struct {
 	closed   chan AttachClosePayload
 }
 
+type commandWaiter struct {
+	commandID string
+	result    chan CommandResultPayload
+}
+
 func newRequesterAttachStream(streamID string) *requesterAttachStream {
 	return &requesterAttachStream{
 		streamID: streamID,
@@ -144,6 +151,13 @@ func (c *Client) clearActiveConn(conn *clientConn) {
 		}
 	}
 	c.requesterStreams = nil
+	for _, waiter := range c.commandWaiters {
+		select {
+		case waiter.result <- CommandResultPayload{CommandID: waiter.commandID, OK: false, Error: "hub disconnected"}:
+		default:
+		}
+	}
+	c.commandWaiters = nil
 	c.mu.Unlock()
 
 	for _, stream := range ownerStreams {
@@ -347,11 +361,49 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 		c.handleAttachClose(conn, env)
 	case MsgAttachClosed:
 		c.handleAttachClosed(env)
-	case MsgWelcome, MsgHeartbeat, MsgCommand, MsgCommandResult, MsgError:
+	case MsgCommand:
+		c.handleCommand(ctx, conn, env)
+	case MsgCommandResult:
+		c.handleCommandResult(env)
+	case MsgWelcome, MsgHeartbeat, MsgError:
 		return
 	default:
 		return
 	}
+}
+
+func (c *Client) handleCommandResult(env Envelope) {
+	var payload CommandResultPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	waiter := c.unregisterCommandWaiter(payload.CommandID)
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter.result <- payload:
+	default:
+	}
+}
+
+func (c *Client) handleCommand(ctx context.Context, conn *clientConn, env Envelope) {
+	if conn == nil {
+		return
+	}
+	var payload CommandPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	result := CommandResultPayload{CommandID: payload.CommandID, OK: true}
+	raw, err := (CommandDispatcher{Backend: c.cfg.ActionBackend}).Dispatch(ctx, payload)
+	if err != nil {
+		result.OK = false
+		result.Error = err.Error()
+	} else {
+		result.Result = raw
+	}
+	_ = conn.writeEnvelope(MsgCommandResult, c.cfg.NodeID, result)
 }
 
 func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Envelope) {
@@ -582,6 +634,75 @@ func (c *Client) unregisterRequesterStream(streamID string) *requesterAttachStre
 	stream := c.requesterStreams[streamID]
 	delete(c.requesterStreams, streamID)
 	return stream
+}
+
+func (c *Client) registerCommandWaiter(waiter *commandWaiter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.commandWaiters == nil {
+		c.commandWaiters = make(map[string]*commandWaiter)
+	}
+	c.commandWaiters[waiter.commandID] = waiter
+}
+
+func (c *Client) unregisterCommandWaiter(commandID string) *commandWaiter {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	commandID = strings.TrimSpace(commandID)
+	waiter := c.commandWaiters[commandID]
+	delete(c.commandWaiters, commandID)
+	return waiter
+}
+
+func (c *Client) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	action = strings.TrimSpace(action)
+	if nodeID == "" {
+		return nil, fmt.Errorf("hub command node id is required")
+	}
+	if action == "" {
+		return nil, fmt.Errorf("hub command action is required")
+	}
+	conn := c.currentConn()
+	if conn == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	commandID, err := newSecret("cmd_")
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal command payload: %w", err)
+	}
+	waiter := &commandWaiter{commandID: commandID, result: make(chan CommandResultPayload, 1)}
+	c.registerCommandWaiter(waiter)
+	defer c.unregisterCommandWaiter(commandID)
+
+	if err := conn.writeEnvelope(MsgCommand, c.cfg.NodeID, CommandPayload{
+		CommandID: commandID,
+		NodeID:    nodeID,
+		Action:    action,
+		Payload:   raw,
+	}); err != nil {
+		return nil, err
+	}
+
+	select {
+	case result := <-waiter.result:
+		if !result.OK {
+			if strings.TrimSpace(result.Error) == "" {
+				return nil, fmt.Errorf("hub command %s failed", action)
+			}
+			return nil, fmt.Errorf("hub command %s failed: %s", action, result.Error)
+		}
+		return result.Result, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (c *Client) Attach(ctx context.Context, nodeID, sessionID string, size TerminalSize) error {
