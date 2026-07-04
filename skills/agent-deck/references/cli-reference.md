@@ -594,18 +594,44 @@ agent-deck hub connect
 
 Connects this node to the configured hub without starting the TUI. Useful for service-style nodes.
 
+### hub status
+
+```bash
+agent-deck hub status [--json]
+```
+
+Shows the configured hub URL, this node's hub id/name, online status, and admin role.
+
 ### hub nodes
 
 ```bash
 agent-deck hub nodes [--local] [--data <dir>] [--json]
 agent-deck hub nodes promote [--local] [--data <dir>] <node-id>
+agent-deck hub nodes demote [--local] [--data <dir>] <node-id>
+agent-deck hub nodes rename [--local] [--data <dir>] <node-id> <name>
+agent-deck hub nodes revoke [--local] [--data <dir>] <node-id>
 ```
 
-Lists registered hub nodes and their online/offline status. Joined admin nodes manage nodes through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine.
+Lists and manages registered hub nodes. Joined admin nodes manage nodes through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine. Demote and revoke refuse to remove the last admin node.
 
 | Flag | Description |
 |------|-------------|
 | `--json` | Output nodes as JSON |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
+
+### hub invites
+
+```bash
+agent-deck hub invites [--local] [--data <dir>] [--json]
+agent-deck hub invites revoke [--local] [--data <dir>] <invite-id-or-token>
+```
+
+Lists and revokes hub invites. Joined admin nodes manage invites through the configured hub by default. List output shows invite IDs and statuses, never invite tokens or token hashes.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output invites as JSON |
 | `--local` | Use the local hub data directory instead of the configured hub |
 | `--data <dir>` | Local hub data directory |
 

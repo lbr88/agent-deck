@@ -70,8 +70,26 @@ type hubNodesResult struct {
 	Nodes []hubNodeOutput `json:"nodes"`
 }
 
+type hubStatusResult struct {
+	URL  string        `json:"url"`
+	Node hubNodeOutput `json:"node"`
+}
+
+type hubInvitesResult struct {
+	Invites []hubInviteOutput `json:"invites"`
+}
+
 type hubPromoteNodeRequest struct {
 	NodeID string `json:"node_id"`
+}
+
+type hubRenameNodeRequest struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+}
+
+type hubRevokeInviteRequest struct {
+	InviteID string `json:"invite_id"`
 }
 
 type hubBootstrapInviteResult struct {
@@ -98,6 +116,17 @@ type hubNodeOutput struct {
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 }
 
+type hubInviteOutput struct {
+	ID              string     `json:"id,omitempty"`
+	NodeName        string     `json:"node_name"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	ConsumedAt      *time.Time `json:"consumed_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	Admin           bool       `json:"admin"`
+	CreatedByNodeID string     `json:"created_by_node_id,omitempty"`
+	Status          string     `json:"status"`
+}
+
 func handleHub(profile string, args []string) {
 	if len(args) == 0 {
 		printHubUsage(os.Stderr)
@@ -112,8 +141,12 @@ func handleHub(profile string, args []string) {
 		err = handleHubInvite(args[1:])
 	case "join":
 		err = handleHubJoin(args[1:])
+	case "status":
+		err = handleHubStatus(args[1:])
 	case "nodes":
 		err = handleHubNodes(args[1:])
+	case "invites":
+		err = handleHubInvites(args[1:])
 	case "connect":
 		err = handleHubConnect(profile, args[1:])
 	case "help", "--help", "-h":
@@ -586,6 +619,58 @@ func hubNodeToken(settings session.HubSettings) (string, error) {
 	return nodeToken, nil
 }
 
+func hubRemoteJSON(settings session.HubSettings, method, path string, requestBody any, responseBody any) error {
+	endpoint, err := hubAuthenticatedEndpoint(strings.TrimSpace(settings.URL), strings.TrimSpace(settings.NodeID), path)
+	if err != nil {
+		return err
+	}
+	nodeToken, err := hubNodeToken(settings)
+	if err != nil {
+		return err
+	}
+	var body io.Reader
+	if requestBody != nil {
+		data, err := json.Marshal(requestBody)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		TLSSkipVerify:    settings.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
+		ServerName:       strings.TrimSpace(settings.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(method, endpoint, body)
+	if err != nil {
+		return err
+	}
+	if requestBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("hub request failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	if responseBody == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
+		return fmt.Errorf("decode hub response: %w", err)
+	}
+	return nil
+}
+
 func handleHubJoin(args []string) error {
 	defaultTokenPath, err := defaultHubTokenPath()
 	if err != nil {
@@ -655,9 +740,54 @@ func handleHubJoin(args []string) error {
 	return nil
 }
 
+func handleHubStatus(args []string) error {
+	fs := flag.NewFlagSet("hub status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Output hub status as JSON")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+	if !config.Hub.Enabled() {
+		return fmt.Errorf("hub is not configured; run agent-deck hub join first")
+	}
+	result, err := fetchRemoteHubStatus(config.Hub)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+	role := "node"
+	if result.Node.Admin {
+		role = "admin"
+	}
+	fmt.Printf("Hub: %s\n", result.URL)
+	fmt.Printf("Node: %s\t%s\t%s\t%s\n", result.Node.ID, result.Node.Name, result.Node.Status, role)
+	return nil
+}
+
 func handleHubNodes(args []string) error {
-	if len(args) > 0 && args[0] == "promote" {
-		return handleHubNodesPromote(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "promote":
+			return handleHubNodesSetAdmin(args[1:], true)
+		case "demote":
+			return handleHubNodesSetAdmin(args[1:], false)
+		case "rename":
+			return handleHubNodesRename(args[1:])
+		case "revoke":
+			return handleHubNodesRevoke(args[1:])
+		}
 	}
 	defaultData, err := defaultHubDataDir()
 	if err != nil {
@@ -723,15 +853,19 @@ func printHubNodes(nodeViews []hubNodeOutput, jsonOutput bool) error {
 	return nil
 }
 
-func handleHubNodesPromote(args []string) error {
+func handleHubNodesSetAdmin(args []string, admin bool) error {
 	defaultData, err := defaultHubDataDir()
 	if err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("hub nodes promote", flag.ContinueOnError)
+	action := "promote"
+	if !admin {
+		action = "demote"
+	}
+	fs := flag.NewFlagSet("hub nodes "+action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	dataDir := fs.String("data", defaultData, "Hub data directory")
-	local := fs.Bool("local", false, "Promote the node in the local hub data directory instead of the configured hub")
+	local := fs.Bool("local", false, "Manage the node in the local hub data directory instead of the configured hub")
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -739,7 +873,7 @@ func handleHubNodesPromote(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: agent-deck hub nodes promote [--local] [--data dir] <node-id>")
+		return fmt.Errorf("usage: agent-deck hub nodes %s [--local] [--data dir] <node-id>", action)
 	}
 	nodeID := strings.TrimSpace(fs.Arg(0))
 	if nodeID == "" {
@@ -751,11 +885,11 @@ func handleHubNodesPromote(args []string) error {
 			return fmt.Errorf("load user config: %w", err)
 		}
 		if config.Hub.Enabled() {
-			node, err := promoteRemoteHubNode(config.Hub, nodeID)
+			node, err := setRemoteHubNodeAdmin(config.Hub, nodeID, admin)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Promoted %s to hub admin\n", node.ID)
+			printNodeAdminChange(node.ID, admin)
 			return nil
 		}
 	}
@@ -764,100 +898,358 @@ func handleHubNodesPromote(args []string) error {
 		return err
 	}
 	defer store.Close()
-	if err := store.SetNodeAdmin(nodeID, true); err != nil {
+	if !admin {
+		if err := ensureLocalCanRemoveAdmin(store, nodeID); err != nil {
+			return err
+		}
+	}
+	if err := store.SetNodeAdmin(nodeID, admin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("hub node %s not found", nodeID)
 		}
 		return err
 	}
-	fmt.Printf("Promoted %s to hub admin\n", nodeID)
+	printNodeAdminChange(nodeID, admin)
+	return nil
+}
+
+func handleHubNodesRename(args []string) error {
+	defaultData, err := defaultHubDataDir()
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("hub nodes rename", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", defaultData, "Hub data directory")
+	local := fs.Bool("local", false, "Rename the node in the local hub data directory instead of the configured hub")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: agent-deck hub nodes rename [--local] [--data dir] <node-id> <name>")
+	}
+	nodeID := strings.TrimSpace(fs.Arg(0))
+	name := strings.TrimSpace(fs.Arg(1))
+	if nodeID == "" || name == "" {
+		return fmt.Errorf("node id and name are required")
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			node, err := renameRemoteHubNode(config.Hub, nodeID, name)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Renamed %s to %s\n", node.ID, node.Name)
+			return nil
+		}
+	}
+	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	node, err := store.RenameNode(nodeID, name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("hub node %s not found", nodeID)
+		}
+		return err
+	}
+	fmt.Printf("Renamed %s to %s\n", node.ID, node.Name)
+	return nil
+}
+
+func handleHubNodesRevoke(args []string) error {
+	defaultData, err := defaultHubDataDir()
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("hub nodes revoke", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", defaultData, "Hub data directory")
+	local := fs.Bool("local", false, "Revoke the node in the local hub data directory instead of the configured hub")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub nodes revoke [--local] [--data dir] <node-id>")
+	}
+	nodeID := strings.TrimSpace(fs.Arg(0))
+	if nodeID == "" {
+		return fmt.Errorf("node id is required")
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			if err := revokeRemoteHubNode(config.Hub, nodeID); err != nil {
+				return err
+			}
+			fmt.Printf("Revoked hub node %s\n", nodeID)
+			return nil
+		}
+	}
+	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := ensureLocalCanRemoveAdmin(store, nodeID); err != nil {
+		return err
+	}
+	if err := store.RevokeNode(nodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("hub node %s not found", nodeID)
+		}
+		return err
+	}
+	fmt.Printf("Revoked hub node %s\n", nodeID)
+	return nil
+}
+
+func printNodeAdminChange(nodeID string, admin bool) {
+	if admin {
+		fmt.Printf("Promoted %s to hub admin\n", nodeID)
+		return
+	}
+	fmt.Printf("Demoted %s from hub admin\n", nodeID)
+}
+
+func ensureLocalCanRemoveAdmin(store *hub.Store, nodeID string) error {
+	nodes, err := store.Nodes()
+	if err != nil {
+		return err
+	}
+	adminCount := 0
+	targetAdmin := false
+	targetFound := false
+	for _, node := range nodes {
+		if node.Admin {
+			adminCount++
+		}
+		if node.ID == nodeID {
+			targetFound = true
+			targetAdmin = node.Admin
+		}
+	}
+	if !targetFound {
+		return fmt.Errorf("hub node %s not found", nodeID)
+	}
+	if targetAdmin && adminCount <= 1 {
+		return fmt.Errorf("cannot remove the last hub admin")
+	}
 	return nil
 }
 
 func listRemoteHubNodes(settings session.HubSettings) ([]hubNodeOutput, error) {
-	endpoint, err := hubAuthenticatedEndpoint(strings.TrimSpace(settings.URL), strings.TrimSpace(settings.NodeID), "/api/nodes")
-	if err != nil {
-		return nil, err
-	}
-	nodeToken, err := hubNodeToken(settings)
-	if err != nil {
-		return nil, err
-	}
-	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
-		TLSSkipVerify:    settings.TLSSkipVerify,
-		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
-		ServerName:       strings.TrimSpace(settings.ServerName),
-		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+nodeToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("hub nodes failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
 	var result hubNodesResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode hub nodes response: %w", err)
+	if err := hubRemoteJSON(settings, http.MethodGet, "/api/nodes", nil, &result); err != nil {
+		return nil, err
 	}
 	return result.Nodes, nil
 }
 
-func promoteRemoteHubNode(settings session.HubSettings, nodeID string) (hubNodeOutput, error) {
-	endpoint, err := hubAuthenticatedEndpoint(strings.TrimSpace(settings.URL), strings.TrimSpace(settings.NodeID), "/api/nodes/promote")
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	nodeToken, err := hubNodeToken(settings)
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	body, err := json.Marshal(hubPromoteNodeRequest{NodeID: strings.TrimSpace(nodeID)})
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
-		TLSSkipVerify:    settings.TLSSkipVerify,
-		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
-		ServerName:       strings.TrimSpace(settings.ServerName),
-		PinnedCertSHA256: strings.TrimSpace(settings.PinnedCertSHA256),
-	})
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+nodeToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		return hubNodeOutput{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return hubNodeOutput{}, fmt.Errorf("hub nodes promote failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	var result hubNodeOutput
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return hubNodeOutput{}, fmt.Errorf("decode hub nodes promote response: %w", err)
-	}
-	if strings.TrimSpace(result.ID) == "" {
-		return hubNodeOutput{}, fmt.Errorf("hub nodes promote response missing node id")
+func fetchRemoteHubStatus(settings session.HubSettings) (hubStatusResult, error) {
+	var result hubStatusResult
+	if err := hubRemoteJSON(settings, http.MethodGet, "/api/status", nil, &result); err != nil {
+		return hubStatusResult{}, err
 	}
 	return result, nil
+}
+
+func setRemoteHubNodeAdmin(settings session.HubSettings, nodeID string, admin bool) (hubNodeOutput, error) {
+	path := "/api/nodes/promote"
+	if !admin {
+		path = "/api/nodes/demote"
+	}
+	var result hubNodeOutput
+	if err := hubRemoteJSON(settings, http.MethodPost, path, hubPromoteNodeRequest{NodeID: strings.TrimSpace(nodeID)}, &result); err != nil {
+		return hubNodeOutput{}, err
+	}
+	return requireHubNodeResult(result)
+}
+
+func renameRemoteHubNode(settings session.HubSettings, nodeID, name string) (hubNodeOutput, error) {
+	var result hubNodeOutput
+	if err := hubRemoteJSON(settings, http.MethodPost, "/api/nodes/rename", hubRenameNodeRequest{
+		NodeID: strings.TrimSpace(nodeID),
+		Name:   strings.TrimSpace(name),
+	}, &result); err != nil {
+		return hubNodeOutput{}, err
+	}
+	return requireHubNodeResult(result)
+}
+
+func revokeRemoteHubNode(settings session.HubSettings, nodeID string) error {
+	return hubRemoteJSON(settings, http.MethodPost, "/api/nodes/revoke", hubPromoteNodeRequest{NodeID: strings.TrimSpace(nodeID)}, nil)
+}
+
+func requireHubNodeResult(result hubNodeOutput) (hubNodeOutput, error) {
+	if strings.TrimSpace(result.ID) == "" {
+		return hubNodeOutput{}, fmt.Errorf("hub response missing node id")
+	}
+	return result, nil
+}
+
+func listRemoteHubInvites(settings session.HubSettings) ([]hubInviteOutput, error) {
+	var result hubInvitesResult
+	if err := hubRemoteJSON(settings, http.MethodGet, "/api/invites", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Invites, nil
+}
+
+func revokeRemoteHubInvite(settings session.HubSettings, inviteID string) error {
+	return hubRemoteJSON(settings, http.MethodPost, "/api/invites/revoke", hubRevokeInviteRequest{InviteID: strings.TrimSpace(inviteID)}, nil)
+}
+
+func handleHubInvites(args []string) error {
+	if len(args) > 0 && args[0] == "revoke" {
+		return handleHubInvitesRevoke(args[1:])
+	}
+	defaultData, err := defaultHubDataDir()
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("hub invites", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", defaultData, "Hub data directory")
+	jsonOutput := fs.Bool("json", false, "Output invites as JSON")
+	local := fs.Bool("local", false, "List invites from the local hub data directory instead of the configured hub")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			invites, err := listRemoteHubInvites(config.Hub)
+			if err != nil {
+				return err
+			}
+			return printHubInvites(invites, *jsonOutput)
+		}
+	}
+	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	invites, err := store.Invites()
+	if err != nil {
+		return err
+	}
+	return printHubInvites(hubInviteOutputs(invites), *jsonOutput)
+}
+
+func handleHubInvitesRevoke(args []string) error {
+	defaultData, err := defaultHubDataDir()
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("hub invites revoke", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dataDir := fs.String("data", defaultData, "Hub data directory")
+	local := fs.Bool("local", false, "Revoke the invite in the local hub data directory instead of the configured hub")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub invites revoke [--local] [--data dir] <invite-id-or-token>")
+	}
+	inviteID := strings.TrimSpace(fs.Arg(0))
+	if inviteID == "" {
+		return fmt.Errorf("invite id or token is required")
+	}
+	if !*local && !flagWasSet(fs, "data") {
+		config, err := session.LoadUserConfig()
+		if err != nil {
+			return fmt.Errorf("load user config: %w", err)
+		}
+		if config.Hub.Enabled() {
+			if err := revokeRemoteHubInvite(config.Hub, inviteID); err != nil {
+				return err
+			}
+			fmt.Printf("Revoked hub invite %s\n", inviteID)
+			return nil
+		}
+	}
+	store, err := hub.OpenStore(filepath.Join(*dataDir, "hub.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.RevokeInvite(inviteID); err != nil {
+		if errors.Is(err, hub.ErrInviteNotFound) {
+			return fmt.Errorf("hub invite %s not found", inviteID)
+		}
+		return err
+	}
+	fmt.Printf("Revoked hub invite %s\n", inviteID)
+	return nil
+}
+
+func printHubInvites(invites []hubInviteOutput, jsonOutput bool) error {
+	if jsonOutput {
+		return json.NewEncoder(os.Stdout).Encode(invites)
+	}
+	if len(invites) == 0 {
+		fmt.Println("No hub invites found.")
+		return nil
+	}
+	for _, invite := range invites {
+		role := "node"
+		if invite.Admin {
+			role = "admin"
+		}
+		expires := ""
+		if !invite.ExpiresAt.IsZero() {
+			expires = invite.ExpiresAt.Format(time.RFC3339)
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\n", invite.ID, invite.NodeName, invite.Status, role, expires)
+	}
+	return nil
+}
+
+func hubInviteOutputs(invites []hub.Invite) []hubInviteOutput {
+	out := make([]hubInviteOutput, 0, len(invites))
+	now := time.Now()
+	for _, invite := range invites {
+		out = append(out, hubInviteOutput{
+			ID:              invite.ID,
+			NodeName:        invite.NodeName,
+			ExpiresAt:       invite.ExpiresAt,
+			ConsumedAt:      invite.ConsumedAt,
+			RevokedAt:       invite.RevokedAt,
+			Admin:           invite.Admin,
+			CreatedByNodeID: invite.CreatedByNodeID,
+			Status:          invite.Status(now),
+		})
+	}
+	return out
 }
 
 func handleHubConnect(profile string, args []string) error {
@@ -1184,6 +1576,8 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  serve   Start the TLS hub server")
 	fmt.Fprintln(w, "  invite  Create a single-use invite and print the join command")
 	fmt.Fprintln(w, "  join    Join this agent-deck node to a hub")
+	fmt.Fprintln(w, "  status  Show this node's configured hub status")
 	fmt.Fprintln(w, "  nodes   List registered hub nodes")
+	fmt.Fprintln(w, "  invites List hub invites")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }

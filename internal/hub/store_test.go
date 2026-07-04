@@ -47,6 +47,48 @@ func TestStoreInviteConsumeAllowsSubSecondTTL(t *testing.T) {
 	}
 }
 
+func TestStoreListsAndRevokesInvites(t *testing.T) {
+	store := openTestStore(t)
+	token, err := store.CreateInviteWithOptions(CreateInviteOptions{
+		NodeName:        "desktop",
+		TTL:             time.Hour,
+		Admin:           true,
+		CreatedByNodeID: "node_admin",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteWithOptions: %v", err)
+	}
+
+	invites, err := store.Invites()
+	if err != nil {
+		t.Fatalf("Invites: %v", err)
+	}
+	if len(invites) != 1 {
+		t.Fatalf("invites length = %d, want 1: %+v", len(invites), invites)
+	}
+	invite := invites[0]
+	if invite.ID == "" || invite.TokenHash == "" || invite.NodeName != "desktop" || !invite.Admin || invite.CreatedByNodeID != "node_admin" {
+		t.Fatalf("invite = %+v, want listed admin invite with id", invite)
+	}
+	if invite.Status(time.Now()) != "pending" {
+		t.Fatalf("invite status = %q, want pending", invite.Status(time.Now()))
+	}
+
+	if err := store.RevokeInvite(invite.ID); err != nil {
+		t.Fatalf("RevokeInvite by id: %v", err)
+	}
+	if _, err := store.ConsumeInvite(token); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("ConsumeInvite after revoke = %v, want ErrInviteInvalid", err)
+	}
+	invites, err = store.Invites()
+	if err != nil {
+		t.Fatalf("Invites after revoke: %v", err)
+	}
+	if len(invites) != 1 || invites[0].RevokedAt == nil || invites[0].Status(time.Now()) != "revoked" {
+		t.Fatalf("revoked invite = %+v, want revoked status", invites)
+	}
+}
+
 func TestStoreAdvertiseURLPersists(t *testing.T) {
 	store := openTestStore(t)
 
@@ -124,6 +166,41 @@ func TestStoreNodeCountAndAdminPromotion(t *testing.T) {
 	}
 	if !got.Admin {
 		t.Fatalf("Node.Admin = false, want true after promotion")
+	}
+}
+
+func TestStoreRenamesAndRevokesNode(t *testing.T) {
+	store := openTestStore(t)
+	node, err := store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	if err := store.ReplaceSnapshot(node.ID, SnapshotPayload{
+		SentAt:   time.Now(),
+		Sessions: []SessionInfo{{ID: "s1", Title: "session"}},
+	}); err != nil {
+		t.Fatalf("ReplaceSnapshot: %v", err)
+	}
+
+	renamed, err := store.RenameNode(node.ID, "desktop")
+	if err != nil {
+		t.Fatalf("RenameNode: %v", err)
+	}
+	if renamed.Name != "desktop" {
+		t.Fatalf("renamed node name = %q, want desktop", renamed.Name)
+	}
+	if err := store.RevokeNode(node.ID); err != nil {
+		t.Fatalf("RevokeNode: %v", err)
+	}
+	if _, err := store.AuthenticateNode(node.ID, "node_secret"); !errors.Is(err, ErrNodeNotAuthenticated) {
+		t.Fatalf("AuthenticateNode after revoke = %v, want ErrNodeNotAuthenticated", err)
+	}
+	snapshots, err := store.LatestSessions()
+	if err != nil {
+		t.Fatalf("LatestSessions after revoke: %v", err)
+	}
+	if len(snapshots) != 0 {
+		t.Fatalf("snapshots after revoke = %+v, want none", snapshots)
 	}
 }
 

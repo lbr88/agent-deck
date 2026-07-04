@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -309,6 +310,176 @@ func TestServerNodesPromoteAPIUpdatesNodeForAdminNode(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("node_2 not found after promote")
+	}
+}
+
+func TestServerStatusAPIReportsAuthenticatedNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/status?node_id=node_admin", nil)
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/status status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		Node nodeResponse `json:"node"`
+		URL  string       `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if got.Node.ID != "node_admin" || !got.Node.Admin {
+		t.Fatalf("status response = %+v, want authenticated admin node", got)
+	}
+}
+
+func TestServerNodesDemoteAPIRejectsLastAdmin(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/demote?node_id=node_admin", strings.NewReader(`{"node_id":"node_admin"}`))
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST /api/nodes/demote status = %d, want %d; body=%q", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestServerNodesDemoteAPIUpdatesNodeForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	if _, err := server.store.UpsertNodeWithAdmin("node_2", "desktop", hashSecret("node_secret"), "1.0.0", "linux", "arm64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/demote?node_id=node_admin", strings.NewReader(`{"node_id":"node_2"}`))
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/nodes/demote status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got nodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode demote response: %v", err)
+	}
+	if got.ID != "node_2" || got.Admin {
+		t.Fatalf("demote response = %+v, want node_2 admin=false", got)
+	}
+}
+
+func TestServerNodesRenameAPIUpdatesNodeForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "old", hashSecret("node_secret"), "1.0.0", "linux", "arm64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/rename?node_id=node_admin", strings.NewReader(`{"node_id":"node_2","name":"desktop"}`))
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/nodes/rename status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got nodeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode rename response: %v", err)
+	}
+	if got.ID != "node_2" || got.Name != "desktop" {
+		t.Fatalf("rename response = %+v, want desktop", got)
+	}
+}
+
+func TestServerNodesRevokeAPIDeletesNodeForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "desktop", hashSecret("node_secret"), "1.0.0", "linux", "arm64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/nodes/revoke?node_id=node_admin", strings.NewReader(`{"node_id":"node_2"}`))
+	req.Header.Set("Authorization", "Bearer admin_secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/nodes/revoke status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if _, err := server.store.AuthenticateNode("node_2", "node_secret"); !errors.Is(err, ErrNodeNotAuthenticated) {
+		t.Fatalf("AuthenticateNode revoked node = %v, want ErrNodeNotAuthenticated", err)
+	}
+}
+
+func TestServerInvitesAPIListsAndRevokesInviteForAdminNode(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNodeWithAdmin admin: %v", err)
+	}
+	token, err := server.store.CreateInviteWithOptions(CreateInviteOptions{
+		NodeName:        "desktop",
+		TTL:             time.Hour,
+		Admin:           true,
+		CreatedByNodeID: "node_admin",
+	})
+	if err != nil {
+		t.Fatalf("CreateInviteWithOptions: %v", err)
+	}
+	listReq := httptest.NewRequest(http.MethodGet, "/api/invites?node_id=node_admin", nil)
+	listReq.Header.Set("Authorization", "Bearer admin_secret")
+	listRec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/invites status = %d, want %d; body=%q", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listed struct {
+		Invites []struct {
+			ID       string `json:"id"`
+			NodeName string `json:"node_name"`
+			Admin    bool   `json:"admin"`
+			Status   string `json:"status"`
+		} `json:"invites"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode invites response: %v", err)
+	}
+	if len(listed.Invites) != 1 || listed.Invites[0].ID == "" || listed.Invites[0].NodeName != "desktop" || !listed.Invites[0].Admin || listed.Invites[0].Status != "pending" {
+		t.Fatalf("listed invites = %+v, want pending admin invite", listed.Invites)
+	}
+	if strings.Contains(listRec.Body.String(), "token_hash") || strings.Contains(listRec.Body.String(), token) {
+		t.Fatalf("invites response exposed secret material: %s", listRec.Body.String())
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodPost, "/api/invites/revoke?node_id=node_admin", strings.NewReader(`{"invite_id":`+strconvQuote(listed.Invites[0].ID)+`}`))
+	revokeReq.Header.Set("Authorization", "Bearer admin_secret")
+	revokeRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(revokeRec, revokeReq)
+
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/invites/revoke status = %d, want %d; body=%q", revokeRec.Code, http.StatusOK, revokeRec.Body.String())
+	}
+	if _, err := server.store.ConsumeInvite(token); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("ConsumeInvite revoked token = %v, want ErrInviteInvalid", err)
 	}
 }
 

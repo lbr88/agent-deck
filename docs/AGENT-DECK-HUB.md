@@ -47,8 +47,14 @@ That first joined node becomes a hub admin. Admin nodes can manage the hub from 
 
 ```bash
 agent-deck hub invite desktop
+agent-deck hub status
 agent-deck hub nodes
 agent-deck hub nodes promote node_...
+agent-deck hub nodes demote node_...
+agent-deck hub nodes rename node_... desktop
+agent-deck hub nodes revoke node_...
+agent-deck hub invites
+agent-deck hub invites revoke inv_...
 ```
 
 The invite command prints the exact command to run on the joining machine:
@@ -57,7 +63,7 @@ The invite command prints the exact command to run on the joining machine:
 agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
 
-Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to administer the hub. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create invites or manage registered nodes.
+Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to administer the hub. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create/revoke invites or manage registered nodes.
 
 If you are on the hub host and want to manage the local hub database instead of the configured joined hub, use:
 
@@ -66,6 +72,8 @@ agent-deck hub invite --local laptop
 agent-deck hub invite --data /data laptop
 agent-deck hub nodes --local
 agent-deck hub nodes --data /data
+agent-deck hub invites --local
+agent-deck hub invites --data /data
 ```
 
 If you need to recover admin access from the hub host, promote an already joined node:
@@ -124,7 +132,7 @@ For local development, build the image directly from the repository root:
 docker build -f deploy/hub/Dockerfile -t agent-deck-hub:local .
 ```
 
-The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`, `/api/invites`, `/api/nodes`, and `/api/nodes/promote`.
+The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`, `/api/status`, `/api/invites`, `/api/invites/revoke`, `/api/nodes`, `/api/nodes/promote`, `/api/nodes/demote`, `/api/nodes/rename`, and `/api/nodes/revoke`.
 
 ```yaml
 command:
@@ -140,7 +148,9 @@ command:
 - The hub creates a self-signed certificate by default. You can override it with `--tls-cert` and `--tls-key`.
 - Join uses a single-use invite token over HTTPS and pins the accepted certificate fingerprint.
 - Joined nodes receive long-lived node credentials stored locally with file mode `0600`.
-- Admin nodes can create more invites and manage registered nodes. Bootstrap admin invite creation only happens while the hub has no registered nodes.
-- Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes. A non-admin node cannot create invites.
+- Admin nodes can create/revoke invites and manage registered nodes. Bootstrap admin invite creation only happens while the hub has no registered nodes.
+- Demote and revoke refuse to remove the last admin node.
+- Revoking a node removes its stored credential and latest snapshot, and the hub closes any active websocket for that node.
+- Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes. A non-admin node cannot create/revoke invites or manage registered nodes.
 - There is no offline queue. Actions require the owner node to be connected.
 - No SSH connectivity between nodes is required.

@@ -163,9 +163,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/api/join", s.handleJoin)
-	mux.HandleFunc("/api/invites", s.handleCreateInvite)
+	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/invites", s.handleInvites)
+	mux.HandleFunc("/api/invites/revoke", s.handleRevokeInvite)
 	mux.HandleFunc("/api/nodes", s.handleListNodes)
 	mux.HandleFunc("/api/nodes/promote", s.handlePromoteNode)
+	mux.HandleFunc("/api/nodes/demote", s.handleDemoteNode)
+	mux.HandleFunc("/api/nodes/rename", s.handleRenameNode)
+	mux.HandleFunc("/api/nodes/revoke", s.handleRevokeNode)
 	mux.HandleFunc("/ws/node", s.handleNodeWebSocket)
 	return mux
 }
@@ -266,6 +271,33 @@ type createInviteResponse struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	node, err := s.authenticateNodeRequest(r)
+	if err != nil {
+		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, http.StatusOK, statusResponse{
+		URL:  s.hubURLForRequest(r),
+		Node: nodeResponseFromNode(node),
+	})
+}
+
+func (s *Server) handleInvites(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListInvites(w, r)
+	case http.MethodPost:
+		s.handleCreateInvite(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -319,12 +351,42 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type statusResponse struct {
+	URL  string       `json:"url"`
+	Node nodeResponse `json:"node"`
+}
+
 type listNodesResponse struct {
 	Nodes []nodeResponse `json:"nodes"`
 }
 
+type listInvitesResponse struct {
+	Invites []inviteResponse `json:"invites"`
+}
+
+type inviteResponse struct {
+	ID              string     `json:"id,omitempty"`
+	NodeName        string     `json:"node_name"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	ConsumedAt      *time.Time `json:"consumed_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	Admin           bool       `json:"admin"`
+	CreatedByNodeID string     `json:"created_by_node_id,omitempty"`
+	Status          string     `json:"status"`
+}
+
 type promoteNodeRequest struct {
 	NodeID string `json:"node_id"`
+}
+
+type renameNodeRequest struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+}
+
+type revokeInviteRequest struct {
+	InviteID string `json:"invite_id"`
+	Token    string `json:"token,omitempty"`
 }
 
 type nodeResponse struct {
@@ -336,6 +398,51 @@ type nodeResponse struct {
 	Status     string     `json:"status"`
 	Admin      bool       `json:"admin"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+}
+
+func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	invites, err := s.store.Invites()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, listInvitesResponse{Invites: inviteResponses(invites)})
+}
+
+func (s *Server) handleRevokeInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	var req revokeInviteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid invite revoke request JSON", http.StatusBadRequest)
+		return
+	}
+	identifier := strings.TrimSpace(req.InviteID)
+	if identifier == "" {
+		identifier = strings.TrimSpace(req.Token)
+	}
+	if identifier == "" {
+		http.Error(w, "invite_id or token is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.RevokeInvite(identifier); err != nil {
+		if errors.Is(err, ErrInviteNotFound) {
+			http.Error(w, "hub invite not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +498,149 @@ func (s *Server) handlePromoteNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
 }
 
+func (s *Server) handleDemoteNode(w http.ResponseWriter, r *http.Request) {
+	s.handleSetNodeAdmin(w, r, false)
+}
+
+func (s *Server) handleSetNodeAdmin(w http.ResponseWriter, r *http.Request, admin bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	var req promoteNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid node admin request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if !admin {
+		if err := s.ensureCanRemoveAdmin(req.NodeID); err != nil {
+			writeAdminRemovalError(w, err)
+			return
+		}
+	}
+	if err := s.store.SetNodeAdmin(req.NodeID, admin); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "hub node not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	node, err := s.store.nodeByID(req.NodeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
+}
+
+func (s *Server) handleRenameNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	var req renameNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid node rename request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	req.Name = strings.TrimSpace(req.Name)
+	if req.NodeID == "" || req.Name == "" {
+		http.Error(w, "node_id and name are required", http.StatusBadRequest)
+		return
+	}
+	node, err := s.store.RenameNode(req.NodeID, req.Name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "hub node not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
+}
+
+func (s *Server) handleRevokeNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	if !s.authenticateAdminNodeRequest(w, r) {
+		return
+	}
+	var req promoteNodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid node revoke request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.ensureCanRemoveAdmin(req.NodeID); err != nil {
+		writeAdminRemovalError(w, err)
+		return
+	}
+	if err := s.store.RevokeNode(req.NodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "hub node not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	s.disconnectNode(req.NodeID)
+}
+
+var errLastAdmin = errors.New("cannot remove the last hub admin")
+
+func (s *Server) ensureCanRemoveAdmin(nodeID string) error {
+	node, err := s.store.nodeByID(nodeID)
+	if err != nil {
+		return err
+	}
+	if !node.Admin {
+		return nil
+	}
+	count, err := s.store.AdminNodeCount()
+	if err != nil {
+		return err
+	}
+	if count <= 1 {
+		return errLastAdmin
+	}
+	return nil
+}
+
+func writeAdminRemovalError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errLastAdmin):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, sql.ErrNoRows):
+		http.Error(w, "hub node not found", http.StatusNotFound)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (s *Server) authenticateAdminNodeRequest(w http.ResponseWriter, r *http.Request) bool {
 	node, err := s.authenticateNodeRequest(r)
 	if err != nil {
@@ -402,6 +652,24 @@ func (s *Server) authenticateAdminNodeRequest(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	return true
+}
+
+func inviteResponses(invites []Invite) []inviteResponse {
+	out := make([]inviteResponse, 0, len(invites))
+	now := time.Now()
+	for _, invite := range invites {
+		out = append(out, inviteResponse{
+			ID:              invite.ID,
+			NodeName:        invite.NodeName,
+			ExpiresAt:       invite.ExpiresAt,
+			ConsumedAt:      invite.ConsumedAt,
+			RevokedAt:       invite.RevokedAt,
+			Admin:           invite.Admin,
+			CreatedByNodeID: invite.CreatedByNodeID,
+			Status:          invite.Status(now),
+		})
+	}
+	return out
 }
 
 func nodeResponses(nodes []Node) []nodeResponse {
@@ -608,6 +876,26 @@ func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 		s.attachRouter.UnregisterPeer(peer)
 	}
 	s.releaseCommandRoutesForPeer(peer)
+}
+
+func (s *Server) disconnectNode(nodeID string) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+	s.mu.Lock()
+	peers := make([]*hubPeer, 0)
+	for peer := range s.peers {
+		if peer.nodeID == nodeID {
+			peers = append(peers, peer)
+		}
+	}
+	s.mu.Unlock()
+	for _, peer := range peers {
+		if peer != nil && peer.conn != nil {
+			_ = peer.conn.Close()
+		}
+	}
 }
 
 func (s *Server) routeCommandFromPeer(ctx context.Context, requester Peer, payload CommandPayload) error {

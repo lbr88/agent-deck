@@ -560,6 +560,267 @@ func TestHubNodesPromoteUsesConfiguredAdminNode(t *testing.T) {
 	}
 }
 
+func TestHubStatusUsesConfiguredNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		seen <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"url": "wss://hub.example:8421",
+			"node": map[string]any{
+				"id":     "node_admin",
+				"name":   "admin",
+				"status": "online",
+				"admin":  true,
+			},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubStatus([]string{}); err != nil {
+			t.Fatalf("handleHubStatus: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wss://hub.example:8421") || !strings.Contains(out, "node_admin") || !strings.Contains(strings.ToLower(out), "admin") {
+		t.Fatalf("status output = %q, want hub URL and admin node", out)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("hub status did not call configured hub")
+	}
+}
+
+func TestHubNodesAdminSubcommandsUseConfiguredAdminNode(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		path     string
+		wantBody map[string]string
+	}{
+		{
+			name:     "demote",
+			args:     []string{"demote", "node_remote"},
+			path:     "/api/nodes/demote",
+			wantBody: map[string]string{"node_id": "node_remote"},
+		},
+		{
+			name:     "rename",
+			args:     []string{"rename", "node_remote", "desktop"},
+			path:     "/api/nodes/rename",
+			wantBody: map[string]string{"node_id": "node_remote", "name": "desktop"},
+		},
+		{
+			name:     "revoke",
+			args:     []string{"revoke", "node_remote"},
+			path:     "/api/nodes/revoke",
+			wantBody: map[string]string{"node_id": "node_remote"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+			session.ClearUserConfigCache()
+			t.Cleanup(session.ClearUserConfigCache)
+
+			seen := make(chan map[string]string, 1)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method != http.MethodPost {
+					t.Errorf("method = %s, want POST", r.Method)
+				}
+				if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+					t.Errorf("node_id query = %q, want node_admin", got)
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+					t.Errorf("Authorization = %q, want bearer admin token", got)
+				}
+				var req map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				seen <- req
+				w.Header().Set("Content-Type", "application/json")
+				if tc.name == "revoke" {
+					if err := json.NewEncoder(w).Encode(map[string]bool{"ok": true}); err != nil {
+						t.Errorf("encode revoke response: %v", err)
+					}
+					return
+				}
+				if err := json.NewEncoder(w).Encode(hubNodeOutput{
+					ID:     "node_remote",
+					Name:   "desktop",
+					Status: "offline",
+					Admin:  tc.name != "demote",
+				}); err != nil {
+					t.Errorf("encode node response: %v", err)
+				}
+			}))
+			defer server.Close()
+			writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+			out := captureStdout(t, func() {
+				if err := handleHubNodes(tc.args); err != nil {
+					t.Fatalf("handleHubNodes %s: %v", tc.name, err)
+				}
+			})
+			if !strings.Contains(out, "node_remote") {
+				t.Fatalf("%s output = %q, want target node", tc.name, out)
+			}
+			select {
+			case got := <-seen:
+				for key, want := range tc.wantBody {
+					if got[key] != want {
+						t.Fatalf("%s request[%s] = %q, want %q; request=%+v", tc.name, key, got[key], want, got)
+					}
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("hub nodes %s did not call configured hub", tc.name)
+			}
+		})
+	}
+}
+
+func TestHubInvitesUsesConfiguredAdminNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/invites" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		seen <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"invites": []map[string]any{{
+				"id":         "inv_remote",
+				"node_name":  "desktop",
+				"status":     "pending",
+				"admin":      true,
+				"expires_at": time.Now().Add(time.Hour),
+			}},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubInvites([]string{"--json"}); err != nil {
+			t.Fatalf("handleHubInvites: %v", err)
+		}
+	})
+	if !strings.Contains(out, "inv_remote") || !strings.Contains(out, "desktop") || !strings.Contains(out, "pending") {
+		t.Fatalf("invites output = %s, want remote invite data", out)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("hub invites did not call configured hub")
+	}
+}
+
+func TestHubInvitesRevokeUsesConfiguredAdminNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/invites/revoke" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
+			t.Errorf("node_id = %q, want node_admin", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
+			t.Errorf("Authorization = %q, want bearer admin token", got)
+		}
+		var req struct {
+			InviteID string `json:"invite_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		seen <- req.InviteID
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]bool{"ok": true}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_admin", "admin_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubInvites([]string{"revoke", "inv_remote"}); err != nil {
+			t.Fatalf("handleHubInvites revoke: %v", err)
+		}
+	})
+	if !strings.Contains(out, "inv_remote") {
+		t.Fatalf("revoke invite output = %q, want invite id", out)
+	}
+	select {
+	case got := <-seen:
+		if got != "inv_remote" {
+			t.Fatalf("revoke invite id = %q, want inv_remote", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hub invites revoke did not call configured hub")
+	}
+}
+
 func TestHubInviteErrorsWhenHubURLIsNotConfigured(t *testing.T) {
 	err := handleHubInvite([]string{"--data", t.TempDir(), "laptop"})
 	if err == nil {

@@ -19,6 +19,7 @@ import (
 
 var (
 	ErrInviteInvalid        = errors.New("hub: invite is invalid, expired, or consumed")
+	ErrInviteNotFound       = errors.New("hub: invite not found")
 	ErrNodeNotAuthenticated = errors.New("hub: node authentication failed")
 	ErrNodeNotFound         = errors.New("hub: node not found")
 	ErrAdvertiseURLMissing  = errors.New("hub: advertise URL is not configured")
@@ -31,12 +32,27 @@ type Store struct {
 }
 
 type Invite struct {
+	ID              string
 	TokenHash       string
 	NodeName        string
 	ExpiresAt       time.Time
 	ConsumedAt      *time.Time
+	RevokedAt       *time.Time
 	Admin           bool
 	CreatedByNodeID string
+}
+
+func (i Invite) Status(now time.Time) string {
+	switch {
+	case i.RevokedAt != nil:
+		return "revoked"
+	case i.ConsumedAt != nil:
+		return "consumed"
+	case !i.ExpiresAt.IsZero() && !i.ExpiresAt.After(now):
+		return "expired"
+	default:
+		return "pending"
+	}
 }
 
 type Node struct {
@@ -100,16 +116,75 @@ func (s *Store) CreateInviteWithOptions(opts CreateInviteOptions) (plainToken st
 	if err != nil {
 		return "", err
 	}
+	inviteID, err := newSecret("inv_")
+	if err != nil {
+		return "", err
+	}
 	now := time.Now()
 	_, err = s.db.Exec(
-		`INSERT INTO invites (token_hash, node_name, expires_at, admin, created_by_node_id)
-		 VALUES (?, ?, ?, ?, ?)`,
-		hashSecret(token), opts.NodeName, now.Add(opts.TTL).UnixNano(), boolInt(opts.Admin), nullString(opts.CreatedByNodeID),
+		`INSERT INTO invites (id, token_hash, node_name, expires_at, admin, created_by_node_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		inviteID, hashSecret(token), opts.NodeName, now.Add(opts.TTL).UnixNano(), boolInt(opts.Admin), nullString(opts.CreatedByNodeID),
 	)
 	if err != nil {
 		return "", fmt.Errorf("create invite: %w", err)
 	}
 	return token, nil
+}
+
+func (s *Store) Invites() ([]Invite, error) {
+	rows, err := s.db.Query(
+		`SELECT id, token_hash, node_name, expires_at, consumed_at, revoked_at, admin, created_by_node_id
+		 FROM invites
+		 ORDER BY expires_at DESC, node_name, token_hash`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query invites: %w", err)
+	}
+	defer rows.Close()
+
+	var invites []Invite
+	for rows.Next() {
+		invite, err := scanInviteValues(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan invite: %w", err)
+		}
+		invites = append(invites, invite)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate invites: %w", err)
+	}
+	return invites, nil
+}
+
+func (s *Store) RevokeInvite(identifier string) error {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return ErrInviteNotFound
+	}
+	tokenHash := ""
+	if strings.HasPrefix(identifier, "invite_") {
+		tokenHash = hashSecret(identifier)
+	}
+	res, err := s.db.Exec(
+		`UPDATE invites
+		 SET revoked_at = ?
+		 WHERE consumed_at IS NULL
+		   AND revoked_at IS NULL
+		   AND (id = ? OR token_hash = ?)`,
+		time.Now().UnixNano(), identifier, tokenHash,
+	)
+	if err != nil {
+		return fmt.Errorf("revoke invite: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke invite rows affected: %w", err)
+	}
+	if rows != 1 {
+		return ErrInviteNotFound
+	}
+	return nil
 }
 
 func (s *Store) SetAdvertiseURL(rawURL string) error {
@@ -157,7 +232,7 @@ func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
 	res, err := tx.Exec(
 		`UPDATE invites
 		 SET consumed_at = ?
-		 WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+		 WHERE token_hash = ? AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
 		now, tokenHash, now,
 	)
 	if err != nil {
@@ -172,7 +247,7 @@ func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
 	}
 
 	invite, err := scanInvite(tx.QueryRow(
-		`SELECT token_hash, node_name, expires_at, consumed_at, admin, created_by_node_id FROM invites WHERE token_hash = ?`,
+		`SELECT id, token_hash, node_name, expires_at, consumed_at, revoked_at, admin, created_by_node_id FROM invites WHERE token_hash = ?`,
 		tokenHash,
 	))
 	if err != nil {
@@ -236,6 +311,14 @@ func (s *Store) NodeCount() (int, error) {
 	return count, nil
 }
 
+func (s *Store) AdminNodeCount() (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes WHERE admin = 1`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count admin nodes: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) SetNodeAdmin(nodeID string, admin bool) error {
 	res, err := s.db.Exec(`UPDATE nodes SET admin = ? WHERE id = ?`, boolInt(admin), nodeID)
 	if err != nil {
@@ -247,6 +330,56 @@ func (s *Store) SetNodeAdmin(nodeID string, admin bool) error {
 	}
 	if rows != 1 {
 		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) RenameNode(nodeID, name string) (Node, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	name = strings.TrimSpace(name)
+	if nodeID == "" || name == "" {
+		return Node{}, sql.ErrNoRows
+	}
+	res, err := s.db.Exec(`UPDATE nodes SET name = ? WHERE id = ?`, name, nodeID)
+	if err != nil {
+		return Node{}, fmt.Errorf("rename node: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return Node{}, fmt.Errorf("rename node rows affected: %w", err)
+	}
+	if rows != 1 {
+		return Node{}, sql.ErrNoRows
+	}
+	return s.nodeByID(nodeID)
+}
+
+func (s *Store) RevokeNode(nodeID string) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return sql.ErrNoRows
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin revoke node: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM snapshots WHERE node_id = ?`, nodeID); err != nil {
+		return fmt.Errorf("delete node snapshots: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM nodes WHERE id = ?`, nodeID)
+	if err != nil {
+		return fmt.Errorf("delete node: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete node rows affected: %w", err)
+	}
+	if rows != 1 {
+		return sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit revoke node: %w", err)
 	}
 	return nil
 }
@@ -349,10 +482,12 @@ func (s *Store) migrate() error {
 
 	const schema = `
 CREATE TABLE IF NOT EXISTS invites (
+  id TEXT,
   token_hash TEXT PRIMARY KEY,
   node_name TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
   consumed_at INTEGER,
+  revoked_at INTEGER,
   admin INTEGER NOT NULL DEFAULT 0,
   created_by_node_id TEXT
 );
@@ -387,6 +522,12 @@ CREATE TABLE IF NOT EXISTS hub_settings (
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate hub db: %w", err)
 	}
+	if err := s.ensureColumn("invites", "id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("invites", "revoked_at", "INTEGER"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn("invites", "admin", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -395,6 +536,9 @@ CREATE TABLE IF NOT EXISTS hub_settings (
 	}
 	if err := s.ensureColumn("nodes", "admin", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_id ON invites(id) WHERE id IS NOT NULL`); err != nil {
+		return fmt.Errorf("create invite id index: %w", err)
 	}
 	return nil
 }
@@ -457,18 +601,29 @@ func (s *Store) setNodeStatus(nodeID, status string, lastSeenAt int64) error {
 }
 
 func scanInvite(row *sql.Row) (Invite, error) {
+	return scanInviteValues(row)
+}
+
+func scanInviteValues(row rowScanner) (Invite, error) {
 	var invite Invite
+	var id sql.NullString
 	var expiresAt int64
 	var consumedAt sql.NullInt64
+	var revokedAt sql.NullInt64
 	var admin int
 	var createdBy sql.NullString
-	if err := row.Scan(&invite.TokenHash, &invite.NodeName, &expiresAt, &consumedAt, &admin, &createdBy); err != nil {
+	if err := row.Scan(&id, &invite.TokenHash, &invite.NodeName, &expiresAt, &consumedAt, &revokedAt, &admin, &createdBy); err != nil {
 		return Invite{}, err
 	}
+	invite.ID = id.String
 	invite.ExpiresAt = time.Unix(0, expiresAt)
 	if consumedAt.Valid {
 		t := time.Unix(0, consumedAt.Int64)
 		invite.ConsumedAt = &t
+	}
+	if revokedAt.Valid {
+		t := time.Unix(0, revokedAt.Int64)
+		invite.RevokedAt = &t
 	}
 	invite.Admin = admin != 0
 	invite.CreatedByNodeID = createdBy.String
