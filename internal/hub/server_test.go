@@ -201,6 +201,32 @@ func TestHubNodeWebSocketAcceptsHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketOverlappingConnectionsKeepNodeOnline(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	first := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret")
+	readTestWelcome(t, first)
+	second := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret")
+	readTestWelcome(t, second)
+	waitNodeStatus(t, server, "node_1", "online")
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first websocket: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	assertNodeStatus(t, server, "node_1", "online")
+
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second websocket: %v", err)
+	}
+	waitNodeStatus(t, server, "node_1", "offline")
+}
+
 func TestServerServeRequiresTLSCertAndKey(t *testing.T) {
 	server := newTestServer(t)
 	err := server.Serve()
@@ -249,4 +275,43 @@ func readTestWelcome(t *testing.T, conn *websocket.Conn) {
 	if env.Type != MsgWelcome {
 		t.Fatalf("welcome type = %q, want %q", env.Type, MsgWelcome)
 	}
+}
+
+func waitNodeStatus(t *testing.T, server *Server, nodeID, want string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case <-deadline:
+			assertNodeStatus(t, server, nodeID, want)
+			return
+		default:
+		}
+		if nodeStatus(t, server, nodeID) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func assertNodeStatus(t *testing.T, server *Server, nodeID, want string) {
+	t.Helper()
+	if got := nodeStatus(t, server, nodeID); got != want {
+		t.Fatalf("node %s status = %q, want %q", nodeID, got, want)
+	}
+}
+
+func nodeStatus(t *testing.T, server *Server, nodeID string) string {
+	t.Helper()
+	nodes, err := server.store.Nodes()
+	if err != nil {
+		t.Fatalf("Nodes: %v", err)
+	}
+	for _, node := range nodes {
+		if node.ID == nodeID {
+			return node.Status
+		}
+	}
+	t.Fatalf("node %s not found", nodeID)
+	return ""
 }

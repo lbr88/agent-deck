@@ -38,7 +38,7 @@ type Envelope struct {
 type NodeHelloPayload struct {
 	NodeID   string `json:"node_id"`
 	NodeName string `json:"node_name"`
-	Token    string `json:"token"`
+	Token    string `json:"token,omitempty"`
 	Version  string `json:"version"`
 	OS       string `json:"os"`
 	Arch     string `json:"arch"`

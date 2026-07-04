@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -102,8 +103,9 @@ const SchemaVersion = 13
 // Thread-safe for concurrent use from multiple goroutines within one process.
 // Multiple OS processes can safely read/write via WAL mode + busy timeout.
 type StateDB struct {
-	db  *sql.DB
-	pid int
+	db       *sql.DB
+	pid      int
+	readOnly bool
 	// path is the on-disk path of the SQLite database file. Retained so
 	// destructive write paths can snapshot the file to "<path>.bak" before a
 	// large DELETE+re-insert sweep (S2 data-loss safeguard, 2026-06-04
@@ -322,10 +324,33 @@ func Open(dbPath string) (*StateDB, error) {
 	return &StateDB{db: db, pid: os.Getpid(), path: dbPath}, nil
 }
 
+// OpenReadOnly opens an existing state database without creating directories,
+// creating the database file, changing WAL mode, or running migrations.
+func OpenReadOnly(dbPath string) (*StateDB, error) {
+	u := url.URL{Scheme: "file", Path: dbPath}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(on)")
+	u.RawQuery = q.Encode()
+	dsn := u.String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("statedb: open read-only: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("statedb: ping read-only: %w", err)
+	}
+	return &StateDB{db: db, pid: os.Getpid(), path: dbPath, readOnly: true}, nil
+}
+
 // Close checkpoints WAL and closes the database.
 func (s *StateDB) Close() error {
 	// Checkpoint WAL to merge it back into the main database file
-	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	if !s.readOnly {
+		_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	}
 	return s.db.Close()
 }
 

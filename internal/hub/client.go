@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/gorilla/websocket"
 )
 
@@ -115,7 +117,6 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 	if err := writeEnvelope(conn, MsgHello, cfg.NodeID, NodeHelloPayload{
 		NodeID:   cfg.NodeID,
 		NodeName: cfg.NodeName,
-		Token:    cfg.Token,
 		Version:  cfg.Version,
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
@@ -204,59 +205,81 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 	default:
 	}
 
-	storage, err := session.NewStorageWithProfile(s.Profile)
+	profileDir, err := session.GetProfileDir(s.Profile)
 	if err != nil {
 		return SnapshotPayload{}, err
 	}
-	defer storage.Close()
+	dbPath := filepath.Join(profileDir, "state.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return SnapshotPayload{SentAt: time.Now().UTC()}, nil
+		}
+		return SnapshotPayload{}, fmt.Errorf("stat local session state db: %w", err)
+	}
 
-	instances, _, err := storage.LoadLite()
+	db, err := statedb.OpenReadOnly(dbPath)
 	if err != nil {
 		return SnapshotPayload{}, err
 	}
-	sessions := make([]SessionInfo, 0, len(instances))
-	for _, inst := range instances {
-		if inst == nil {
+	defer db.Close()
+
+	rows, err := db.LoadInstances()
+	if err != nil {
+		return SnapshotPayload{}, fmt.Errorf("load local sessions: %w", err)
+	}
+	sessions := make([]SessionInfo, 0, len(rows))
+	for _, row := range rows {
+		if row == nil {
 			continue
 		}
-		sessions = append(sessions, sessionInfoFromInstanceData(inst))
+		sessions = append(sessions, sessionInfoFromRow(row))
 	}
 	return SnapshotPayload{SentAt: time.Now().UTC(), Sessions: sessions}, nil
 }
 
-func sessionInfoFromInstanceData(inst *session.InstanceData) SessionInfo {
+func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 	info := SessionInfo{
-		ID:               inst.ID,
-		Title:            inst.Title,
-		Tool:             inst.Tool,
-		Status:           string(inst.Status),
-		GroupPath:        inst.GroupPath,
-		ProjectPath:      inst.ProjectPath,
-		DisplaySessionID: displaySessionID(inst),
-		UpdatedAt:        sessionUpdatedAt(inst),
+		ID:               row.ID,
+		Title:            row.Title,
+		Tool:             row.Tool,
+		Status:           row.Status,
+		GroupPath:        row.GroupPath,
+		ProjectPath:      row.ProjectPath,
+		DisplaySessionID: displaySessionIDFromRow(row),
+		UpdatedAt:        rowUpdatedAt(row),
 	}
 	return info
 }
 
-func displaySessionID(inst *session.InstanceData) string {
+func displaySessionIDFromRow(row *statedb.InstanceRow) string {
+	claudeSessionID, _,
+		geminiSessionID, _, _, _,
+		openCodeSessionID, _,
+		codexSessionID, _,
+		_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := statedb.UnmarshalToolData(row.ToolData)
+	kiroSessionID, _ := statedb.ReadKiroSessionBindingFromToolData(row.ToolData)
+	return displaySessionIDFromParts(row.Tool, claudeSessionID, geminiSessionID, openCodeSessionID, codexSessionID, kiroSessionID)
+}
+
+func displaySessionIDFromParts(tool, claudeSessionID, geminiSessionID, openCodeSessionID, codexSessionID, kiroSessionID string) string {
 	proxy := &session.Instance{
-		Tool:              inst.Tool,
-		ClaudeSessionID:   inst.ClaudeSessionID,
-		GeminiSessionID:   inst.GeminiSessionID,
-		OpenCodeSessionID: inst.OpenCodeSessionID,
-		CodexSessionID:    inst.CodexSessionID,
-		KiroSessionID:     inst.KiroSessionID,
+		Tool:              tool,
+		ClaudeSessionID:   claudeSessionID,
+		GeminiSessionID:   geminiSessionID,
+		OpenCodeSessionID: openCodeSessionID,
+		CodexSessionID:    codexSessionID,
+		KiroSessionID:     kiroSessionID,
 	}
 	return proxy.DisplaySessionID()
 }
 
-func sessionUpdatedAt(inst *session.InstanceData) *time.Time {
+func rowUpdatedAt(row *statedb.InstanceRow) *time.Time {
 	switch {
-	case !inst.LastAccessedAt.IsZero():
-		t := inst.LastAccessedAt
+	case !row.LastAccessed.IsZero():
+		t := row.LastAccessed
 		return &t
-	case !inst.CreatedAt.IsZero():
-		t := inst.CreatedAt
+	case !row.CreatedAt.IsZero():
+		t := row.CreatedAt
 		return &t
 	default:
 		return nil

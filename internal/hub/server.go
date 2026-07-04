@@ -21,10 +21,11 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	cfg        ServerConfig
-	store      *Store
-	httpServer *http.Server
-	mu         sync.Mutex
+	cfg             ServerConfig
+	store           *Store
+	httpServer      *http.Server
+	mu              sync.Mutex
+	nodeConnections map[string]int
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -219,8 +220,8 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	_ = s.store.MarkNodeOnline(node.ID)
-	defer func() { _ = s.store.MarkNodeOffline(node.ID) }()
+	s.retainNodeConnection(node.ID)
+	defer s.releaseNodeConnection(node.ID)
 
 	welcome, err := MarshalEnvelope(MsgWelcome, node.ID, WelcomePayload{
 		NodeID:   node.ID,
@@ -264,6 +265,30 @@ func (s *Server) handleNodeEnvelope(nodeID string, env Envelope) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Server) retainNodeConnection(nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.nodeConnections == nil {
+		s.nodeConnections = make(map[string]int)
+	}
+	if s.nodeConnections[nodeID] == 0 {
+		_ = s.store.MarkNodeOnline(nodeID)
+	}
+	s.nodeConnections[nodeID]++
+}
+
+func (s *Server) releaseNodeConnection(nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := s.nodeConnections[nodeID]
+	if count <= 1 {
+		delete(s.nodeConnections, nodeID)
+		_ = s.store.MarkNodeOffline(nodeID)
+		return
+	}
+	s.nodeConnections[nodeID] = count - 1
 }
 
 var nodeWSUpgrader = websocket.Upgrader{
