@@ -1835,6 +1835,18 @@ func TestBuildCodexCommand_InlineCodexHomeDropsStaleID(t *testing.T) {
 func TestCanRestartCursor(t *testing.T) {
 	skipIfNoTmuxBinary(t)
 
+	stubDir := t.TempDir()
+	startedFile := filepath.Join(stubDir, "cursor-started")
+	cursorStub := filepath.Join(stubDir, "cursor")
+	script := "#!/usr/bin/env bash\n" +
+		"touch " + shellescape.Quote(startedFile) + "\n" +
+		"sleep 60\n"
+	if err := os.WriteFile(cursorStub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write cursor stub: %v", err)
+	}
+	stubPath := stubDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", stubPath)
+
 	inst := NewInstanceWithTool("cursor-restart-test", "/tmp", "cursor")
 	inst.Command = "sleep 60"
 	err := inst.Start()
@@ -1849,15 +1861,25 @@ func TestCanRestartCursor(t *testing.T) {
 		t.Fatal("CanRestart() should return true for a running Cursor session with live tmux pane")
 	}
 
-	// Simulate persisted command from a real Cursor session before restart.
-	inst.Command = "cursor agent"
+	// Simulate a persisted Cursor command without depending on the host having
+	// Cursor installed or on the tmux server inheriting this test's PATH.
+	inst.Command = "PATH=" + shellescape.Quote(stubPath) + " cursor agent"
 
 	if err := inst.Restart(); err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
-	if inst.tmuxSession == nil || !inst.tmuxSession.Exists() {
+	if inst.tmuxSession == nil || !waitForTmuxSession(inst.tmuxSession.Name, 1*time.Second) {
 		t.Fatal("tmux session should exist after Restart")
+	}
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor stub should have run after Restart: %v", os.ErrNotExist)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if inst.Status == StatusError {
 		t.Fatalf("after Restart, Status = %s; want != error", inst.Status)
