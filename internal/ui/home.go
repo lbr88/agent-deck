@@ -940,6 +940,7 @@ type statusUpdateMsg struct {
 } // Triggers immediate status update without reloading
 
 type hubClientAPI interface {
+	Attach(context.Context, string, string, hub.TerminalSize) error
 	Close() error
 }
 
@@ -1609,8 +1610,16 @@ func (h *Home) drainHubSnapshots() bool {
 }
 
 type runningHubClient struct {
+	client *hub.Client
 	cancel context.CancelFunc
 	done   chan struct{}
+}
+
+func (c *runningHubClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.Attach(ctx, nodeID, sessionID, size)
 }
 
 func (c *runningHubClient) Close() error {
@@ -1657,6 +1666,7 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 		TLSSkipVerify: cfg.TLSSkipVerify,
 		CAPemFile:     strings.TrimSpace(cfg.CAPemFile),
 		ServerName:    strings.TrimSpace(cfg.ServerName),
+		AttachBackend: hub.NewTmuxAttachBackend(profile),
 		OnStatus: func(status string) {
 			if setStatus != nil {
 				setStatus("hub " + strings.TrimSpace(status))
@@ -1665,7 +1675,7 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 		OnSnapshot: onSnapshot,
 	}, hub.LocalSessionSource{Profile: profile})
 
-	handle := &runningHubClient{cancel: cancel, done: make(chan struct{})}
+	handle := &runningHubClient{client: client, cancel: cancel, done: make(chan struct{})}
 	safego.Go(uiLog, "hub_autoconnect", func() {
 		defer close(handle.done)
 		if err := client.Connect(hubCtx); err != nil && hubCtx.Err() == nil {
@@ -8095,8 +8105,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Attach to remote session via SSH
 				return h, h.attachRemoteSession(item.RemoteName, item.RemoteSession.ID)
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
-				h.setHubStatus("hub attach not available yet")
-				h.setError(fmt.Errorf("hub attach is not available yet"))
+				return h, h.attachHubSession(item.HubNodeID, item.HubSession.ID)
 			}
 		}
 		return h, nil
@@ -12746,6 +12755,26 @@ func (h *Home) attachRemoteSession(remoteName, sessionID string) tea.Cmd {
 	})
 }
 
+// attachHubSession attaches to a hub-owned session through the connected hub
+// client, suspending the TUI while the requester-side terminal bridge runs.
+func (h *Home) attachHubSession(nodeID, sessionID string) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
+	h.isAttaching.Store(true)
+	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size}, func(err error) tea.Msg {
+		h.isAttaching.Store(false)
+		if err != nil {
+			h.setHubStatus("hub attach failed")
+			h.setError(fmt.Errorf("hub attach: %w", err))
+		}
+		return statusUpdateMsg{}
+	})
+}
+
 // remoteAttachCmd implements tea.ExecCommand for remote SSH attach
 type remoteAttachCmd struct {
 	runner    *session.SSHRunner
@@ -12759,6 +12788,29 @@ func (r remoteAttachCmd) Run() error {
 func (r remoteAttachCmd) SetStdin(reader io.Reader)  {}
 func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
+
+type hubAttachCmd struct {
+	client    hubClientAPI
+	ctx       context.Context
+	nodeID    string
+	sessionID string
+	size      hub.TerminalSize
+}
+
+func (h hubAttachCmd) Run() error {
+	ctx := h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if h.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return h.client.Attach(ctx, h.nodeID, h.sessionID, h.size)
+}
+
+func (h hubAttachCmd) SetStdin(reader io.Reader)  {}
+func (h hubAttachCmd) SetStdout(writer io.Writer) {}
+func (h hubAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
 	msg := importSourcesLoadedMsg{}
@@ -15366,6 +15418,9 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 		// without this case the curated footer dropped the attach hint for
 		// remote rows (PR #1289 review nit 1).
 		add("⏎", "attach")
+
+	case session.ItemTypeHubSession:
+		add("⏎", "attach")
 	}
 
 	return hints
@@ -16434,7 +16489,7 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 			Icon:     "⬡",
 			Title:    hubDisplayGroupPath(item.HubNodeName, item.HubGroupPath),
 			Subtitle: fmt.Sprintf("Hub node: %s — %d sessions", item.HubNodeName, stats.sessionCount),
-			Hints:    []string{"Hub attach is not available yet"},
+			Hints:    []string{"Select a session to attach via hub"},
 		}, width, height)
 	}
 
@@ -16476,7 +16531,7 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 		b.WriteString(dimStyle.Render("Tool:   ") + hs.Tool + "\n")
 	}
 	b.WriteString(dimStyle.Render("Group:  ") + hs.GroupPath + "\n\n")
-	b.WriteString(dimStyle.Render("Hub attach is not available yet"))
+	b.WriteString(dimStyle.Render("Press Enter to attach via hub"))
 	return b.String()
 }
 

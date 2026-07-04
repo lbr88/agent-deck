@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/gorilla/websocket"
 )
 
 type fakeSessionSource struct {
@@ -212,6 +214,111 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	}
 }
 
+func TestClientOwnerAttachOpenUsesBackendAndBridgesFrames(t *testing.T) {
+	backend := newFakeAttachBackend()
+	messages := make(chan observedMessage, 16)
+	serverReady := make(chan *websocket.Conn, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverReady <- conn
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_owner", WelcomePayload{NodeID: "node_owner", NodeName: "workstation"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_owner",
+		NodeName:          "workstation",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+		AttachBackend:     backend,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	conn := waitWebSocketConn(t, serverReady)
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+
+	open, err := MarshalEnvelope(MsgAttachOpen, "node_requester", AttachOpenPayload{
+		StreamID:  "stream_1",
+		SessionID: "sess_1",
+		Cols:      100,
+		Rows:      30,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope open: %v", err)
+	}
+	if err := conn.WriteJSON(open); err != nil {
+		t.Fatalf("server WriteJSON open: %v", err)
+	}
+	call := backend.waitOpen(t)
+	if call.sessionID != "sess_1" || call.size.Cols != 100 || call.size.Rows != 30 {
+		t.Fatalf("backend open call = %+v", call)
+	}
+	assertNextMessageType(t, messages, MsgAttachReady)
+
+	backend.stream.emit([]byte("owner-output"))
+	output := assertNextMessageType(t, messages, MsgAttachData)
+	assertAttachDataBytes(t, output.envelope, "owner-output")
+
+	input, err := MarshalEnvelope(MsgAttachData, "node_requester", NewAttachData("stream_1", []byte("requester-input")))
+	if err != nil {
+		t.Fatalf("MarshalEnvelope input: %v", err)
+	}
+	if err := conn.WriteJSON(input); err != nil {
+		t.Fatalf("server WriteJSON input: %v", err)
+	}
+	if got := backend.stream.waitWrite(t); string(got) != "requester-input" {
+		t.Fatalf("stream write = %q, want requester-input", got)
+	}
+
+	resize, err := MarshalEnvelope(MsgAttachResize, "node_requester", AttachResizePayload{StreamID: "stream_1", Cols: 120, Rows: 40})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope resize: %v", err)
+	}
+	if err := conn.WriteJSON(resize); err != nil {
+		t.Fatalf("server WriteJSON resize: %v", err)
+	}
+	if got := backend.stream.waitResize(t); got.Cols != 120 || got.Rows != 40 {
+		t.Fatalf("stream resize = %+v, want 120x40", got)
+	}
+
+	closeFrame, err := MarshalEnvelope(MsgAttachClose, "node_requester", AttachClosePayload{StreamID: "stream_1", Reason: "detached"})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope close: %v", err)
+	}
+	if err := conn.WriteJSON(closeFrame); err != nil {
+		t.Fatalf("server WriteJSON close: %v", err)
+	}
+	backend.stream.waitClosed(t)
+	closed := assertNextMessageType(t, messages, MsgAttachClosed)
+	if closed.envelope.NodeID != "node_owner" {
+		t.Fatalf("closed NodeID = %q, want node_owner", closed.envelope.NodeID)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
 func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -409,3 +516,134 @@ func waitErr(t *testing.T, ch <-chan error) error {
 		return nil
 	}
 }
+
+type fakeAttachBackend struct {
+	stream *fakeAttachStream
+	opens  chan fakeAttachOpenCall
+}
+
+type fakeAttachOpenCall struct {
+	sessionID string
+	size      TerminalSize
+}
+
+func newFakeAttachBackend() *fakeAttachBackend {
+	return &fakeAttachBackend{stream: newFakeAttachStream(), opens: make(chan fakeAttachOpenCall, 1)}
+}
+
+func (b *fakeAttachBackend) Open(ctx context.Context, sessionID string, size TerminalSize) (AttachStream, error) {
+	b.opens <- fakeAttachOpenCall{sessionID: sessionID, size: size}
+	return b.stream, nil
+}
+
+func (b *fakeAttachBackend) waitOpen(t *testing.T) fakeAttachOpenCall {
+	t.Helper()
+	select {
+	case call := <-b.opens:
+		return call
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for backend Open")
+		return fakeAttachOpenCall{}
+	}
+}
+
+type fakeAttachStream struct {
+	readCh   chan []byte
+	writes   chan []byte
+	resizes  chan TerminalSize
+	closed   chan struct{}
+	closeReq chan struct{}
+}
+
+func newFakeAttachStream() *fakeAttachStream {
+	return &fakeAttachStream{
+		readCh:   make(chan []byte, 4),
+		writes:   make(chan []byte, 4),
+		resizes:  make(chan TerminalSize, 4),
+		closed:   make(chan struct{}),
+		closeReq: make(chan struct{}),
+	}
+}
+
+func (s *fakeAttachStream) Read(p []byte) (int, error) {
+	select {
+	case data := <-s.readCh:
+		return copy(p, data), nil
+	case <-s.closeReq:
+		return 0, io.EOF
+	}
+}
+
+func (s *fakeAttachStream) Write(p []byte) (int, error) {
+	data := append([]byte(nil), p...)
+	s.writes <- data
+	return len(p), nil
+}
+
+func (s *fakeAttachStream) Resize(size TerminalSize) error {
+	s.resizes <- size
+	return nil
+}
+
+func (s *fakeAttachStream) Close() error {
+	select {
+	case <-s.closeReq:
+	default:
+		close(s.closeReq)
+	}
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+func (s *fakeAttachStream) emit(data []byte) {
+	s.readCh <- append([]byte(nil), data...)
+}
+
+func (s *fakeAttachStream) waitWrite(t *testing.T) []byte {
+	t.Helper()
+	select {
+	case data := <-s.writes:
+		return data
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream Write")
+		return nil
+	}
+}
+
+func (s *fakeAttachStream) waitResize(t *testing.T) TerminalSize {
+	t.Helper()
+	select {
+	case size := <-s.resizes:
+		return size
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream Resize")
+		return TerminalSize{}
+	}
+}
+
+func (s *fakeAttachStream) waitClosed(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.closed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for stream Close")
+	}
+}
+
+func waitWebSocketConn(t *testing.T, ch <-chan *websocket.Conn) *websocket.Conn {
+	t.Helper()
+	select {
+	case conn := <-ch:
+		return conn
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for websocket connection")
+		return nil
+	}
+}
+
+var _ AttachBackend = (*fakeAttachBackend)(nil)
+var _ AttachStream = (*fakeAttachStream)(nil)

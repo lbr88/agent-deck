@@ -5,18 +5,23 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 	"github.com/gorilla/websocket"
+	"golang.org/x/term"
 )
 
 type SessionSource interface {
@@ -40,15 +45,113 @@ type ClientConfig struct {
 
 	OnStatus   func(string)
 	OnSnapshot func(NodeSessions)
+
+	AttachBackend AttachBackend
 }
 
 type Client struct {
 	cfg    ClientConfig
 	source SessionSource
+
+	mu               sync.Mutex
+	activeConn       *clientConn
+	ownerStreams     map[string]*ownerAttachStream
+	requesterStreams map[string]*requesterAttachStream
 }
 
 func NewClient(cfg ClientConfig, source SessionSource) *Client {
 	return &Client{cfg: cfg, source: source}
+}
+
+type clientConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *clientConn) writeEnvelope(typ MessageType, nodeID string, payload any) error {
+	if c == nil || c.conn == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	env, err := MarshalEnvelope(typ, nodeID, payload)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.conn.WriteJSON(env); err != nil {
+		return fmt.Errorf("write hub %s: %w", typ, err)
+	}
+	return nil
+}
+
+type ownerAttachStream struct {
+	streamID string
+	stream   AttachStream
+	cancel   context.CancelFunc
+	once     sync.Once
+}
+
+func (s *ownerAttachStream) close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.stream != nil {
+			_ = s.stream.Close()
+		}
+	})
+}
+
+type requesterAttachStream struct {
+	streamID string
+	ready    chan AttachOpenPayload
+	data     chan []byte
+	closed   chan AttachClosePayload
+}
+
+func newRequesterAttachStream(streamID string) *requesterAttachStream {
+	return &requesterAttachStream{
+		streamID: streamID,
+		ready:    make(chan AttachOpenPayload, 1),
+		data:     make(chan []byte, 128),
+		closed:   make(chan AttachClosePayload, 1),
+	}
+}
+
+func (c *Client) setActiveConn(conn *clientConn) {
+	c.mu.Lock()
+	c.activeConn = conn
+	c.mu.Unlock()
+}
+
+func (c *Client) clearActiveConn(conn *clientConn) {
+	c.mu.Lock()
+	if c.activeConn == conn {
+		c.activeConn = nil
+	}
+	ownerStreams := c.ownerStreams
+	c.ownerStreams = nil
+	for _, stream := range c.requesterStreams {
+		select {
+		case stream.closed <- AttachClosePayload{StreamID: stream.streamID, Reason: "hub disconnected"}:
+		default:
+		}
+	}
+	c.requesterStreams = nil
+	c.mu.Unlock()
+
+	for _, stream := range ownerStreams {
+		stream.close()
+	}
+}
+
+func (c *Client) currentConn() *clientConn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.activeConn
 }
 
 func (c *Client) buildSnapshot(ctx context.Context) (SnapshotPayload, error) {
@@ -109,6 +212,9 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 		return fmt.Errorf("connect hub websocket: %w", err)
 	}
 	defer conn.Close()
+	hubConn := &clientConn{conn: conn}
+	c.setActiveConn(hubConn)
+	defer c.clearActiveConn(hubConn)
 
 	closeOnCancel := make(chan struct{})
 	go func() {
@@ -120,7 +226,7 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 	}()
 	defer close(closeOnCancel)
 
-	if err := writeEnvelope(conn, MsgHello, cfg.NodeID, NodeHelloPayload{
+	if err := hubConn.writeEnvelope(MsgHello, cfg.NodeID, NodeHelloPayload{
 		NodeID:   cfg.NodeID,
 		NodeName: cfg.NodeName,
 		Version:  cfg.Version,
@@ -129,14 +235,14 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 	}); err != nil {
 		return err
 	}
-	if err := c.publishSnapshot(ctx, conn, cfg.NodeID, cfg.NodeName); err != nil {
+	if err := c.publishSnapshot(ctx, hubConn, cfg.NodeID, cfg.NodeName); err != nil {
 		return err
 	}
 	notifyClientStatus(cfg, "connected")
 
 	readErr := make(chan error, 1)
 	go func() {
-		readErr <- c.readLoop(ctx, conn)
+		readErr <- c.readLoop(ctx, hubConn)
 	}()
 
 	heartbeatTicker := time.NewTicker(cfg.heartbeatInterval())
@@ -154,18 +260,18 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 			}
 			return err
 		case <-heartbeatTicker.C:
-			if err := writeEnvelope(conn, MsgHeartbeat, cfg.NodeID, nil); err != nil {
+			if err := hubConn.writeEnvelope(MsgHeartbeat, cfg.NodeID, nil); err != nil {
 				return err
 			}
 		case <-snapshotTicker.C:
-			if err := c.publishSnapshot(ctx, conn, cfg.NodeID, cfg.NodeName); err != nil {
+			if err := c.publishSnapshot(ctx, hubConn, cfg.NodeID, cfg.NodeName); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (c *Client) publishSnapshot(ctx context.Context, conn *websocket.Conn, nodeID, nodeName string) error {
+func (c *Client) publishSnapshot(ctx context.Context, conn *clientConn, nodeID, nodeName string) error {
 	snapshot, err := c.buildSnapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("build snapshot: %w", err)
@@ -179,23 +285,27 @@ func (c *Client) publishSnapshot(ctx context.Context, conn *websocket.Conn, node
 	if strings.TrimSpace(snapshot.NodeName) == "" {
 		snapshot.NodeName = strings.TrimSpace(nodeName)
 	}
-	return writeEnvelope(conn, MsgSnapshot, nodeID, snapshot)
+	return conn.writeEnvelope(MsgSnapshot, nodeID, snapshot)
 }
 
-func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
+func (c *Client) readLoop(ctx context.Context, conn *clientConn) error {
 	for {
 		var env Envelope
-		if err := conn.ReadJSON(&env); err != nil {
+		if err := conn.conn.ReadJSON(&env); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
-		c.dispatch(env)
+		c.dispatchWithConn(ctx, conn, env)
 	}
 }
 
 func (c *Client) dispatch(env Envelope) {
+	c.dispatchWithConn(context.Background(), nil, env)
+}
+
+func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Envelope) {
 	switch env.Type {
 	case MsgSnapshot:
 		if c.cfg.OnSnapshot == nil {
@@ -221,11 +331,352 @@ func (c *Client) dispatch(env Envelope) {
 			SentAt:   snapshot.SentAt,
 			Sessions: append([]SessionInfo(nil), snapshot.Sessions...),
 		})
-	case MsgWelcome, MsgHeartbeat, MsgCommand, MsgAttachOpen, MsgAttachReady, MsgAttachData, MsgAttachResize, MsgAttachClose, MsgAttachClosed, MsgCommandResult, MsgError:
+	case MsgAttachOpen:
+		c.handleAttachOpen(ctx, conn, env)
+	case MsgAttachReady:
+		c.handleAttachReady(env)
+	case MsgAttachData:
+		c.handleAttachData(env)
+	case MsgAttachResize:
+		c.handleAttachResize(env)
+	case MsgAttachClose:
+		c.handleAttachClose(env)
+	case MsgAttachClosed:
+		c.handleAttachClosed(env)
+	case MsgWelcome, MsgHeartbeat, MsgCommand, MsgCommandResult, MsgError:
 		return
 	default:
 		return
 	}
+}
+
+func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Envelope) {
+	if conn == nil {
+		return
+	}
+	var payload AttachOpenPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	streamID := strings.TrimSpace(payload.StreamID)
+	sessionID := strings.TrimSpace(payload.SessionID)
+	if streamID == "" || sessionID == "" {
+		return
+	}
+	backend := c.cfg.AttachBackend
+	if backend == nil {
+		backend = NewTmuxAttachBackend("")
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := backend.Open(streamCtx, sessionID, TerminalSize{Cols: payload.Cols, Rows: payload.Rows})
+	if err != nil {
+		cancel()
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()})
+		return
+	}
+	ownerStream := &ownerAttachStream{streamID: streamID, stream: stream, cancel: cancel}
+	c.registerOwnerStream(ownerStream)
+	if err := conn.writeEnvelope(MsgAttachReady, c.cfg.NodeID, AttachOpenPayload{
+		StreamID:  streamID,
+		NodeID:    c.cfg.NodeID,
+		SessionID: sessionID,
+		Cols:      payload.Cols,
+		Rows:      payload.Rows,
+	}); err != nil {
+		c.unregisterOwnerStream(streamID)
+		ownerStream.close()
+		return
+	}
+	go c.pumpOwnerAttachOutput(streamCtx, conn, ownerStream)
+}
+
+func (c *Client) pumpOwnerAttachOutput(ctx context.Context, conn *clientConn, ownerStream *ownerAttachStream) {
+	defer c.unregisterOwnerStream(ownerStream.streamID)
+	defer ownerStream.close()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := ownerStream.stream.Read(buf)
+		if n > 0 {
+			data := append([]byte(nil), buf[:n]...)
+			if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(ownerStream.streamID, data)); writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			reason := ""
+			if ctx.Err() == nil && err != io.EOF {
+				reason = err.Error()
+			}
+			_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: ownerStream.streamID, Reason: reason})
+			return
+		}
+	}
+}
+
+func (c *Client) handleAttachReady(env Envelope) {
+	var payload AttachOpenPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	stream := c.requesterStream(payload.StreamID)
+	if stream == nil {
+		return
+	}
+	select {
+	case stream.ready <- payload:
+	default:
+	}
+}
+
+func (c *Client) handleAttachData(env Envelope) {
+	var payload AttachDataPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	data, err := payload.Bytes()
+	if err != nil {
+		return
+	}
+	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
+		_, _ = ownerStream.stream.Write(data)
+		return
+	}
+	if requesterStream := c.requesterStream(payload.StreamID); requesterStream != nil {
+		requesterStream.data <- data
+	}
+}
+
+func (c *Client) handleAttachResize(env Envelope) {
+	var payload AttachResizePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
+		_ = ownerStream.stream.Resize(TerminalSize{Cols: payload.Cols, Rows: payload.Rows})
+	}
+}
+
+func (c *Client) handleAttachClose(env Envelope) {
+	var payload AttachClosePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	ownerStream := c.unregisterOwnerStream(payload.StreamID)
+	if ownerStream == nil {
+		return
+	}
+	ownerStream.close()
+}
+
+func (c *Client) handleAttachClosed(env Envelope) {
+	var payload AttachClosePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	stream := c.unregisterRequesterStream(payload.StreamID)
+	if stream == nil {
+		return
+	}
+	select {
+	case stream.closed <- payload:
+	default:
+	}
+}
+
+func (c *Client) registerOwnerStream(stream *ownerAttachStream) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ownerStreams == nil {
+		c.ownerStreams = make(map[string]*ownerAttachStream)
+	}
+	c.ownerStreams[stream.streamID] = stream
+}
+
+func (c *Client) ownerStream(streamID string) *ownerAttachStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ownerStreams[strings.TrimSpace(streamID)]
+}
+
+func (c *Client) unregisterOwnerStream(streamID string) *ownerAttachStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	streamID = strings.TrimSpace(streamID)
+	stream := c.ownerStreams[streamID]
+	delete(c.ownerStreams, streamID)
+	return stream
+}
+
+func (c *Client) registerRequesterStream(stream *requesterAttachStream) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.requesterStreams == nil {
+		c.requesterStreams = make(map[string]*requesterAttachStream)
+	}
+	c.requesterStreams[stream.streamID] = stream
+}
+
+func (c *Client) requesterStream(streamID string) *requesterAttachStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requesterStreams[strings.TrimSpace(streamID)]
+}
+
+func (c *Client) unregisterRequesterStream(streamID string) *requesterAttachStream {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	streamID = strings.TrimSpace(streamID)
+	stream := c.requesterStreams[streamID]
+	delete(c.requesterStreams, streamID)
+	return stream
+}
+
+func (c *Client) Attach(ctx context.Context, nodeID, sessionID string, size TerminalSize) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" {
+		return fmt.Errorf("hub attach node id is required")
+	}
+	if sessionID == "" {
+		return fmt.Errorf("hub attach session id is required")
+	}
+	conn := c.currentConn()
+	if conn == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	if size.Cols <= 0 || size.Rows <= 0 {
+		size = currentTerminalSize()
+	}
+	streamID, err := newSecret("attach_")
+	if err != nil {
+		return err
+	}
+	stream := newRequesterAttachStream(streamID)
+	c.registerRequesterStream(stream)
+	defer c.unregisterRequesterStream(streamID)
+
+	if err := conn.writeEnvelope(MsgAttachOpen, c.cfg.NodeID, AttachOpenPayload{
+		StreamID:  streamID,
+		NodeID:    nodeID,
+		SessionID: sessionID,
+		Cols:      size.Cols,
+		Rows:      size.Rows,
+	}); err != nil {
+		return err
+	}
+
+	select {
+	case <-stream.ready:
+	case closed := <-stream.closed:
+		err := attachClosedError(closed)
+		if errors.Is(err, errAttachClosedByOwner) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: ctx.Err().Error()})
+		return ctx.Err()
+	}
+
+	return c.runRequesterAttachTerminal(ctx, conn, stream)
+}
+
+func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientConn, stream *requesterAttachStream) error {
+	stdinFD := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(stdinFD)
+	if err != nil {
+		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: err.Error()})
+		return fmt.Errorf("set terminal raw mode: %w", err)
+	}
+	defer func() { _ = term.Restore(stdinFD, oldState) }()
+
+	errCh := make(chan error, 2)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunk := append([]byte(nil), buf[:n]...)
+				if idx := tmux.IndexCtrlQ(chunk); idx >= 0 {
+					if idx > 0 {
+						if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(stream.streamID, chunk[:idx])); writeErr != nil {
+							errCh <- writeErr
+							return
+						}
+					}
+					errCh <- nil
+					return
+				}
+				if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(stream.streamID, chunk)); writeErr != nil {
+					errCh <- writeErr
+					return
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
+					errCh <- nil
+				} else {
+					errCh <- err
+				}
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case data := <-stream.data:
+				if len(data) == 0 {
+					continue
+				}
+				if _, err := os.Stdout.Write(data); err != nil {
+					errCh <- err
+					return
+				}
+			case closed := <-stream.closed:
+				errCh <- attachClosedError(closed)
+				return
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+	}()
+
+	err = <-errCh
+	if errors.Is(err, errAttachClosedByOwner) {
+		return nil
+	}
+	if err == nil || ctx.Err() != nil {
+		reason := "detached"
+		if ctx.Err() != nil {
+			reason = ctx.Err().Error()
+		}
+		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: reason})
+	}
+	return err
+}
+
+func attachClosedError(payload AttachClosePayload) error {
+	if strings.TrimSpace(payload.Reason) == "" {
+		return errAttachClosedByOwner
+	}
+	return fmt.Errorf("hub attach closed: %s", payload.Reason)
+}
+
+var errAttachClosedByOwner = errors.New("hub attach closed by owner")
+
+func currentTerminalSize() TerminalSize {
+	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
+	if err != nil {
+		return TerminalSize{}
+	}
+	return TerminalSize{Cols: cols, Rows: rows}
 }
 
 func notifyClientStatus(cfg ClientConfig, status string) {
@@ -328,17 +779,6 @@ func rowUpdatedAt(row *statedb.InstanceRow) *time.Time {
 	default:
 		return nil
 	}
-}
-
-func writeEnvelope(conn *websocket.Conn, typ MessageType, nodeID string, payload any) error {
-	env, err := MarshalEnvelope(typ, nodeID, payload)
-	if err != nil {
-		return err
-	}
-	if err := conn.WriteJSON(env); err != nil {
-		return fmt.Errorf("write hub %s: %w", typ, err)
-	}
-	return nil
 }
 
 func (c *Client) normalizedConfig() (ClientConfig, error) {

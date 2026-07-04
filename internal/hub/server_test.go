@@ -206,6 +206,90 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_requester", "laptop", hashSecret("requester_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode requester: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
+	defer requester.Close()
+	readTestWelcome(t, requester)
+	owner := dialTestNodeWebSocket(t, httpServer.URL, "node_owner", "owner_secret")
+	defer owner.Close()
+	readTestWelcome(t, owner)
+
+	open, err := MarshalEnvelope(MsgAttachOpen, "node_requester", AttachOpenPayload{
+		StreamID:  "stream_1",
+		NodeID:    "node_owner",
+		SessionID: "sess_1",
+		Cols:      120,
+		Rows:      40,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope open: %v", err)
+	}
+	if err := requester.WriteJSON(open); err != nil {
+		t.Fatalf("requester WriteJSON open: %v", err)
+	}
+	gotOpen := readTestEnvelope(t, owner)
+	if gotOpen.Type != MsgAttachOpen || gotOpen.NodeID != "node_requester" {
+		t.Fatalf("owner open envelope = %+v", gotOpen)
+	}
+
+	input, err := MarshalEnvelope(MsgAttachData, "node_requester", NewAttachData("stream_1", []byte("input")))
+	if err != nil {
+		t.Fatalf("MarshalEnvelope input: %v", err)
+	}
+	if err := requester.WriteJSON(input); err != nil {
+		t.Fatalf("requester WriteJSON input: %v", err)
+	}
+	gotInput := readTestEnvelope(t, owner)
+	if gotInput.Type != MsgAttachData || gotInput.NodeID != "node_requester" {
+		t.Fatalf("owner input envelope = %+v", gotInput)
+	}
+
+	ready, err := MarshalEnvelope(MsgAttachReady, "node_owner", AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1", Cols: 120, Rows: 40})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope ready: %v", err)
+	}
+	if err := owner.WriteJSON(ready); err != nil {
+		t.Fatalf("owner WriteJSON ready: %v", err)
+	}
+	gotReady := readTestEnvelope(t, requester)
+	if gotReady.Type != MsgAttachReady || gotReady.NodeID != "node_owner" {
+		t.Fatalf("requester ready envelope = %+v", gotReady)
+	}
+
+	output, err := MarshalEnvelope(MsgAttachData, "node_owner", NewAttachData("stream_1", []byte("output")))
+	if err != nil {
+		t.Fatalf("MarshalEnvelope output: %v", err)
+	}
+	if err := owner.WriteJSON(output); err != nil {
+		t.Fatalf("owner WriteJSON output: %v", err)
+	}
+	gotOutput := readTestEnvelope(t, requester)
+	if gotOutput.Type != MsgAttachData || gotOutput.NodeID != "node_owner" {
+		t.Fatalf("requester output envelope = %+v", gotOutput)
+	}
+
+	closed, err := MarshalEnvelope(MsgAttachClosed, "node_owner", AttachClosePayload{StreamID: "stream_1", Reason: "done"})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope closed: %v", err)
+	}
+	if err := owner.WriteJSON(closed); err != nil {
+		t.Fatalf("owner WriteJSON closed: %v", err)
+	}
+	gotClosed := readTestEnvelope(t, requester)
+	if gotClosed.Type != MsgAttachClosed || gotClosed.NodeID != "node_owner" {
+		t.Fatalf("requester closed envelope = %+v", gotClosed)
+	}
+}
+
 func TestHubNodeWebSocketAcceptsHeartbeat(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
@@ -327,6 +411,18 @@ func readTestWelcome(t *testing.T, conn *websocket.Conn) {
 	if env.Type != MsgWelcome {
 		t.Fatalf("welcome type = %q, want %q", env.Type, MsgWelcome)
 	}
+}
+
+func readTestEnvelope(t *testing.T, conn *websocket.Conn) Envelope {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	var env Envelope
+	if err := conn.ReadJSON(&env); err != nil {
+		t.Fatalf("ReadJSON envelope: %v", err)
+	}
+	return env
 }
 
 func waitNodeStatus(t *testing.T, server *Server, nodeID, want string) {

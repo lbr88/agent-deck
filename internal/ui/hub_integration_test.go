@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -211,6 +212,59 @@ func TestHubRowsDoNotCreateLocalSessions(t *testing.T) {
 	}
 }
 
+func TestHubAttachCmdCallsClient(t *testing.T) {
+	client := &fakeHubAttachClient{}
+	cmd := hubAttachCmd{
+		client:    client,
+		nodeID:    "node_server",
+		sessionID: "remote_session",
+		size:      hub.TerminalSize{Cols: 120, Rows: 40},
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.nodeID != "node_server" || client.sessionID != "remote_session" {
+		t.Fatalf("attach call = node %q session %q", client.nodeID, client.sessionID)
+	}
+	if client.size.Cols != 120 || client.size.Rows != 40 {
+		t.Fatalf("attach size = %+v, want 120x40", client.size)
+	}
+}
+
+func TestHubEnterOnSessionStartsAttachCommand(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     "deploy",
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("Enter on hub session returned no command")
+	}
+	if h.err != nil {
+		t.Fatalf("Enter on hub session error = %v", h.err)
+	}
+	if !h.isAttaching.Load() {
+		t.Fatal("Enter on hub session did not mark Home as attaching")
+	}
+}
+
 func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	t.Helper()
 	setXDGTestHome(t)
@@ -225,6 +279,23 @@ func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	}
 	h.groupTree = session.NewGroupTree(instances)
 	return h
+}
+
+type fakeHubAttachClient struct {
+	nodeID    string
+	sessionID string
+	size      hub.TerminalSize
+}
+
+func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
+	c.nodeID = nodeID
+	c.sessionID = sessionID
+	c.size = size
+	return nil
+}
+
+func (c *fakeHubAttachClient) Close() error {
+	return nil
 }
 
 func indexHubSession(t *testing.T, h *Home, id string) int {

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,12 +28,29 @@ type Server struct {
 	mu              sync.Mutex
 	nodeConnections map[string]int
 	peers           map[*hubPeer]struct{}
+	attachRouter    *AttachRouter
 }
 
 type hubPeer struct {
 	nodeID string
 	conn   *websocket.Conn
 	mu     sync.Mutex
+}
+
+func (p *hubPeer) NodeID() string {
+	if p == nil {
+		return ""
+	}
+	return p.nodeID
+}
+
+func (p *hubPeer) Send(env Envelope) error {
+	if p == nil || p.conn == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conn.WriteJSON(env)
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -46,7 +64,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: store}, nil
+	return &Server{cfg: cfg, store: store, attachRouter: NewAttachRouter()}, nil
 }
 
 func (s *Store) Nodes() ([]Node, error) {
@@ -246,7 +264,7 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 		if err := conn.ReadJSON(&env); err != nil {
 			return
 		}
-		if err := s.handleNodeEnvelope(node, env); err != nil {
+		if err := s.handleNodeEnvelope(r.Context(), node, env); err != nil {
 			errEnv, marshalErr := MarshalEnvelope(MsgError, node.ID, ErrorPayload{Message: err.Error()})
 			if marshalErr == nil {
 				_ = s.writePeerJSON(peer, errEnv)
@@ -255,7 +273,7 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleNodeEnvelope(node Node, env Envelope) error {
+func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, env Envelope) error {
 	if env.Version != 0 && env.Version != ProtocolVersion {
 		return fmt.Errorf("unsupported protocol version %d", env.Version)
 	}
@@ -277,7 +295,43 @@ func (s *Server) handleNodeEnvelope(node Node, env Envelope) error {
 		}
 		s.broadcastSnapshot(node.ID, snapshot)
 		return nil
-	case MsgCommand, MsgCommandResult, MsgAttachOpen, MsgAttachReady, MsgAttachData, MsgAttachResize, MsgAttachClose, MsgAttachClosed:
+	case MsgAttachOpen:
+		var payload AttachOpenPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach open: %w", err)
+		}
+		return s.attachRouter.Open(ctx, node.ID, payload.NodeID, payload)
+	case MsgAttachReady:
+		var payload AttachOpenPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach ready: %w", err)
+		}
+		return s.attachRouter.ForwardReadyFromOwner(node.ID, payload)
+	case MsgAttachData:
+		var payload AttachDataPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach data: %w", err)
+		}
+		return s.attachRouter.ForwardDataFromNode(node.ID, payload)
+	case MsgAttachResize:
+		var payload AttachResizePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach resize: %w", err)
+		}
+		return s.attachRouter.ForwardResizeFromRequester(node.ID, payload)
+	case MsgAttachClose:
+		var payload AttachClosePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach close: %w", err)
+		}
+		return s.attachRouter.ForwardCloseFromRequester(node.ID, payload)
+	case MsgAttachClosed:
+		var payload AttachClosePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode attach closed: %w", err)
+		}
+		return s.attachRouter.ForwardClosedFromOwner(node.ID, payload)
+	case MsgCommand, MsgCommandResult:
 		return nil
 	default:
 		return nil
@@ -286,7 +340,6 @@ func (s *Server) handleNodeEnvelope(node Node, env Envelope) error {
 
 func (s *Server) retainNodeConnection(nodeID string, peer *hubPeer) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.nodeConnections == nil {
 		s.nodeConnections = make(map[string]int)
 	}
@@ -298,19 +351,37 @@ func (s *Server) retainNodeConnection(nodeID string, peer *hubPeer) {
 		_ = s.store.MarkNodeOnline(nodeID)
 	}
 	s.nodeConnections[nodeID]++
+	s.mu.Unlock()
+	if s.attachRouter != nil {
+		s.attachRouter.Register(peer)
+	}
 }
 
 func (s *Server) releaseNodeConnection(nodeID string, peer *hubPeer) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.peers, peer)
 	count := s.nodeConnections[nodeID]
 	if count <= 1 {
 		delete(s.nodeConnections, nodeID)
 		_ = s.store.MarkNodeOffline(nodeID)
+		s.mu.Unlock()
+		if s.attachRouter != nil {
+			s.attachRouter.Unregister(nodeID)
+		}
 		return
 	}
 	s.nodeConnections[nodeID] = count - 1
+	var replacement *hubPeer
+	for candidate := range s.peers {
+		if candidate.nodeID == nodeID {
+			replacement = candidate
+			break
+		}
+	}
+	s.mu.Unlock()
+	if replacement != nil && s.attachRouter != nil {
+		s.attachRouter.Register(replacement)
+	}
 }
 
 func (s *Server) sendLatestSnapshots(peer *hubPeer) error {
@@ -358,6 +429,10 @@ func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload
 }
 
 func (s *Server) writePeerJSON(peer *hubPeer, v any) error {
+	env, ok := v.(Envelope)
+	if ok {
+		return peer.Send(env)
+	}
 	if peer == nil || peer.conn == nil {
 		return nil
 	}
