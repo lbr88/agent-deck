@@ -309,6 +309,9 @@ func main() {
 		case "remote":
 			handleRemote(profile, args[1:])
 			return
+		case "hub":
+			handleHub(profile, args[1:])
+			return
 		case "worktree", "wt":
 			handleWorktree(profile, args[1:])
 			return

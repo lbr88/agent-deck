@@ -205,6 +205,9 @@ type UserConfig struct {
 	// Remotes defines named SSH remote agent-deck instances
 	Remotes map[string]RemoteConfig `toml:"remotes,omitempty"`
 
+	// Hub defines the encrypted Agent Deck Hub connection for this node.
+	Hub HubSettings `toml:"hub,omitempty"`
+
 	// OpenClaw defines OpenClaw gateway integration settings
 	OpenClaw OpenClawSettings `toml:"openclaw,omitempty"`
 
@@ -624,6 +627,22 @@ type OpenClawSettings struct {
 
 	// GroupName is the agent-deck group name for OpenClaw sessions (default: "openclaw")
 	GroupName string `toml:"group_name,omitempty"`
+}
+
+// HubSettings configures the encrypted Agent Deck Hub connection for this node.
+type HubSettings struct {
+	URL           string `toml:"url,omitempty"`
+	NodeID        string `toml:"node_id,omitempty"`
+	NodeName      string `toml:"node_name,omitempty"`
+	TokenFile     string `toml:"token_file,omitempty"`
+	AutoConnect   bool   `toml:"auto_connect,omitempty"`
+	TLSSkipVerify bool   `toml:"tls_skip_verify,omitempty"`
+	CAPemFile     string `toml:"ca_pem_file,omitempty"`
+	ServerName    string `toml:"server_name,omitempty"`
+}
+
+func (h HubSettings) Enabled() bool {
+	return strings.TrimSpace(h.URL) != "" && strings.TrimSpace(h.NodeID) != ""
 }
 
 // RemoteConfig defines a remote agent-deck instance accessible via SSH.
