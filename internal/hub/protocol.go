@@ -50,14 +50,14 @@ type WelcomePayload struct {
 }
 
 type SessionInfo struct {
-	ID               string    `json:"id"`
-	Title            string    `json:"title"`
-	Tool             string    `json:"tool"`
-	Status           string    `json:"status"`
-	GroupPath        string    `json:"group_path"`
-	ProjectPath      string    `json:"project_path,omitempty"`
-	DisplaySessionID string    `json:"display_session_id,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at,omitempty"`
+	ID               string     `json:"id"`
+	Title            string     `json:"title"`
+	Tool             string     `json:"tool"`
+	Status           string     `json:"status"`
+	GroupPath        string     `json:"group_path"`
+	ProjectPath      string     `json:"project_path,omitempty"`
+	DisplaySessionID string     `json:"display_session_id,omitempty"`
+	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
 }
 
 type SnapshotPayload struct {

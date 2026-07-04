@@ -1,8 +1,8 @@
 package hub
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,13 +44,56 @@ func TestEnvelopeRoundTripSessionSnapshot(t *testing.T) {
 }
 
 func TestAttachDataIsBase64TerminalBytes(t *testing.T) {
-	frame := AttachDataPayload{StreamID: "str_1", DataB64: base64.StdEncoding.EncodeToString([]byte{0x1b, '[', 'A'})}
+	frame := NewAttachData("str_1", []byte{0x1b, '[', 'A'})
 	data, err := frame.Bytes()
 	if err != nil {
 		t.Fatalf("Bytes: %v", err)
 	}
 	if string(data) != "\x1b[A" {
 		t.Fatalf("decoded = %q", string(data))
+	}
+}
+
+func TestMarshalEnvelopeEmbedsPayload(t *testing.T) {
+	in := SnapshotPayload{
+		SentAt: time.Unix(456, 0).UTC(),
+		Sessions: []SessionInfo{{
+			ID:        "sess_2",
+			Title:     "hub-work",
+			Tool:      "codex",
+			Status:    "running",
+			GroupPath: "default",
+		}},
+	}
+	env, err := MarshalEnvelope(MsgSnapshot, "node_456", in)
+	if err != nil {
+		t.Fatalf("MarshalEnvelope: %v", err)
+	}
+	if env.Version != ProtocolVersion || env.Type != MsgSnapshot || env.NodeID != "node_456" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if len(payload.Sessions) != 1 || payload.Sessions[0].ID != "sess_2" {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestSessionInfoWithoutUpdatedAtOmitsField(t *testing.T) {
+	data, err := json.Marshal(SessionInfo{
+		ID:        "sess_3",
+		Title:     "api-fix",
+		Tool:      "claude",
+		Status:    "waiting",
+		GroupPath: "default",
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "updated_at") {
+		t.Fatalf("json includes updated_at: %s", data)
 	}
 }
 
