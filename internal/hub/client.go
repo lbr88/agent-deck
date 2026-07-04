@@ -32,14 +32,15 @@ type SessionSource interface {
 }
 
 type ClientConfig struct {
-	URL           string
-	NodeID        string
-	NodeName      string
-	Token         string
-	Version       string
-	TLSSkipVerify bool
-	CAPemFile     string
-	ServerName    string
+	URL              string
+	NodeID           string
+	NodeName         string
+	Token            string
+	Version          string
+	TLSSkipVerify    bool
+	CAPemFile        string
+	ServerName       string
+	PinnedCertSHA256 string
 
 	HeartbeatInterval  time.Duration
 	SnapshotInterval   time.Duration
@@ -1026,6 +1027,7 @@ func (c *Client) normalizedConfig() (ClientConfig, error) {
 	cfg.Version = strings.TrimSpace(cfg.Version)
 	cfg.CAPemFile = strings.TrimSpace(cfg.CAPemFile)
 	cfg.ServerName = strings.TrimSpace(cfg.ServerName)
+	cfg.PinnedCertSHA256 = strings.TrimSpace(cfg.PinnedCertSHA256)
 	if cfg.URL == "" {
 		return ClientConfig{}, fmt.Errorf("hub URL is required")
 	}
@@ -1063,6 +1065,15 @@ func nodeWebSocketURL(rawURL, nodeID string) (string, error) {
 }
 
 func clientTLSConfig(cfg ClientConfig) (*tls.Config, error) {
+	if strings.TrimSpace(cfg.PinnedCertSHA256) != "" {
+		pinned := strings.TrimSpace(cfg.PinnedCertSHA256)
+		return &tls.Config{
+			InsecureSkipVerify: true,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				return VerifyPinnedCertificate(rawCerts, pinned)
+			},
+		}, nil
+	}
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: cfg.TLSSkipVerify,
 		ServerName:         cfg.ServerName,

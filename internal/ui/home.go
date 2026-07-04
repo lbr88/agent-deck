@@ -1677,16 +1677,17 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 	}
 	hubCtx, cancel := context.WithCancel(parent)
 	client := hub.NewClient(hub.ClientConfig{
-		URL:           strings.TrimSpace(cfg.URL),
-		NodeID:        strings.TrimSpace(cfg.NodeID),
-		NodeName:      nodeName,
-		Token:         token,
-		Version:       Version,
-		TLSSkipVerify: cfg.TLSSkipVerify,
-		CAPemFile:     strings.TrimSpace(cfg.CAPemFile),
-		ServerName:    strings.TrimSpace(cfg.ServerName),
-		AttachBackend: hub.NewTmuxAttachBackend(profile),
-		ActionBackend: hub.LocalActionBackend{Profile: profile},
+		URL:              strings.TrimSpace(cfg.URL),
+		NodeID:           strings.TrimSpace(cfg.NodeID),
+		NodeName:         nodeName,
+		Token:            token,
+		Version:          Version,
+		TLSSkipVerify:    cfg.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(cfg.CAPemFile),
+		ServerName:       strings.TrimSpace(cfg.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(cfg.PinnedCertSHA256),
+		AttachBackend:    hub.NewTmuxAttachBackend(profile),
+		ActionBackend:    hub.LocalActionBackend{Profile: profile},
 		OnStatus: func(status string) {
 			if setStatus != nil {
 				setStatus("hub " + strings.TrimSpace(status))

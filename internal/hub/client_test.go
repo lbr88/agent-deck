@@ -884,6 +884,28 @@ func (s *fakeAttachStream) waitClosed(t *testing.T) {
 	}
 }
 
+func TestClientTLSConfigRejectsChangedPinnedCertificate(t *testing.T) {
+	goodServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer goodServer.Close()
+
+	goodDER := goodServer.Certificate().Raw
+	badDER := append([]byte(nil), goodDER...)
+	badDER[len(badDER)-1] ^= 0xff
+	tlsConfig, err := clientTLSConfig(ClientConfig{PinnedCertSHA256: CertificateFingerprintSHA256(goodDER)})
+	if err != nil {
+		t.Fatalf("clientTLSConfig: %v", err)
+	}
+	if !tlsConfig.InsecureSkipVerify {
+		t.Fatal("pinned certificate mode should use custom verification")
+	}
+	if err := tlsConfig.VerifyPeerCertificate([][]byte{goodDER}, nil); err != nil {
+		t.Fatalf("VerifyPeerCertificate good cert: %v", err)
+	}
+	if err := tlsConfig.VerifyPeerCertificate([][]byte{badDER}, nil); err == nil {
+		t.Fatal("VerifyPeerCertificate accepted changed certificate")
+	}
+}
+
 func waitWebSocketConn(t *testing.T, ch <-chan *websocket.Conn) *websocket.Conn {
 	t.Helper()
 	select {

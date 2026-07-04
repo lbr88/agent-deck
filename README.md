@@ -826,8 +826,8 @@ Pressing `n` on a remote group or session opens the full new-session dialog in *
 Agent Deck Hub connects multiple trusted agent-deck instances through one encrypted relay. It is not a web app: the hub keeps node state and relays session snapshots, terminal attach streams, and basic session actions between joined nodes.
 
 ```bash
-# Run the hub with TLS
-agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub --tls-cert cert.pem --tls-key key.pem
+# Run the hub. It creates and reuses a self-signed TLS cert by default.
+agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
 
 # Create a single-use invite on the hub host
 agent-deck hub invite laptop
@@ -836,7 +836,7 @@ agent-deck hub invite laptop
 agent-deck hub join wss://hub.example:8421 --token <token>
 ```
 
-After join, the TUI auto-connects on startup. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required.
+After join, the TUI auto-connects on startup. The first join prompts you to accept the hub certificate fingerprint, then stores that pin like an SSH host key. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required.
 
 See [Agent Deck Hub](docs/AGENT-DECK-HUB.md) for Docker deployment and the security model.
 

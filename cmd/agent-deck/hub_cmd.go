@@ -3,13 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,14 +34,15 @@ import (
 )
 
 type hubJoinResult struct {
-	URL           string `json:"url"`
-	NodeID        string `json:"node_id"`
-	NodeName      string `json:"node_name"`
-	NodeToken     string `json:"node_token"`
-	TokenPath     string `json:"-"`
-	TLSSkipVerify bool   `json:"-"`
-	CAPemFile     string `json:"-"`
-	ServerName    string `json:"-"`
+	URL              string `json:"url"`
+	NodeID           string `json:"node_id"`
+	NodeName         string `json:"node_name"`
+	NodeToken        string `json:"node_token"`
+	TokenPath        string `json:"-"`
+	TLSSkipVerify    bool   `json:"-"`
+	CAPemFile        string `json:"-"`
+	ServerName       string `json:"-"`
+	PinnedCertSHA256 string `json:"-"`
 }
 
 type hubJoinRequest struct {
@@ -43,6 +51,13 @@ type hubJoinRequest struct {
 	Version     string `json:"version,omitempty"`
 	OS          string `json:"os,omitempty"`
 	Arch        string `json:"arch,omitempty"`
+}
+
+type hubServerCertInfo struct {
+	Host     string
+	SHA256   string
+	Subject  string
+	NotAfter time.Time
 }
 
 type hubNodeOutput struct {
@@ -94,10 +109,10 @@ func handleHubServe(args []string) error {
 	fs.SetOutput(io.Discard)
 	listen := fs.String("listen", "127.0.0.1:8421", "Listen address for the hub server")
 	dataDir := fs.String("data", defaultData, "Hub data directory")
-	tlsCert := fs.String("tls-cert", "", "TLS certificate file (required)")
-	tlsKey := fs.String("tls-key", "", "TLS private key file (required)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file; defaults to a generated self-signed cert in --data")
+	tlsKey := fs.String("tls-key", "", "TLS private key file; defaults to a generated self-signed key in --data")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--data dir] --tls-cert cert.pem --tls-key key.pem")
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--data dir] [--tls-cert cert.pem --tls-key key.pem]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -109,23 +124,119 @@ func handleHubServe(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	if strings.TrimSpace(*tlsCert) == "" || strings.TrimSpace(*tlsKey) == "" {
-		return fmt.Errorf("agent-deck hub serve requires --tls-cert and --tls-key")
+	certFile, keyFile, generated, err := resolveHubServeTLSFiles(*dataDir, *tlsCert, *tlsKey)
+	if err != nil {
+		return err
 	}
 
 	server, err := hub.NewServer(hub.ServerConfig{
 		ListenAddr: *listen,
 		DataDir:    *dataDir,
-		CertFile:   *tlsCert,
-		KeyFile:    *tlsKey,
+		CertFile:   certFile,
+		KeyFile:    keyFile,
 	})
 	if err != nil {
 		return err
 	}
 	defer server.Close()
 
+	if generated {
+		fmt.Printf("Generated self-signed hub certificate: %s\n", certFile)
+		fmt.Printf("Generated self-signed hub key: %s\n", keyFile)
+	}
 	fmt.Printf("Agent Deck Hub listening on %s\n", *listen)
 	return server.Serve()
+}
+
+func resolveHubServeTLSFiles(dataDir, certFile, keyFile string) (string, string, bool, error) {
+	dataDir = strings.TrimSpace(dataDir)
+	certFile = strings.TrimSpace(certFile)
+	keyFile = strings.TrimSpace(keyFile)
+	if (certFile == "") != (keyFile == "") {
+		return "", "", false, fmt.Errorf("--tls-cert and --tls-key must be provided together")
+	}
+	if certFile != "" {
+		return certFile, keyFile, false, nil
+	}
+	if dataDir == "" {
+		return "", "", false, fmt.Errorf("hub data dir is required")
+	}
+	certFile = filepath.Join(dataDir, "hub-self-signed.crt")
+	keyFile = filepath.Join(dataDir, "hub-self-signed.key")
+	if fileExists(certFile) && fileExists(keyFile) {
+		return certFile, keyFile, false, nil
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return "", "", false, fmt.Errorf("create hub data dir: %w", err)
+	}
+	if err := writeSelfSignedHubCertificate(certFile, keyFile); err != nil {
+		return "", "", false, err
+	}
+	return certFile, keyFile, true, nil
+}
+
+func fileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func writeSelfSignedHubCertificate(certFile, keyFile string) error {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate hub TLS key: %w", err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		return fmt.Errorf("generate hub TLS serial: %w", err)
+	}
+	now := time.Now()
+	dnsNames := []string{"localhost"}
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.TrimSpace(hostname)
+		if hostname != "" && hostname != "localhost" {
+			dnsNames = append(dnsNames, hostname)
+		}
+	}
+	template := x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName: "agent-deck hub self-signed",
+		},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              dnsNames,
+		IPAddresses: []net.IP{
+			net.ParseIP("127.0.0.1"),
+			net.ParseIP("::1"),
+		},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("create hub TLS certificate: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return fmt.Errorf("marshal hub TLS key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := atomicfile.WriteFileDurable(certFile, certPEM, 0o644); err != nil {
+		return fmt.Errorf("write hub TLS certificate: %w", err)
+	}
+	if err := atomicfile.WriteFileDurable(keyFile, keyPEM, 0o600); err != nil {
+		return fmt.Errorf("write hub TLS key: %w", err)
+	}
+	if err := os.Chmod(keyFile, 0o600); err != nil {
+		return fmt.Errorf("chmod hub TLS key: %w", err)
+	}
+	return nil
 }
 
 func handleHubInvite(args []string) error {
@@ -199,17 +310,21 @@ func handleHubJoin(args []string) error {
 		return fmt.Errorf("load user config: %w", err)
 	}
 
+	tlsOptions := hubJoinTLSOptions{
+		TLSSkipVerify: *tlsSkipVerify,
+		CAPemFile:     strings.TrimSpace(*caPemFile),
+		ServerName:    strings.TrimSpace(*serverName),
+	}
+	if !tlsOptions.TLSSkipVerify && tlsOptions.CAPemFile == "" {
+		tlsOptions.TrustServerCert = promptTrustHubServerCert
+	}
 	result, err := exchangeHubInvite(hubURL, hubJoinRequest{
 		InviteToken: strings.TrimSpace(*token),
 		NodeName:    strings.TrimSpace(*nodeName),
 		Version:     Version,
 		OS:          runtime.GOOS,
 		Arch:        runtime.GOARCH,
-	}, hubJoinTLSOptions{
-		TLSSkipVerify: *tlsSkipVerify,
-		CAPemFile:     strings.TrimSpace(*caPemFile),
-		ServerName:    strings.TrimSpace(*serverName),
-	})
+	}, tlsOptions)
 	if err != nil {
 		return err
 	}
@@ -317,16 +432,17 @@ func handleHubConnectWithContext(ctx context.Context, profile string, args []str
 		nodeName = strings.TrimSpace(hubConfig.NodeID)
 	}
 	client := hub.NewClient(hub.ClientConfig{
-		URL:           strings.TrimSpace(hubConfig.URL),
-		NodeID:        strings.TrimSpace(hubConfig.NodeID),
-		NodeName:      nodeName,
-		Token:         token,
-		Version:       Version,
-		TLSSkipVerify: hubConfig.TLSSkipVerify,
-		CAPemFile:     strings.TrimSpace(hubConfig.CAPemFile),
-		ServerName:    strings.TrimSpace(hubConfig.ServerName),
-		AttachBackend: hub.NewTmuxAttachBackend(profile),
-		ActionBackend: hub.LocalActionBackend{Profile: profile},
+		URL:              strings.TrimSpace(hubConfig.URL),
+		NodeID:           strings.TrimSpace(hubConfig.NodeID),
+		NodeName:         nodeName,
+		Token:            token,
+		Version:          Version,
+		TLSSkipVerify:    hubConfig.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(hubConfig.CAPemFile),
+		ServerName:       strings.TrimSpace(hubConfig.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(hubConfig.PinnedCertSHA256),
+		AttachBackend:    hub.NewTmuxAttachBackend(profile),
+		ActionBackend:    hub.LocalActionBackend{Profile: profile},
 	}, hub.LocalSessionSource{Profile: profile})
 
 	fmt.Printf("Connecting to hub %s as %s\n", strings.TrimSpace(hubConfig.URL), nodeName)
@@ -359,16 +475,35 @@ func saveHubJoinConfig(config *session.UserConfig, result hubJoinResult) error {
 		return fmt.Errorf("chmod hub token file: %w", err)
 	}
 	config.Hub = session.HubSettings{
-		URL:           result.URL,
-		NodeID:        result.NodeID,
-		NodeName:      result.NodeName,
-		TokenFile:     tokenPath,
-		AutoConnect:   true,
-		TLSSkipVerify: result.TLSSkipVerify,
-		CAPemFile:     strings.TrimSpace(result.CAPemFile),
-		ServerName:    strings.TrimSpace(result.ServerName),
+		URL:              result.URL,
+		NodeID:           result.NodeID,
+		NodeName:         result.NodeName,
+		TokenFile:        tokenPath,
+		AutoConnect:      true,
+		TLSSkipVerify:    result.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(result.CAPemFile),
+		ServerName:       strings.TrimSpace(result.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(result.PinnedCertSHA256),
 	}
 	return nil
+}
+
+func promptTrustHubServerCert(info hubServerCertInfo) (bool, error) {
+	fmt.Fprintln(os.Stderr, "The hub presented an unknown TLS certificate.")
+	if strings.TrimSpace(info.Subject) != "" {
+		fmt.Fprintf(os.Stderr, "Subject: %s\n", info.Subject)
+	}
+	if !info.NotAfter.IsZero() {
+		fmt.Fprintf(os.Stderr, "Expires: %s\n", info.NotAfter.Format(time.RFC3339))
+	}
+	fmt.Fprintf(os.Stderr, "SHA256 fingerprint: %s\n", info.SHA256)
+	fmt.Fprint(os.Stderr, "Trust this hub and store this fingerprint? [y/N] ")
+	var answer string
+	if _, err := fmt.Fscan(os.Stdin, &answer); err != nil {
+		return false, nil
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
 }
 
 func validateHubJoinURL(raw string) error {
@@ -379,9 +514,11 @@ func validateHubJoinURL(raw string) error {
 }
 
 type hubJoinTLSOptions struct {
-	TLSSkipVerify bool
-	CAPemFile     string
-	ServerName    string
+	TLSSkipVerify    bool
+	CAPemFile        string
+	ServerName       string
+	PinnedCertSHA256 string
+	TrustServerCert  func(hubServerCertInfo) (bool, error)
 }
 
 func exchangeHubInvite(rawHubURL string, req hubJoinRequest, tlsOptions hubJoinTLSOptions) (hubJoinResult, error) {
@@ -394,7 +531,7 @@ func exchangeHubInvite(rawHubURL string, req hubJoinRequest, tlsOptions hubJoinT
 		return hubJoinResult{}, err
 	}
 
-	client, err := hubJoinHTTPClient(tlsOptions)
+	client, acceptedCertFingerprint, err := hubJoinHTTPClient(tlsOptions)
 	if err != nil {
 		return hubJoinResult{}, err
 	}
@@ -414,6 +551,9 @@ func exchangeHubInvite(rawHubURL string, req hubJoinRequest, tlsOptions hubJoinT
 	}
 	if strings.TrimSpace(result.URL) == "" {
 		result.URL = strings.TrimSpace(rawHubURL)
+	}
+	if strings.TrimSpace(result.PinnedCertSHA256) == "" && acceptedCertFingerprint != nil {
+		result.PinnedCertSHA256 = strings.TrimSpace(*acceptedCertFingerprint)
 	}
 	return normalizeHubJoinResult(result, rawHubURL)
 }
@@ -456,29 +596,71 @@ func hubJoinEndpoint(rawHubURL string) (string, error) {
 	return u.String(), nil
 }
 
-func hubJoinHTTPClient(opts hubJoinTLSOptions) (*http.Client, error) {
+func hubJoinHTTPClient(opts hubJoinTLSOptions) (*http.Client, *string, error) {
+	acceptedFingerprint := ""
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: opts.TLSSkipVerify,
 		ServerName:         opts.ServerName,
 	}
+	if strings.TrimSpace(opts.PinnedCertSHA256) != "" {
+		pinned := strings.TrimSpace(opts.PinnedCertSHA256)
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			return hub.VerifyPinnedCertificate(rawCerts, pinned)
+		}
+		return &http.Client{
+			Transport: &http.Transport{TLSClientConfig: tlsConfig},
+			Timeout:   30 * time.Second,
+		}, &acceptedFingerprint, nil
+	}
+	if !opts.TLSSkipVerify && opts.CAPemFile == "" && opts.TrustServerCert != nil {
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("hub server did not present a certificate")
+			}
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("parse hub server certificate: %w", err)
+			}
+			info := hubServerCertInfo{
+				SHA256:   hub.CertificateFingerprintSHA256(rawCerts[0]),
+				Subject:  cert.Subject.String(),
+				NotAfter: cert.NotAfter,
+			}
+			accepted, err := opts.TrustServerCert(info)
+			if err != nil {
+				return err
+			}
+			if !accepted {
+				return fmt.Errorf("hub server certificate was not trusted")
+			}
+			acceptedFingerprint = info.SHA256
+			return nil
+		}
+		return &http.Client{
+			Transport: &http.Transport{TLSClientConfig: tlsConfig},
+			Timeout:   30 * time.Second,
+		}, &acceptedFingerprint, nil
+	}
 	if opts.CAPemFile != "" {
 		pemData, err := os.ReadFile(opts.CAPemFile)
 		if err != nil {
-			return nil, fmt.Errorf("read --ca-pem-file: %w", err)
+			return nil, nil, fmt.Errorf("read --ca-pem-file: %w", err)
 		}
 		pool, err := x509.SystemCertPool()
 		if err != nil {
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pemData) {
-			return nil, fmt.Errorf("no certificates found in --ca-pem-file")
+			return nil, nil, fmt.Errorf("no certificates found in --ca-pem-file")
 		}
 		tlsConfig.RootCAs = pool
 	}
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsConfig},
 		Timeout:   30 * time.Second,
-	}, nil
+	}, &acceptedFingerprint, nil
 }
 
 func defaultHubDataDir() (string, error) {

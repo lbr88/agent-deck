@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -38,16 +39,20 @@ func TestSaveHubJoinConfig(t *testing.T) {
 	cfg := &session.UserConfig{}
 	tokenPath := filepath.Join(home, ".config", "agent-deck", "hub-node-token")
 	if err := saveHubJoinConfig(cfg, hubJoinResult{
-		URL:       "wss://hub.local:8421",
-		NodeID:    "node_abc",
-		NodeName:  "laptop",
-		NodeToken: "adhn_secret",
-		TokenPath: tokenPath,
+		URL:              "wss://hub.local:8421",
+		NodeID:           "node_abc",
+		NodeName:         "laptop",
+		NodeToken:        "adhn_secret",
+		TokenPath:        tokenPath,
+		PinnedCertSHA256: "abc123",
 	}); err != nil {
 		t.Fatalf("saveHubJoinConfig: %v", err)
 	}
 	if cfg.Hub.URL != "wss://hub.local:8421" || cfg.Hub.NodeID != "node_abc" || cfg.Hub.NodeName != "laptop" || !cfg.Hub.AutoConnect {
 		t.Fatalf("hub config = %+v", cfg.Hub)
+	}
+	if cfg.Hub.PinnedCertSHA256 != "abc123" {
+		t.Fatalf("PinnedCertSHA256 = %q, want abc123", cfg.Hub.PinnedCertSHA256)
 	}
 	if cfg.Hub.TokenFile != tokenPath {
 		t.Fatalf("TokenFile = %q, want %q", cfg.Hub.TokenFile, tokenPath)
@@ -80,11 +85,12 @@ func TestSaveHubJoinConfigTightensExistingTokenFileMode(t *testing.T) {
 	}
 
 	if err := saveHubJoinConfig(&session.UserConfig{}, hubJoinResult{
-		URL:       "wss://hub.local:8421",
-		NodeID:    "node_abc",
-		NodeName:  "laptop",
-		NodeToken: "adhn_secret",
-		TokenPath: tokenPath,
+		URL:              "wss://hub.local:8421",
+		NodeID:           "node_abc",
+		NodeName:         "laptop",
+		NodeToken:        "adhn_secret",
+		TokenPath:        tokenPath,
+		PinnedCertSHA256: "abc123",
 	}); err != nil {
 		t.Fatalf("saveHubJoinConfig: %v", err)
 	}
@@ -140,6 +146,97 @@ func TestHubJoinRejectsPlaintextURL(t *testing.T) {
 	}
 	if err := validateHubJoinURL("wss://hub.local:8421"); err != nil {
 		t.Fatalf("validateHubJoinURL(wss) = %v", err)
+	}
+}
+
+func TestHubServeDefaultsToSelfSignedCertificate(t *testing.T) {
+	dataDir := t.TempDir()
+
+	certFile, keyFile, generated, err := resolveHubServeTLSFiles(dataDir, "", "")
+	if err != nil {
+		t.Fatalf("resolveHubServeTLSFiles: %v", err)
+	}
+	if certFile != filepath.Join(dataDir, "hub-self-signed.crt") {
+		t.Fatalf("certFile = %q, want default self-signed path", certFile)
+	}
+	if keyFile != filepath.Join(dataDir, "hub-self-signed.key") {
+		t.Fatalf("keyFile = %q, want default self-signed key path", keyFile)
+	}
+	if !generated {
+		t.Fatal("first default TLS resolution should report generated=true")
+	}
+	if _, err := tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+		t.Fatalf("generated certificate pair is not loadable: %v", err)
+	}
+	if st, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("stat key file: %v", err)
+	} else if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Fatalf("key mode = %o, want 600", st.Mode().Perm())
+	}
+
+	_, _, generated, err = resolveHubServeTLSFiles(dataDir, "", "")
+	if err != nil {
+		t.Fatalf("second resolveHubServeTLSFiles: %v", err)
+	}
+	if generated {
+		t.Fatal("second default TLS resolution should reuse existing cert")
+	}
+}
+
+func TestHubServeRejectsPartialCustomCertificateFlags(t *testing.T) {
+	dataDir := t.TempDir()
+	if _, _, _, err := resolveHubServeTLSFiles(dataDir, "cert.pem", ""); err == nil {
+		t.Fatal("resolveHubServeTLSFiles accepted cert without key")
+	}
+	if _, _, _, err := resolveHubServeTLSFiles(dataDir, "", "key.pem"); err == nil {
+		t.Fatal("resolveHubServeTLSFiles accepted key without cert")
+	}
+}
+
+func TestHubServeKeepsExplicitCertificatePair(t *testing.T) {
+	certFile, keyFile, generated, err := resolveHubServeTLSFiles(t.TempDir(), " cert.pem ", " key.pem ")
+	if err != nil {
+		t.Fatalf("resolveHubServeTLSFiles: %v", err)
+	}
+	if certFile != "cert.pem" || keyFile != "key.pem" {
+		t.Fatalf("cert/key = %q/%q, want trimmed explicit paths", certFile, keyFile)
+	}
+	if generated {
+		t.Fatal("explicit certificate pair should not report generated=true")
+	}
+}
+
+func TestExchangeHubInviteTrustsAndReturnsPinnedFingerprint(t *testing.T) {
+	server := newJoinResponseServer(t, `{"url":"","node_id":"node_abc","node_name":"laptop","node_token":"adhn_secret"}`)
+	var prompt hubServerCertInfo
+
+	result, err := exchangeHubInvite(server.wssURL(), hubJoinRequest{InviteToken: "invite_abc"}, hubJoinTLSOptions{
+		TrustServerCert: func(info hubServerCertInfo) (bool, error) {
+			prompt = info
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("exchangeHubInvite: %v", err)
+	}
+	if prompt.SHA256 == "" || result.PinnedCertSHA256 == "" {
+		t.Fatalf("prompt/result fingerprints = %q/%q, want populated", prompt.SHA256, result.PinnedCertSHA256)
+	}
+	if result.PinnedCertSHA256 != prompt.SHA256 {
+		t.Fatalf("result pin = %q, want prompt fingerprint %q", result.PinnedCertSHA256, prompt.SHA256)
+	}
+}
+
+func TestExchangeHubInviteRejectsUntrustedFingerprint(t *testing.T) {
+	server := newJoinResponseServer(t, `{"url":"","node_id":"node_abc","node_name":"laptop","node_token":"adhn_secret"}`)
+
+	_, err := exchangeHubInvite(server.wssURL(), hubJoinRequest{InviteToken: "invite_abc"}, hubJoinTLSOptions{
+		TrustServerCert: func(info hubServerCertInfo) (bool, error) {
+			return false, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("exchangeHubInvite succeeded after trust callback rejected fingerprint")
 	}
 }
 

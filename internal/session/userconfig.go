@@ -631,14 +631,15 @@ type OpenClawSettings struct {
 
 // HubSettings configures the encrypted Agent Deck Hub connection for this node.
 type HubSettings struct {
-	URL           string `toml:"url,omitempty"`
-	NodeID        string `toml:"node_id,omitempty"`
-	NodeName      string `toml:"node_name,omitempty"`
-	TokenFile     string `toml:"token_file,omitempty"`
-	AutoConnect   bool   `toml:"auto_connect,omitempty"`
-	TLSSkipVerify bool   `toml:"tls_skip_verify,omitempty"`
-	CAPemFile     string `toml:"ca_pem_file,omitempty"`
-	ServerName    string `toml:"server_name,omitempty"`
+	URL              string `toml:"url,omitempty"`
+	NodeID           string `toml:"node_id,omitempty"`
+	NodeName         string `toml:"node_name,omitempty"`
+	TokenFile        string `toml:"token_file,omitempty"`
+	AutoConnect      bool   `toml:"auto_connect,omitempty"`
+	TLSSkipVerify    bool   `toml:"tls_skip_verify,omitempty"`
+	CAPemFile        string `toml:"ca_pem_file,omitempty"`
+	ServerName       string `toml:"server_name,omitempty"`
+	PinnedCertSHA256 string `toml:"pinned_cert_sha256,omitempty"`
 }
 
 func (h HubSettings) Enabled() bool {

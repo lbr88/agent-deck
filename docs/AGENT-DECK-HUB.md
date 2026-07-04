@@ -6,17 +6,21 @@ The hub is not a browser UI and it is not a multi-user auth system. It is a coor
 
 ## Start A Hub
 
-The hub requires TLS. Plaintext hub URLs are refused.
+The hub always uses TLS. If you do not provide a certificate, `hub serve` creates and reuses a self-signed certificate in the hub data directory.
 
 ```bash
 agent-deck hub serve \
   --listen :8421 \
-  --data ~/.local/share/agent-deck-hub \
-  --tls-cert cert.pem \
-  --tls-key key.pem
+  --data ~/.local/share/agent-deck-hub
 ```
 
-The data directory stores `hub.db`, including node credentials, invite state, and latest session snapshots.
+The data directory stores `hub.db`, node credentials, invite state, latest session snapshots, and the default self-signed cert/key.
+
+To use your own certificate, pass both files:
+
+```bash
+agent-deck hub serve --tls-cert cert.pem --tls-key key.pem
+```
 
 ## Join A Node
 
@@ -31,6 +35,8 @@ On the joining machine, exchange that invite for a node credential:
 ```bash
 agent-deck hub join wss://hub.example:8421 --token <token>
 ```
+
+On first join with the default self-signed certificate, `agent-deck` shows the hub certificate fingerprint and asks whether to trust it. The accepted fingerprint is stored in `config.toml`, like an SSH known-host key. Future connects reject the hub if that certificate changes.
 
 `hub join` writes the node token to the configured token file and enables hub auto-connect in `config.toml`. After that, starting the TUI connects to the hub automatically. For non-TUI service mode, run:
 
@@ -67,12 +73,13 @@ The deployment files in `deploy/hub/` run only the hub server. Build and start f
 docker compose -f deploy/hub/docker-compose.yml up --build -d
 ```
 
-Provide TLS files at `deploy/hub/certs/tls.crt` and `deploy/hub/certs/tls.key`, or adjust the compose volumes and command flags. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`.
+The compose file uses the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`.
 
 ## Security Model
 
 - All node traffic uses TLS WebSockets.
-- Join uses a single-use invite token over HTTPS.
+- The hub creates a self-signed certificate by default. You can override it with `--tls-cert` and `--tls-key`.
+- Join uses a single-use invite token over HTTPS and pins the accepted certificate fingerprint.
 - Joined nodes receive long-lived node credentials stored locally with file mode `0600`.
 - Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes.
 - There is no offline queue. Actions require the owner node to be connected.

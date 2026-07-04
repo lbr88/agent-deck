@@ -536,22 +536,22 @@ agent-deck remote update dev      # update specific remote
 
 ## Hub Commands
 
-Run an encrypted relay for trusted agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`.
+Run an encrypted relay for trusted agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. `hub serve` creates a self-signed certificate by default, and `hub join` pins the accepted certificate fingerprint like an SSH host key. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`.
 
 ### hub serve
 
 ```bash
-agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub --tls-cert cert.pem --tls-key key.pem
+agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--listen <addr>` | Listen address (default: `127.0.0.1:8421`) |
 | `--data <dir>` | Hub data directory |
-| `--tls-cert <path>` | TLS certificate file, required |
-| `--tls-key <path>` | TLS private key file, required |
+| `--tls-cert <path>` | Optional TLS certificate file |
+| `--tls-key <path>` | Optional TLS private key file |
 
-Starts the hub server. The data directory stores the SQLite hub database.
+Starts the hub server. The data directory stores the SQLite hub database and, by default, the generated self-signed cert/key. If you provide custom TLS files, pass both `--tls-cert` and `--tls-key`.
 
 ### hub invite
 
@@ -576,7 +576,7 @@ agent-deck hub join wss://hub.example:8421 --token <invite-token> [options]
 | `--server-name <name>` | TLS server name override |
 | `--tls-skip-verify` | Skip TLS verification for local testing only |
 
-Exchanges the invite for a node credential and writes `[hub]` config for auto-connect.
+Exchanges the invite for a node credential and writes `[hub]` config for auto-connect. Without `--ca-pem-file` or `--tls-skip-verify`, join prompts to accept and pin the hub certificate fingerprint.
 
 ### hub connect
 
