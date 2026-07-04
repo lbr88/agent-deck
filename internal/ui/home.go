@@ -34,6 +34,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/docker"
 	"github.com/asheshgoplani/agent-deck/internal/feedback"
 	"github.com/asheshgoplani/agent-deck/internal/git"
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/jujutsu"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
 	"github.com/asheshgoplani/agent-deck/internal/safego"
@@ -558,6 +559,22 @@ type Home struct {
 	// just events written to the local cost_events table.
 	remoteCosts   map[string]*costs.RemoteCostSummary // remoteName -> summary
 	remoteCostsMu sync.RWMutex
+
+	// Hub sessions are projected inline as <node> / <group> and are distinct
+	// from SSH remotes, which keep their remotes/<name> behavior.
+	hubConfigured     bool
+	hubLocalNodeID    string
+	hubLocalNodeName  string
+	hubClient         hubClientAPI
+	hubStarter        hubStarter
+	hubSessions       map[string]hub.NodeSessions // nodeID -> latest snapshot
+	hubSessionsMu     sync.RWMutex
+	hubStatus         string
+	hubStatusMu       sync.Mutex
+	hubSnapshotCh     chan hubSnapshotMsg
+	hubTrustRequestCh chan hubTrustRequestMsg
+	hubTrustQueue     []hub.TrustRequestPayload
+
 	// Cost tracking
 	costStore            *costs.Store
 	costPricer           *costs.Pricer
@@ -666,6 +683,10 @@ type selectedItemIdentity struct {
 	remoteSessionID       string
 	remoteGroupPath       string
 	remoteGroupOccurrence int
+	hubNodeID             string
+	hubSessionID          string
+	hubGroupPath          string
+	hubGroupOccurrence    int
 }
 
 func (h *Home) saveToolVisibilityConfig() error {
@@ -920,6 +941,40 @@ type statusUpdateMsg struct {
 	attachedWorkDir   string // pane_current_path captured after attach returns
 } // Triggers immediate status update without reloading
 
+type hubClientAPI interface {
+	Attach(context.Context, string, string, hub.TerminalSize) error
+	Command(context.Context, string, string, any) (json.RawMessage, error)
+	TrustDecision(context.Context, string, bool) error
+	Close() error
+}
+
+type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions), func(hub.TrustRequestPayload)) (hubClientAPI, error)
+
+type hubSnapshotMsg struct {
+	snapshot hub.NodeSessions
+}
+
+type hubTrustRequestMsg struct {
+	request hub.TrustRequestPayload
+}
+
+type hubTrustDecisionResultMsg struct {
+	nodeID string
+	allow  bool
+	err    error
+}
+
+type hubAttachResultMsg struct {
+	err error
+}
+
+type hubActionResultMsg struct {
+	action    string
+	nodeName  string
+	sessionID string
+	err       error
+}
+
 // openSwitcherMsg is emitted when the user pressed the session-switch key while
 // attached. It carries the same post-attach reconciliation data as
 // statusUpdateMsg; the switcher always opens pre-highlighted on the session we
@@ -977,6 +1032,7 @@ type previewDebounceMsg struct {
 	sessionID   string // parent session ID (for instance lookup)
 	windowIndex int    // -1 for session, >= 0 for specific window
 	remoteName  string // remote name for remote session preview
+	hubNodeID   string // hub node id for hub session preview
 }
 
 // analyticsFetchedMsg is sent when async analytics parsing is complete
@@ -1201,6 +1257,10 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		pendingTitleChanges:       make(map[string]string),
 		debugMode:                 logging.IsDebugEnabled(),
 		lastClickIndex:            -1,
+		hubSessions:               make(map[string]hub.NodeSessions),
+		hubStarter:                startHubClient,
+		hubSnapshotCh:             make(chan hubSnapshotMsg, 64),
+		hubTrustRequestCh:         make(chan hubTrustRequestMsg, 64),
 	}
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
 
@@ -1209,21 +1269,22 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 	// Cache display settings (config.toml [display]) and resolve the
 	// status-bar cost-line template once. The template + hide flag are
 	// reused on every render; see (*Home).renderStats.
-	if cfg, _ := session.LoadUserConfig(); cfg != nil {
-		h.fullRepaint = cfg.Display.GetFullRepaint()
-		h.defaultFilter = cfg.Display.GetDefaultFilter()
-		h.activeFilterLabel = cfg.Display.ActiveFilterLabel
-		h.activeFilterExcludes = cfg.Display.GetActiveFilterExcludes()
-		tmux.SetHideCwdPrefixInTitle(!cfg.Display.GetIncludeCwdPrefix())
-		h.showSessionTimestamps = cfg.Display.ShowSessionTimestamps
-		h.showPaneTitles = cfg.Display.ShowPaneTitles
-		h.sysStatsConfig = cfg.SystemStats
-		h.costLineTemplate, h.costLineHideWhenZero = session.ResolveCostLineTemplate(cfg, actualProfile)
-		h.previewPct = cfg.UI.GetPreviewPct()
-		h.previewRefreshTTL = cfg.UI.GetPreviewRefreshDuration()
-		h.remoteLatencyRefreshSec = cfg.UI.GetRemoteLatencyRefreshSecs(cfg.SystemStats.GetRefreshSeconds())
-		h.remoteSessionRefreshSec = cfg.UI.GetRemoteSessionRefreshSecs()
-		h.footerMode = cfg.UI.GetFooter()
+	startupConfig, _ := session.LoadUserConfig()
+	if startupConfig != nil {
+		h.fullRepaint = startupConfig.Display.GetFullRepaint()
+		h.defaultFilter = startupConfig.Display.GetDefaultFilter()
+		h.activeFilterLabel = startupConfig.Display.ActiveFilterLabel
+		h.activeFilterExcludes = startupConfig.Display.GetActiveFilterExcludes()
+		tmux.SetHideCwdPrefixInTitle(!startupConfig.Display.GetIncludeCwdPrefix())
+		h.showSessionTimestamps = startupConfig.Display.ShowSessionTimestamps
+		h.showPaneTitles = startupConfig.Display.ShowPaneTitles
+		h.sysStatsConfig = startupConfig.SystemStats
+		h.costLineTemplate, h.costLineHideWhenZero = session.ResolveCostLineTemplate(startupConfig, actualProfile)
+		h.previewPct = startupConfig.UI.GetPreviewPct()
+		h.previewRefreshTTL = startupConfig.UI.GetPreviewRefreshDuration()
+		h.remoteLatencyRefreshSec = startupConfig.UI.GetRemoteLatencyRefreshSecs(startupConfig.SystemStats.GetRefreshSeconds())
+		h.remoteSessionRefreshSec = startupConfig.UI.GetRemoteSessionRefreshSecs()
+		h.footerMode = startupConfig.UI.GetFooter()
 	} else {
 		h.fullRepaint = (session.DisplaySettings{}).GetFullRepaint()
 		h.activeFilterExcludes = (session.DisplaySettings{}).GetActiveFilterExcludes()
@@ -1235,6 +1296,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.footerMode = (session.UISettings{}).GetFooter()
 	}
 	h.remoteLatency = make(map[string]session.RemoteLatency)
+	h.configureHubFromConfig(startupConfig)
 
 	// Initialize system stats collector if enabled
 	if h.sysStatsConfig.GetEnabled() {
@@ -1486,6 +1548,264 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 	}
 
 	return h
+}
+
+func (h *Home) configureHubFromConfig(config *session.UserConfig) {
+	if config == nil || !config.Hub.Enabled() || !config.Hub.AutoConnect {
+		return
+	}
+	h.hubConfigured = true
+	h.hubLocalNodeID = strings.TrimSpace(config.Hub.NodeID)
+	h.hubLocalNodeName = strings.TrimSpace(config.Hub.NodeName)
+	if h.hubLocalNodeName == "" {
+		h.hubLocalNodeName = "local"
+	}
+	h.setHubStatus("hub connecting")
+
+	starter := h.hubStarter
+	if starter == nil {
+		starter = startHubClient
+	}
+	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus, h.handleHubSnapshot, h.handleHubTrustRequest)
+	if err != nil {
+		h.setHubStatus("hub offline")
+		uiLog.Warn("hub_autoconnect_start_failed", slog.String("error", err.Error()))
+		return
+	}
+	h.hubClient = client
+}
+
+func (h *Home) setHubStatus(status string) {
+	h.hubStatusMu.Lock()
+	h.hubStatus = status
+	h.hubStatusMu.Unlock()
+}
+
+func (h *Home) hubStatusText() string {
+	if !h.hubConfigured {
+		return ""
+	}
+	h.hubStatusMu.Lock()
+	defer h.hubStatusMu.Unlock()
+	return strings.TrimSpace(h.hubStatus)
+}
+
+func (h *Home) handleHubSnapshot(snapshot hub.NodeSessions) {
+	if h.hubSnapshotCh == nil {
+		return
+	}
+	select {
+	case h.hubSnapshotCh <- hubSnapshotMsg{snapshot: snapshot}:
+	default:
+		uiLog.Warn("hub_snapshot_queue_full", slog.String("node_id", snapshot.Node.ID))
+	}
+}
+
+func (h *Home) applyHubSnapshot(snapshot hub.NodeSessions) {
+	nodeID := strings.TrimSpace(snapshot.Node.ID)
+	if nodeID == "" {
+		return
+	}
+	if strings.TrimSpace(snapshot.Node.Name) == "" {
+		snapshot.Node.Name = nodeID
+	}
+	snapshot.Sessions = append([]hub.SessionInfo(nil), snapshot.Sessions...)
+
+	h.hubSessionsMu.Lock()
+	if h.hubSessions == nil {
+		h.hubSessions = make(map[string]hub.NodeSessions)
+	}
+	h.hubSessions[nodeID] = snapshot
+	h.hubSessionsMu.Unlock()
+	h.cachedStatusCounts.valid.Store(false)
+}
+
+func (h *Home) drainHubSnapshots() bool {
+	if h.hubSnapshotCh == nil {
+		return false
+	}
+	changed := false
+	for {
+		select {
+		case msg := <-h.hubSnapshotCh:
+			h.applyHubSnapshot(msg.snapshot)
+			changed = true
+		default:
+			return changed
+		}
+	}
+}
+
+func (h *Home) handleHubTrustRequest(request hub.TrustRequestPayload) {
+	if h.hubTrustRequestCh == nil {
+		return
+	}
+	select {
+	case h.hubTrustRequestCh <- hubTrustRequestMsg{request: request}:
+	default:
+		uiLog.Warn("hub_trust_request_queue_full", slog.String("node_id", request.NodeID))
+	}
+}
+
+func (h *Home) applyHubTrustRequest(request hub.TrustRequestPayload) {
+	request.NodeID = strings.TrimSpace(request.NodeID)
+	if request.NodeID == "" {
+		return
+	}
+	if strings.TrimSpace(request.NodeName) == "" {
+		request.NodeName = request.NodeID
+	}
+	if h.confirmDialog != nil && h.confirmDialog.IsVisible() {
+		h.hubTrustQueue = append(h.hubTrustQueue, request)
+		h.setHubStatus("hub trust pending")
+		return
+	}
+	h.showHubTrustRequest(request)
+}
+
+func (h *Home) drainHubTrustRequests() bool {
+	if h.hubTrustRequestCh == nil {
+		return false
+	}
+	changed := false
+	for {
+		select {
+		case msg := <-h.hubTrustRequestCh:
+			h.applyHubTrustRequest(msg.request)
+			changed = true
+		default:
+			return changed
+		}
+	}
+}
+
+func (h *Home) showHubTrustRequest(request hub.TrustRequestPayload) {
+	if h.confirmDialog == nil {
+		h.confirmDialog = NewConfirmDialog()
+	}
+	h.confirmDialog.ShowHubTrustNode(request.NodeID, request.NodeName)
+	h.setHubStatus("hub trust pending")
+}
+
+func (h *Home) showNextHubTrustRequest() {
+	if len(h.hubTrustQueue) == 0 {
+		return
+	}
+	next := h.hubTrustQueue[0]
+	copy(h.hubTrustQueue, h.hubTrustQueue[1:])
+	h.hubTrustQueue = h.hubTrustQueue[:len(h.hubTrustQueue)-1]
+	h.showHubTrustRequest(next)
+}
+
+func (h *Home) confirmHubTrustDecision(allow bool) tea.Cmd {
+	nodeID := h.confirmDialog.GetTargetID()
+	h.confirmDialog.Hide()
+	h.showNextHubTrustRequest()
+	client := h.hubClient
+	if client == nil {
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	return func() tea.Msg {
+		err := client.TrustDecision(context.Background(), nodeID, allow)
+		return hubTrustDecisionResultMsg{nodeID: nodeID, allow: allow, err: err}
+	}
+}
+
+type runningHubClient struct {
+	client *hub.Client
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func (c *runningHubClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.Attach(ctx, nodeID, sessionID, size)
+}
+
+func (c *runningHubClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.Command(ctx, nodeID, action, payload)
+}
+
+func (c *runningHubClient) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.TrustDecision(ctx, nodeID, allow)
+}
+
+func (c *runningHubClient) Close() error {
+	if c == nil {
+		return nil
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.done != nil {
+		<-c.done
+	}
+	return nil
+}
+
+func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions), onTrustRequest func(hub.TrustRequestPayload)) (hubClientAPI, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	tokenFile := strings.TrimSpace(cfg.TokenFile)
+	if tokenFile == "" {
+		return nil, fmt.Errorf("hub token file is not configured")
+	}
+	tokenData, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read hub token file: %w", err)
+	}
+	token := strings.TrimSpace(string(tokenData))
+	if token == "" {
+		return nil, fmt.Errorf("hub token file is empty")
+	}
+
+	nodeName := strings.TrimSpace(cfg.NodeName)
+	if nodeName == "" {
+		nodeName = "local"
+	}
+	hubCtx, cancel := context.WithCancel(parent)
+	client := hub.NewClient(hub.ClientConfig{
+		URL:              strings.TrimSpace(cfg.URL),
+		NodeID:           strings.TrimSpace(cfg.NodeID),
+		NodeName:         nodeName,
+		Token:            token,
+		Version:          Version,
+		TLSSkipVerify:    cfg.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(cfg.CAPemFile),
+		ServerName:       strings.TrimSpace(cfg.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(cfg.PinnedCertSHA256),
+		AttachBackend:    hub.NewTmuxAttachBackend(profile),
+		ActionBackend:    hub.LocalActionBackend{Profile: profile},
+		OnStatus: func(status string) {
+			if setStatus != nil {
+				setStatus("hub " + strings.TrimSpace(status))
+			}
+		},
+		OnSnapshot:     onSnapshot,
+		OnTrustRequest: onTrustRequest,
+	}, hub.LocalSessionSource{Profile: profile})
+
+	handle := &runningHubClient{client: client, cancel: cancel, done: make(chan struct{})}
+	safego.Go(uiLog, "hub_autoconnect", func() {
+		defer close(handle.done)
+		if err := client.Connect(hubCtx); err != nil && hubCtx.Err() == nil {
+			if setStatus != nil {
+				setStatus("hub offline")
+			}
+			uiLog.Warn("hub_autoconnect_failed", slog.String("error", err.Error()))
+		}
+	})
+	return handle, nil
 }
 
 // SetWebMenuData configures an optional in-memory menu sink for web mode.
@@ -1872,6 +2192,19 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 			identity.remoteName = item.RemoteName
 			identity.remoteSessionID = item.RemoteSession.ID
 		}
+	case session.ItemTypeHubGroup:
+		identity.hubNodeID = item.HubNodeID
+		identity.hubGroupPath = item.HubGroupPath
+		for i := 0; i < h.cursor; i++ {
+			if h.flatItems[i].Type == session.ItemTypeHubGroup && h.flatItems[i].HubNodeID == item.HubNodeID && h.flatItems[i].HubGroupPath == item.HubGroupPath {
+				identity.hubGroupOccurrence++
+			}
+		}
+	case session.ItemTypeHubSession:
+		if item.HubSession != nil {
+			identity.hubNodeID = item.HubNodeID
+			identity.hubSessionID = item.HubSession.ID
+		}
 	}
 	return identity
 }
@@ -1879,6 +2212,7 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 	groupOccurrence := identity.groupOccurrence
 	remoteGroupOccurrence := identity.remoteGroupOccurrence
+	hubGroupOccurrence := identity.hubGroupOccurrence
 	for i, item := range h.flatItems {
 		switch {
 		case identity.windowSessionID != "" && item.Type == session.ItemTypeWindow && item.WindowSessionID == identity.windowSessionID && item.WindowIndex == identity.windowIndex:
@@ -1900,6 +2234,16 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 		case identity.remoteGroupPath != "" && item.Type == session.ItemTypeRemoteGroup && item.RemoteName == identity.remoteName && item.Path == identity.remoteGroupPath:
 			if remoteGroupOccurrence > 0 {
 				remoteGroupOccurrence--
+				continue
+			}
+			h.cursor = i
+			return true
+		case identity.hubSessionID != "" && item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubNodeID == identity.hubNodeID && item.HubSession.ID == identity.hubSessionID:
+			h.cursor = i
+			return true
+		case identity.hubGroupPath != "" && item.Type == session.ItemTypeHubGroup && item.HubNodeID == identity.hubNodeID && item.HubGroupPath == identity.hubGroupPath:
+			if hubGroupOccurrence > 0 {
+				hubGroupOccurrence--
 				continue
 			}
 			h.cursor = i
@@ -1934,6 +2278,9 @@ func (h *Home) rebuildFlatItems() {
 	h.jumpBuffer = ""
 
 	allItems := h.groupTree.Flatten()
+	if h.hubConfigured {
+		allItems = h.prefixLocalHubGroups(allItems)
+	}
 
 	// Partition archived vs active before status filters. Group membership is
 	// resolved from the full group tree — not the flattened view — so
@@ -1998,7 +2345,7 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		// Auto-clear filter if it matches nothing but sessions exist
-		if len(filtered) == 0 && len(allItems) > 0 {
+		if len(filtered) == 0 && len(allItems) > 0 && !h.hasHubSessionMatchingStatusFilter(h.statusFilter) {
 			h.statusFilter = ""
 			h.flatItems = allItems
 		} else {
@@ -2067,6 +2414,10 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		h.flatItems = expanded
+	}
+
+	if h.statusFilter != FilterModeArchived {
+		h.flatItems = append(h.flatItems, h.projectHubItems()...)
 	}
 
 	// Append remote sessions as selectable items
@@ -2174,6 +2525,185 @@ func (h *Home) rebuildFlatItems() {
 
 	// Publish an updated web snapshot when menu structure/session list changes.
 	h.publishWebMenuSnapshot()
+}
+
+func (h *Home) prefixLocalHubGroups(items []session.Item) []session.Item {
+	return items
+}
+
+func (h *Home) localGroupDisplayName(item session.Item) string {
+	if item.Group == nil {
+		return ""
+	}
+	if !h.hubConfigured {
+		return item.Group.Name
+	}
+	groupPath := item.Path
+	if groupPath == "" {
+		groupPath = item.Group.Path
+	}
+	return hubDisplayGroupPath(h.localHubNodeName(), groupPath)
+}
+
+func (h *Home) localHubNodeName() string {
+	if name := strings.TrimSpace(h.hubLocalNodeName); name != "" {
+		return name
+	}
+	return "local"
+}
+
+func hubDisplayGroupPath(nodeName, groupPath string) string {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		nodeName = "local"
+	}
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	return nodeName + " / " + strings.ReplaceAll(groupPath, "/", " / ")
+}
+
+func hubItemPath(nodeID, groupPath string) string {
+	nodeID = strings.Trim(strings.TrimSpace(nodeID), "/")
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	return "hub/" + nodeID + "/" + groupPath
+}
+
+func hubSessionStatus(info session.HubSessionInfo) session.Status {
+	return session.Status(strings.TrimSpace(info.Status))
+}
+
+func (h *Home) hasHubSessionMatchingStatusFilter(filter session.Status) bool {
+	if !h.hubConfigured || filter == "" || filter == FilterModeArchived {
+		return false
+	}
+	for _, node := range h.hubSessionSnapshots() {
+		if h.isLocalHubNode(node) {
+			continue
+		}
+		for _, info := range node.Sessions {
+			if h.matchesStatusFilter(filter, session.Status(strings.TrimSpace(info.Status))) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *Home) hubSessionSnapshots() []hub.NodeSessions {
+	h.hubSessionsMu.RLock()
+	defer h.hubSessionsMu.RUnlock()
+
+	out := make([]hub.NodeSessions, 0, len(h.hubSessions))
+	for key, node := range h.hubSessions {
+		if strings.TrimSpace(node.Node.ID) == "" {
+			node.Node.ID = key
+		}
+		node.Sessions = append([]hub.SessionInfo(nil), node.Sessions...)
+		out = append(out, node)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ni := hubNodeDisplayName(out[i])
+		nj := hubNodeDisplayName(out[j])
+		if ni != nj {
+			return ni < nj
+		}
+		return out[i].Node.ID < out[j].Node.ID
+	})
+	return out
+}
+
+func hubNodeDisplayName(node hub.NodeSessions) string {
+	if name := strings.TrimSpace(node.Node.Name); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(node.Node.ID); id != "" {
+		return id
+	}
+	return "hub"
+}
+
+func (h *Home) isLocalHubNode(node hub.NodeSessions) bool {
+	localID := strings.TrimSpace(h.hubLocalNodeID)
+	return localID != "" && strings.TrimSpace(node.Node.ID) == localID
+}
+
+func (h *Home) projectHubItems() []session.Item {
+	if !h.hubConfigured {
+		return nil
+	}
+
+	var items []session.Item
+	for _, node := range h.hubSessionSnapshots() {
+		if h.isLocalHubNode(node) {
+			continue
+		}
+		nodeID := strings.TrimSpace(node.Node.ID)
+		nodeName := hubNodeDisplayName(node)
+		byGroup := make(map[string][]session.HubSessionInfo)
+		for _, info := range node.Sessions {
+			hubInfo := session.HubSessionInfo{
+				ID:               info.ID,
+				Title:            info.Title,
+				Tool:             info.Tool,
+				Status:           info.Status,
+				GroupPath:        info.GroupPath,
+				ProjectPath:      info.ProjectPath,
+				DisplaySessionID: info.DisplaySessionID,
+			}
+			groupPath := strings.Trim(strings.TrimSpace(hubInfo.GroupPath), "/")
+			if groupPath == "" {
+				groupPath = session.DefaultGroupPath
+			}
+			if h.groupScope != "" && !h.isInGroupScope(groupPath) {
+				continue
+			}
+			hubInfo.GroupPath = groupPath
+			if h.statusFilter != "" && h.statusFilter != FilterModeArchived && !h.matchesStatusFilter(h.statusFilter, hubSessionStatus(hubInfo)) {
+				continue
+			}
+			byGroup[groupPath] = append(byGroup[groupPath], hubInfo)
+		}
+		groupPaths := make([]string, 0, len(byGroup))
+		for groupPath := range byGroup {
+			groupPaths = append(groupPaths, groupPath)
+		}
+		sort.Strings(groupPaths)
+		for _, groupPath := range groupPaths {
+			sessions := byGroup[groupPath]
+			path := hubItemPath(nodeID, groupPath)
+			items = append(items, session.Item{
+				Type:         session.ItemTypeHubGroup,
+				HubNodeID:    nodeID,
+				HubNodeName:  nodeName,
+				HubGroupPath: groupPath,
+				Path:         path,
+				Level:        0,
+			})
+			for i := range sessions {
+				items = append(items, session.Item{
+					Type:          session.ItemTypeHubSession,
+					HubNodeID:     nodeID,
+					HubNodeName:   nodeName,
+					HubGroupPath:  groupPath,
+					HubSession:    &sessions[i],
+					Path:          path,
+					Level:         1,
+					IsLastInGroup: i == len(sessions)-1,
+				})
+			}
+		}
+	}
+	return items
+}
+
+func (h *Home) rejectHubSessionCreation() {
+	h.setHubStatus("hub session creation unavailable")
+	h.setError(fmt.Errorf("hub session creation is not available yet"))
 }
 
 // syncViewport ensures the cursor is visible within the viewport
@@ -3177,6 +3707,10 @@ func remotePreviewCacheKey(remoteName, sessionID string) string {
 	return fmt.Sprintf("remote:%s:%s", remoteName, sessionID)
 }
 
+func hubPreviewCacheKey(nodeID, sessionID string) string {
+	return fmt.Sprintf("hub:%s:%s", nodeID, sessionID)
+}
+
 const (
 	remotePreviewMaxLines = 200
 	remotePreviewMaxBytes = 16 * 1024
@@ -3261,6 +3795,20 @@ func (h *Home) fetchRemotePreviewDebounced(remoteName, sessionID string) tea.Cmd
 	}
 }
 
+func (h *Home) fetchHubPreviewDebounced(nodeID, sessionID string) tea.Cmd {
+	const debounceDelay = 150 * time.Millisecond
+
+	key := hubPreviewCacheKey(nodeID, sessionID)
+	h.previewDebounceMu.Lock()
+	h.pendingPreviewKey = key
+	h.previewDebounceMu.Unlock()
+
+	return func() tea.Msg {
+		time.Sleep(debounceDelay)
+		return previewDebounceMsg{previewKey: key, sessionID: sessionID, windowIndex: -1, hubNodeID: nodeID}
+	}
+}
+
 func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 	return func() tea.Msg {
 		config, err := session.LoadUserConfig()
@@ -3291,6 +3839,28 @@ func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 		}
 		content = truncateRemotePreviewContent(content)
 		return previewFetchedMsg{previewKey: key, content: content, err: fetchErr}
+	}
+}
+
+func (h *Home) fetchHubPreview(nodeID, sessionID, key string) tea.Cmd {
+	return func() tea.Msg {
+		if h.hubClient == nil {
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("hub client is not connected")}
+		}
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		raw, err := h.hubClient.Command(ctx, nodeID, "preview", map[string]string{
+			"session_id": sessionID,
+		})
+		if err != nil {
+			return previewFetchedMsg{previewKey: key, err: err}
+		}
+		var result hub.PreviewSessionResponse
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("decode hub preview response: %w", err)}
+		}
+		content := truncateRemotePreviewContent(result.Content)
+		return previewFetchedMsg{previewKey: key, content: content}
 	}
 }
 
@@ -3333,6 +3903,23 @@ func (h *Home) selectedRemotePreviewTarget() (string, string, string, bool) {
 	return item.RemoteName, item.RemoteSession.ID, key, true
 }
 
+func (h *Home) selectedHubPreviewTarget() (string, string, string, bool) {
+	if h.cursor >= len(h.flatItems) {
+		return "", "", "", false
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return "", "", "", false
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		return "", "", "", false
+	}
+	key := hubPreviewCacheKey(nodeID, sessionID)
+	return nodeID, sessionID, key, true
+}
+
 func (h *Home) selectedPreviewCacheExpired(key string, now time.Time) bool {
 	ttl := h.previewRefreshTTL
 	if ttl <= 0 {
@@ -3353,6 +3940,10 @@ func (h *Home) fetchSelectedPreview() tea.Cmd {
 	}
 	inst, _, winIdx := h.selectedPreviewTarget()
 	if inst == nil {
+		nodeID, hubSessionID, _, ok := h.selectedHubPreviewTarget()
+		if ok {
+			return h.fetchHubPreviewDebounced(nodeID, hubSessionID)
+		}
 		remoteName, remoteSessionID, _, ok := h.selectedRemotePreviewTarget()
 		if !ok {
 			return nil
@@ -5398,6 +5989,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
+	case hubSnapshotMsg:
+		selectedBefore := h.captureSelectedItemIdentity()
+		h.applyHubSnapshot(msg.snapshot)
+		h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		return h, nil
+
+	case hubTrustRequestMsg:
+		h.applyHubTrustRequest(msg.request)
+		return h, nil
+
 	case remoteLatenciesFetchedMsg:
 		h.remoteLatencyMu.Lock()
 		if h.remoteLatency == nil {
@@ -5536,6 +6137,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case promptSubmitMsg:
+		if nodeID, hubSessionID, ok := parseHubPromptTarget(msg.instanceID); ok {
+			return h, h.hubCommand(nodeID, "", "send", map[string]string{
+				"session_id": hubSessionID,
+				"message":    msg.text,
+			})
+		}
+
 		// #1410: deliver a one-line prompt to the highlighted session without
 		// attaching, reusing the prompt-state-aware send path (the #1409/#1432
 		// composer-draft guard) so the prompt never merges with a half-typed
@@ -5617,6 +6225,37 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Continue listening for next change
 		return h, tea.Batch(cmd, listenForReloads(h.storageWatcher))
+
+	case hubAttachResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub attach failed")
+			h.setError(fmt.Errorf("hub attach: %w", msg.err))
+		}
+		return h.Update(statusUpdateMsg{})
+
+	case hubActionResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub action failed")
+			h.setError(fmt.Errorf("hub %s: %w", msg.action, msg.err))
+			return h, nil
+		}
+		if msg.action != "" {
+			h.setHubStatus("hub " + msg.action + " sent")
+		}
+		return h, nil
+
+	case hubTrustDecisionResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub trust failed")
+			h.setError(fmt.Errorf("hub trust: %w", msg.err))
+			return h, nil
+		}
+		if msg.allow {
+			h.setHubStatus("hub trust allowed")
+		} else {
+			h.setHubStatus("hub trust denied")
+		}
+		return h, nil
 
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
@@ -5743,6 +6382,25 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if !isPending {
 			return h, nil // Superseded by newer navigation
+		}
+
+		if msg.hubNodeID != "" {
+			var cmds []tea.Cmd
+
+			h.previewCacheMu.Lock()
+			needsPreviewFetch := h.previewFetchingID != msg.previewKey
+			if needsPreviewFetch {
+				h.previewFetchingID = msg.previewKey
+			}
+			h.previewCacheMu.Unlock()
+			if needsPreviewFetch {
+				cmds = append(cmds, h.fetchHubPreview(msg.hubNodeID, msg.sessionID, msg.previewKey))
+			}
+
+			if len(cmds) > 0 {
+				return h, tea.Batch(cmds...)
+			}
+			return h, nil
 		}
 
 		if msg.remoteName != "" {
@@ -6060,6 +6718,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var remoteFetchCmd tea.Cmd
 		var remoteLatencyCmd tea.Cmd
 
+		h.drainHubTrustRequests()
+		if h.drainHubSnapshots() {
+			selectedBefore := h.captureSelectedItemIdentity()
+			h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		}
+
 		// Auto-dismiss errors after 5 seconds
 		if h.err != nil && !h.errTime.IsZero() && time.Since(h.errTime) > 5*time.Second {
 			h.clearError()
@@ -6228,8 +6892,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			h.previewCacheMu.Unlock()
 		} else {
-			remoteName, remoteSessionID, remoteKey, ok := h.selectedRemotePreviewTarget()
+			nodeID, hubSessionID, hubKey, ok := h.selectedHubPreviewTarget()
 			if ok {
+				h.previewCacheMu.Lock()
+				cachedTime, hasCached := h.previewCacheTime[hubKey]
+				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
+				if cacheExpired && h.previewFetchingID != hubKey {
+					h.previewFetchingID = hubKey
+					previewCmd = h.fetchHubPreview(nodeID, hubSessionID, hubKey)
+				}
+				h.previewCacheMu.Unlock()
+			} else if remoteName, remoteSessionID, remoteKey, ok := h.selectedRemotePreviewTarget(); ok {
 				h.previewCacheMu.Lock()
 				cachedTime, hasCached := h.previewCacheTime[remoteKey]
 				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
@@ -7113,6 +7786,12 @@ func jumpItemName(item session.Item) string {
 		if item.RemoteSession != nil {
 			return item.RemoteSession.Title
 		}
+	case session.ItemTypeHubGroup:
+		return hubDisplayGroupPath(item.HubNodeName, item.HubGroupPath)
+	case session.ItemTypeHubSession:
+		if item.HubSession != nil {
+			return item.HubSession.Title
+		}
 	}
 	return ""
 }
@@ -7152,7 +7831,7 @@ func (h *Home) handleJumpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// For sessions/windows/remotes: attach directly.
 			// For groups: just move cursor (user can press Enter to toggle).
 			item := h.flatItems[h.cursor]
-			if item.Type != session.ItemTypeGroup && item.Type != session.ItemTypeRemoteGroup {
+			if item.Type != session.ItemTypeGroup && item.Type != session.ItemTypeRemoteGroup && item.Type != session.ItemTypeHubGroup {
 				return h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
 			}
 			return h, nil
@@ -7677,6 +8356,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				// Attach to remote session via SSH
 				return h, h.attachRemoteSession(item.RemoteName, item.RemoteSession.ID)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.attachHubSession(item.HubNodeID, item.HubSession.ID, hubSessionNeedsRestartBeforeAttach(item.HubSession))
 			}
 		}
 		return h, nil
@@ -8064,6 +8745,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.groupDialog.ShowRenameSession(item.Session.ID, item.Session.Title)
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.groupDialog.ShowRenameSession("remote:"+item.RemoteName+":"+item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.groupDialog.ShowRenameSession(hubPromptTarget(item.HubNodeID, item.HubSession.ID), item.HubSession.Title)
 			}
 		}
 		return h, nil
@@ -8144,6 +8827,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
 				h.showRemoteNewSessionDialog(item)
 				return h, nil
+			}
+			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+				return h, h.createHubSession(item)
 			}
 		}
 
@@ -8250,6 +8936,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
 				return h, h.createRemoteSession(item.RemoteName)
 			}
+			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+				return h, h.createHubSession(item)
+			}
 		}
 		// Quick create: auto-generated name, smart defaults from group context
 		return h, h.quickCreateSession()
@@ -8267,6 +8956,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.confirmDialog.ShowDeleteSession(item.Session.ID, item.Session.Title, item.Session.IsSandboxed(), item.Session.IsWorktree())
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowDeleteRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.setError(fmt.Errorf("hub delete is unavailable; close the remote session instead"))
 			} else if item.Type == session.ItemTypeGroup && item.Path == session.DefaultGroupPath {
 				// Protected default group: surface the block in the same centered modal
 				// used for the delete confirmation, so it can't be clamped off the bottom
@@ -8294,6 +8985,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.confirmDialog.ShowCloseSession(item.Session.ID, item.Session.Title, item.Session.IsSandboxed())
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowCloseRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.hubSessionCommand(item, "stop", nil)
 			}
 		}
 		return h, nil
@@ -8445,6 +9138,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if item.Session != nil && session.IsClaudeCompatible(item.Session.Tool) {
 					h.openPromptInput(item.Session)
 				}
+			case session.ItemTypeHubSession:
+				if item.HubSession != nil {
+					h.promptInputDialog.Show(hubPromptTarget(item.HubNodeID, item.HubSession.ID), item.HubSession.Title)
+				}
 			}
 		}
 		return h, nil
@@ -8563,6 +9260,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				return h, h.restartRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.hubSessionCommand(item, "restart", nil)
 			}
 		}
 		return h, nil
@@ -8916,6 +9615,22 @@ func (h *Home) handleConfirmDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter", "esc", "o", "O", "y", "Y", "n", "N", " ":
 			h.confirmDialog.Hide()
+			return h, nil
+		}
+		return h, nil
+
+	case ConfirmHubTrustNode:
+		switch msg.String() {
+		case "y", "Y":
+			return h, h.confirmHubTrustDecision(true)
+		case "n", "N":
+			return h, h.confirmHubTrustDecision(false)
+		case "enter":
+			return h, h.confirmHubTrustDecision(h.confirmDialog.GetFocusedButton() == 0)
+		case "esc":
+			h.confirmDialog.Hide()
+			h.setHubStatus("hub trust pending")
+			h.showNextHubTrustRequest()
 			return h, nil
 		}
 		return h, nil
@@ -9938,6 +10653,18 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			newName := h.groupDialog.GetValue()
 			if newName != "" {
 				sessionID := h.groupDialog.GetSessionID()
+
+				if nodeID, hubSessionID, ok := parseHubPromptTarget(sessionID); ok {
+					cmd := h.hubCommand(nodeID, "", "rename", map[string]string{
+						"session_id": hubSessionID,
+						"title":      newName,
+					})
+					h.updateHubSessionTitle(nodeID, hubSessionID, newName)
+					h.rebuildFlatItems()
+					h.groupDialog.Hide()
+					h.lastGTime = time.Time{} // Reset gg-detection so next 'g' opens dialog, not jump-to-top
+					return h, cmd
+				}
 
 				// Handle remote session rename
 				if strings.HasPrefix(sessionID, "remote:") {
@@ -12318,6 +13045,123 @@ func (h *Home) attachRemoteSession(remoteName, sessionID string) tea.Cmd {
 	})
 }
 
+// attachHubSession attaches to a hub-owned session through the connected hub
+// client, suspending the TUI while the requester-side terminal bridge runs.
+func (h *Home) attachHubSession(nodeID, sessionID string, restartBeforeAttach bool) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
+	h.isAttaching.Store(true)
+	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size, restartBeforeAttach: restartBeforeAttach}, func(err error) tea.Msg {
+		return hubAttachResultMsg{err: err}
+	})
+}
+
+func (h *Home) hubCommand(nodeID, nodeName, action string, payload any) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	action = strings.TrimSpace(action)
+	if nodeID == "" || action == "" {
+		h.setError(fmt.Errorf("hub action target is incomplete"))
+		return nil
+	}
+	return func() tea.Msg {
+		_, err := h.hubClient.Command(h.ctx, nodeID, action, payload)
+		return hubActionResultMsg{action: action, nodeName: nodeName, err: err}
+	}
+}
+
+func (h *Home) hubSessionCommand(item session.Item, action string, extra map[string]string) tea.Cmd {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	payload := map[string]string{"session_id": item.HubSession.ID}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return h.hubCommand(item.HubNodeID, item.HubNodeName, action, payload)
+}
+
+func (h *Home) createHubSession(item session.Item) tea.Cmd {
+	if item.Type != session.ItemTypeHubGroup && item.Type != session.ItemTypeHubSession {
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	nodeName := strings.TrimSpace(item.HubNodeName)
+	groupPath := strings.TrimSpace(item.HubGroupPath)
+	projectPath := ""
+	tool := ""
+	if item.HubSession != nil {
+		if groupPath == "" {
+			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
+		}
+		projectPath = strings.TrimSpace(item.HubSession.ProjectPath)
+		tool = strings.TrimSpace(item.HubSession.Tool)
+	}
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	req := hub.CreateSessionRequest{
+		Title:       session.GenerateSessionName(),
+		Tool:        tool,
+		ProjectPath: projectPath,
+		GroupPath:   groupPath,
+	}
+	return h.hubCommand(nodeID, nodeName, "create", req)
+}
+
+func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			snapshot.Sessions[i].Title = title
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func hubPromptTarget(nodeID, sessionID string) string {
+	return "hub:" + nodeID + ":" + sessionID
+}
+
+func parseHubPromptTarget(target string) (nodeID, sessionID string, ok bool) {
+	parts := strings.SplitN(target, ":", 3)
+	if len(parts) != 3 || parts[0] != "hub" || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
+}
+
+func hubSessionNeedsRestartBeforeAttach(hs *session.HubSessionInfo) bool {
+	if hs == nil {
+		return false
+	}
+	switch session.Status(strings.TrimSpace(hs.Status)) {
+	case session.StatusStopped, session.StatusError:
+		return true
+	default:
+		return false
+	}
+}
+
 // remoteAttachCmd implements tea.ExecCommand for remote SSH attach
 type remoteAttachCmd struct {
 	runner    *session.SSHRunner
@@ -12331,6 +13175,38 @@ func (r remoteAttachCmd) Run() error {
 func (r remoteAttachCmd) SetStdin(reader io.Reader)  {}
 func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
+
+type hubAttachCmd struct {
+	client              hubClientAPI
+	ctx                 context.Context
+	nodeID              string
+	sessionID           string
+	size                hub.TerminalSize
+	restartBeforeAttach bool
+}
+
+func (h hubAttachCmd) Run() error {
+	ctx := h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if h.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	if h.restartBeforeAttach {
+		_, err := h.client.Command(ctx, h.nodeID, "restart", map[string]string{
+			"session_id": h.sessionID,
+		})
+		if err != nil {
+			return fmt.Errorf("restart hub session before attach: %w", err)
+		}
+	}
+	return h.client.Attach(ctx, h.nodeID, h.sessionID, h.size)
+}
+
+func (h hubAttachCmd) SetStdin(reader io.Reader)  {}
+func (h hubAttachCmd) SetStdout(writer io.Writer) {}
+func (h hubAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
 	msg := importSourcesLoadedMsg{}
@@ -12826,6 +13702,30 @@ func (h *Home) countSessionStatuses() (running, waiting, idle, stopped, errored 
 	}
 	h.remoteSessionsMu.RUnlock()
 
+	if h.hubConfigured {
+		h.hubSessionsMu.RLock()
+		for _, node := range h.hubSessions {
+			if h.isLocalHubNode(node) {
+				continue
+			}
+			for _, hs := range node.Sessions {
+				switch session.Status(strings.TrimSpace(hs.Status)) {
+				case session.StatusRunning, session.StatusStarting:
+					running++
+				case session.StatusWaiting:
+					waiting++
+				case session.StatusIdle, session.StatusQueued, "":
+					idle++
+				case session.StatusStopped:
+					stopped++
+				case session.StatusError:
+					errored++
+				}
+			}
+		}
+		h.hubSessionsMu.RUnlock()
+	}
+
 	// Cache results with timestamp
 	h.cachedStatusCounts.running = running
 	h.cachedStatusCounts.waiting = waiting
@@ -13281,6 +14181,11 @@ func (h *Home) View() string {
 			sysStyle := lipgloss.NewStyle().Foreground(ColorComment)
 			stats += statsSep + sysStyle.Render(formatted)
 		}
+	}
+
+	if hubStatus := h.hubStatusText(); hubStatus != "" {
+		hubStyle := lipgloss.NewStyle().Foreground(ColorCyan)
+		stats += statsSep + hubStyle.Render(hubStatus)
 	}
 
 	// Version badge (right-aligned, subtle inline style - no border to keep single line)
@@ -14909,6 +15814,9 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 		// without this case the curated footer dropped the attach hint for
 		// remote rows (PR #1289 review nit 1).
 		add("⏎", "attach")
+
+	case session.ItemTypeHubSession:
+		add("⏎", "attach")
 	}
 
 	return hints
@@ -15274,6 +16182,10 @@ func (h *Home) renderItem(
 		h.renderRemoteGroupItem(b, item, selected)
 	case session.ItemTypeRemoteSession:
 		h.renderRemoteSessionItem(b, item, selected)
+	case session.ItemTypeHubGroup:
+		h.renderHubGroupItem(b, item, selected)
+	case session.ItemTypeHubSession:
+		h.renderHubSessionItem(b, item, selected)
 	case session.ItemTypeDivider:
 		h.renderDivider(b, item)
 	}
@@ -15353,6 +16265,7 @@ func (h *Home) renderGroupItem(
 	// Use precomputed recursive stats (group + descendants) for this render pass.
 	stats := groupStats[group.Path]
 	countStr := countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount))
+	displayName := h.localGroupDisplayName(item)
 
 	statusStr := ""
 	if stats.running > 0 {
@@ -15368,7 +16281,7 @@ func (h *Home) renderGroupItem(
 		gutter,
 		indent,
 		expandIcon,
-		nameStyle.Render(group.Name),
+		nameStyle.Render(displayName),
 		countStr,
 		statusStr,
 	)
@@ -15965,6 +16878,84 @@ func (h *Home) renderRemotePreview(item session.Item, width, height int) string 
 	return b.String()
 }
 
+func (h *Home) renderHubPreview(item session.Item, width, height int) string {
+	if item.Type == session.ItemTypeHubGroup {
+		stats := h.hubGroupStats(item.HubNodeID, item.HubGroupPath)
+		return renderEmptyStateResponsive(EmptyStateConfig{
+			Icon:     "⬡",
+			Title:    hubDisplayGroupPath(item.HubNodeName, item.HubGroupPath),
+			Subtitle: fmt.Sprintf("Hub node: %s — %d sessions", item.HubNodeName, stats.sessionCount),
+			Hints:    []string{"Select a session to attach via hub"},
+		}, width, height)
+	}
+
+	hs := item.HubSession
+	if hs == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
+	b.WriteString(nameStyle.Render(hs.Title))
+	b.WriteString("  ")
+
+	statusColor := ColorTextDim
+	statusIcon := "○"
+	switch session.Status(strings.TrimSpace(hs.Status)) {
+	case session.StatusRunning, session.StatusStarting:
+		statusIcon = "●"
+		statusColor = ColorGreen
+	case session.StatusWaiting:
+		statusIcon = "◐"
+		statusColor = ColorYellow
+	case session.StatusError:
+		statusIcon = "✗"
+		statusColor = ColorRed
+	case session.StatusStopped:
+		statusIcon = "■"
+		statusColor = ColorTextDim
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(statusColor).Render(statusIcon + " " + strings.TrimSpace(hs.Status)))
+	b.WriteString("\n\n")
+
+	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
+	b.WriteString(dimStyle.Render("Hub:    ") + item.HubNodeName + "\n")
+	if hs.ProjectPath != "" {
+		b.WriteString(dimStyle.Render("Path:   ") + hs.ProjectPath + "\n")
+	}
+	if hs.Tool != "" {
+		b.WriteString(dimStyle.Render("Tool:   ") + hs.Tool + "\n")
+	}
+	b.WriteString(dimStyle.Render("Group:  ") + hs.GroupPath + "\n\n")
+
+	pvKey := hubPreviewCacheKey(item.HubNodeID, hs.ID)
+	h.previewCacheMu.RLock()
+	previewContent, hasPreview := h.previewCache[pvKey]
+	_, hasFetched := h.previewCacheTime[pvKey]
+	h.previewCacheMu.RUnlock()
+
+	b.WriteString(dimStyle.Render("Last response") + "\n")
+	b.WriteString(strings.Repeat("-", max(1, min(width-4, 40))))
+	b.WriteString("\n")
+	previewContent = truncateRemotePreviewContent(previewContent)
+	if hasPreview && strings.TrimSpace(previewContent) != "" {
+		b.WriteString(previewContent)
+		b.WriteString("\n\n")
+	} else if hasFetched {
+		b.WriteString(dimStyle.Render("No response available yet."))
+		b.WriteString("\n\n")
+	} else if session.Status(strings.TrimSpace(hs.Status)) == session.StatusRunning || session.Status(strings.TrimSpace(hs.Status)) == session.StatusWaiting {
+		b.WriteString(dimStyle.Render("Fetching hub preview..."))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString(dimStyle.Render("No response available yet."))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(dimStyle.Render("Press Enter to attach via hub"))
+	return b.String()
+}
+
 // renderRemoteGroupItem renders a remote group header (e.g., "remotes/dev")
 func (h *Home) renderRemoteGroupItem(b *strings.Builder, item session.Item, selected bool) {
 	// Count sessions for this remote
@@ -16099,6 +17090,143 @@ func (h *Home) renderRemoteSessionItem(b *strings.Builder, item session.Item, se
 		strings.Repeat(" ", leftGutterWidth), // align with group/session hotkey gutter
 		selPrefix,
 		DimStyle.Render(treeConnector),
+		sStyle.Render(statusIcon),
+		titleStyle.Render(titleStr),
+		toolStr,
+	))
+}
+
+func (h *Home) renderHubGroupItem(b *strings.Builder, item session.Item, selected bool) {
+	label := hubDisplayGroupPath(item.HubNodeName, item.HubGroupPath)
+	stats := h.hubGroupStats(item.HubNodeID, item.HubGroupPath)
+
+	nameStyle := GroupNameStyle
+	countStyle := GroupCountStyle
+	expandIcon := GroupExpandStyle.Render("▾")
+	if selected {
+		nameStyle = GroupNameSelStyle
+		countStyle = GroupCountSelStyle
+		expandIcon = GroupExpandSelStyle.Render("▾")
+	}
+
+	statusStr := ""
+	if stats.running > 0 {
+		statusStr += " " + GroupStatusRunning.Render(fmt.Sprintf("● %d", stats.running))
+	}
+	if stats.waiting > 0 {
+		statusStr += " " + GroupStatusWaiting.Render(fmt.Sprintf("◐ %d", stats.waiting))
+	}
+
+	b.WriteString(fmt.Sprintf(
+		"%s%s %s%s%s\n",
+		strings.Repeat(" ", leftGutterWidth),
+		expandIcon,
+		nameStyle.Render(label),
+		countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount)),
+		statusStr,
+	))
+}
+
+func (h *Home) hubGroupStats(nodeID, groupPath string) groupRenderStats {
+	stats := groupRenderStats{}
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	h.hubSessionsMu.RLock()
+	defer h.hubSessionsMu.RUnlock()
+	node, ok := h.hubSessions[nodeID]
+	if !ok {
+		for _, candidate := range h.hubSessions {
+			if strings.TrimSpace(candidate.Node.ID) == strings.TrimSpace(nodeID) {
+				node = candidate
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return stats
+		}
+	}
+	for _, info := range node.Sessions {
+		infoGroup := strings.Trim(strings.TrimSpace(info.GroupPath), "/")
+		if infoGroup == "" {
+			infoGroup = session.DefaultGroupPath
+		}
+		if infoGroup != groupPath {
+			continue
+		}
+		if h.statusFilter != "" && h.statusFilter != FilterModeArchived && !h.matchesStatusFilter(h.statusFilter, session.Status(strings.TrimSpace(info.Status))) {
+			continue
+		}
+		stats.sessionCount++
+		switch session.Status(strings.TrimSpace(info.Status)) {
+		case session.StatusRunning:
+			stats.running++
+		case session.StatusWaiting:
+			stats.waiting++
+		}
+	}
+	return stats
+}
+
+func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selected bool) {
+	hs := item.HubSession
+	if hs == nil {
+		return
+	}
+
+	statusIcon := "○"
+	statusColor := lipgloss.Color("8")
+	switch session.Status(strings.TrimSpace(hs.Status)) {
+	case session.StatusRunning, session.StatusStarting:
+		statusIcon = "●"
+		statusColor = lipgloss.Color("2")
+	case session.StatusWaiting:
+		statusIcon = "◉"
+		statusColor = lipgloss.Color("3")
+	case session.StatusError:
+		statusIcon = "✗"
+		statusColor = lipgloss.Color("1")
+	case session.StatusStopped:
+		statusIcon = "■"
+		statusColor = lipgloss.Color("8")
+	}
+
+	sStyle := lipgloss.NewStyle().Foreground(statusColor)
+	titleStyle := lipgloss.NewStyle().Foreground(ColorText)
+	if selected {
+		sStyle = SessionStatusSelStyle
+		titleStyle = SessionStatusSelStyle
+	}
+
+	titleStr := hs.Title
+	if len(titleStr) > 25 {
+		titleStr = titleStr[:22] + "..."
+	}
+
+	toolStr := ""
+	if hs.Tool != "" {
+		tStyle := GetToolStyle(hs.Tool)
+		if selected {
+			tStyle = SessionStatusSelStyle
+		}
+		toolStr = tStyle.Render(" " + hs.Tool)
+	}
+
+	treeConnector := treeBranch
+	if item.IsLastInGroup {
+		treeConnector = treeLast
+	}
+	treeStyle := DimStyle
+
+	selPrefix := " "
+	if selected {
+		selPrefix = SessionSelectionPrefix.Render("▶")
+		treeStyle = TreeConnectorSelStyle
+	}
+
+	b.WriteString(fmt.Sprintf("%s%s%s %s %s%s\n",
+		strings.Repeat(" ", leftGutterWidth),
+		selPrefix,
+		treeStyle.Render(treeConnector),
 		sStyle.Render(statusIcon),
 		titleStyle.Render(titleStr),
 		toolStr,
@@ -16506,6 +17634,10 @@ func (h *Home) renderPreviewPane(width, height int) string {
 	// If group is selected, show group info
 	if item.Type == session.ItemTypeGroup {
 		return h.renderGroupPreview(item.Group, width, height)
+	}
+
+	if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+		return h.renderHubPreview(item, width, height)
 	}
 
 	// Remote items: show simple preview

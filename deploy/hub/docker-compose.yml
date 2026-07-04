@@ -1,0 +1,16 @@
+services:
+  agent-deck-hub:
+    image: ghcr.io/lbr88/agent-deck-hub:latest
+    pull_policy: always
+    command:
+      - --listen=:8421
+      - --data=/data
+    # Set this when the hub is reached through a reverse proxy.
+    #  - --url=wss://hub.example:8421
+    # Set this for first startup to print the initial admin join command.
+    #  - --bootstrap-admin=laptop
+    ports:
+      - "8421:8421"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

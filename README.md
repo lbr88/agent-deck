@@ -827,6 +827,44 @@ Remote configuration is stored under `[remotes]` in `$XDG_CONFIG_HOME/agent-deck
 
 Pressing `n` on a remote group or session opens the full new-session dialog in **remote mode**: path suggestions come from the remote host, the remote session's group is pre-filled, and the create routes over SSH with your chosen tool — sessions are never accidentally created on localhost.
 
+### Agent Deck Hub
+
+Agent Deck Hub connects multiple agent-deck instances through one encrypted relay. It is not a web app: the hub keeps node state and relays session snapshots, terminal attach streams, and basic session actions between joined nodes. A join invite grants hub membership; each existing node still approves whether the new node may access that node's sessions.
+
+```bash
+# Run the hub. It creates and reuses a self-signed TLS cert by default.
+# --bootstrap-admin prints the first admin join command only while no nodes exist.
+agent-deck hub serve --listen :8421 --bootstrap-admin laptop --data ~/.local/share/agent-deck-hub
+
+# Run the printed command on the first client:
+agent-deck hub join wss://hub.example:8421 --token invite_...
+
+# From that admin client, create more single-use invites:
+agent-deck hub invite desktop
+
+# Admin clients can also manage registered nodes through the hub:
+agent-deck hub status
+agent-deck hub nodes
+agent-deck hub nodes promote node_...
+agent-deck hub nodes demote node_...
+agent-deck hub nodes rename node_... desktop
+agent-deck hub nodes revoke node_...
+agent-deck hub invites --json
+agent-deck hub invites revoke inv_...
+agent-deck hub trust pending
+agent-deck hub trust allow node_...
+agent-deck hub trust deny node_...
+
+# Run the printed command on the joining machine:
+agent-deck hub join wss://hub.example:8421 --token invite_...
+```
+
+`hub serve` stores the hub URL that invites print. By default it derives this from `--listen`; if the hub is behind Docker, Authentik, or another reverse proxy, start it with `--url wss://hub.example:8421`. `AGENT_DECK_HUB_URL` is also accepted as a fallback for container setups, but local runs do not need it.
+
+After join, the TUI auto-connects on startup. The first join prompts you to accept the hub certificate fingerprint, then stores that pin like an SSH host key. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node after that owner has allowed the requesting node. All traffic uses `wss://`, and no SSH connectivity between nodes is required. Only admin nodes can create/revoke invites and manage registered nodes; use `agent-deck hub invite --admin <node>` when the invited node should also administer the hub.
+
+See [Agent Deck Hub](docs/AGENT-DECK-HUB.md) for Docker deployment and the security model.
+
 #### Security
 
 - **SSH host-key stance.** agent-deck verifies remote host keys against your `~/.ssh/known_hosts` using OpenSSH's secure default — it never sets `StrictHostKeyChecking=no` and never points `UserKnownHostsFile` at `/dev/null`. Every connection (list, attach, deploy) runs with `BatchMode=yes`, so an **unknown or changed host key fails fast** with a clear `Host key verification failed` error instead of silently trusting the host or hanging on a prompt. Add each remote to `known_hosts` first (e.g. `ssh user@host` once interactively, or `ssh-keyscan`), and authenticate with keys/an agent (BatchMode disables interactive password prompts). A changed host key is treated as a potential MITM and refused until you resolve it.

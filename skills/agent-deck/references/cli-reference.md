@@ -14,6 +14,7 @@ Complete reference for all agent-deck CLI commands.
 - [Group Commands](#group-commands)
 - [Profile Commands](#profile-commands)
 - [Remote Commands](#remote-commands)
+- [Hub Commands](#hub-commands)
 - [Conductor Commands](#conductor-commands)
 
 ## Global Options
@@ -630,6 +631,121 @@ agent-deck remote rename dev my-session new-name
 agent-deck remote update          # update all remotes
 agent-deck remote update dev      # update specific remote
 ```
+
+## Hub Commands
+
+Run an encrypted relay for agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. `hub serve` creates a self-signed certificate by default, and `hub join` pins the accepted certificate fingerprint like an SSH host key. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`. An invite grants hub membership; each owner node still approves whether a new node may access that owner node's sessions.
+
+### hub serve
+
+```bash
+agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
+```
+
+| Flag | Description |
+|------|-------------|
+| `--listen <addr>` | Listen address (default: `127.0.0.1:8421`) |
+| `--url <wss://host:port>` | Public hub URL stored for invite output; overrides `AGENT_DECK_HUB_URL` and the URL derived from `--listen` |
+| `--data <dir>` | Hub data directory |
+| `--tls-cert <path>` | Optional TLS certificate file |
+| `--tls-key <path>` | Optional TLS private key file |
+
+Starts the hub server. The data directory stores the SQLite hub database, the hub URL that invites print, and, by default, the generated self-signed cert/key. If `--url` is omitted, the hub uses `AGENT_DECK_HUB_URL`; if that is also empty, it derives a local URL from `--listen`. If you provide custom TLS files, pass both `--tls-cert` and `--tls-key`.
+
+### hub invite
+
+```bash
+agent-deck hub invite [--admin] [--local] [--data <dir>] [--ttl 24h] <node-name>
+```
+
+Creates a single-use invite and prints the exact `agent-deck hub join ... --token ...` command to run on the joining client. Joined admin nodes create invites through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine.
+
+| Flag | Description |
+|------|-------------|
+| `--admin` | Invite the new node as a hub admin |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
+| `--ttl <duration>` | Invite lifetime |
+
+### hub join
+
+```bash
+agent-deck hub join wss://hub.example:8421 --token <invite-token> [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--token <token>` | Invite token from `hub invite`, required |
+| `--node-name <name>` | Display name for this node |
+| `--token-file <path>` | Where to store the joined node credential |
+| `--ca-pem-file <path>` | PEM CA bundle for verifying the hub certificate |
+| `--server-name <name>` | TLS server name override |
+| `--tls-skip-verify` | Skip TLS verification for local testing only |
+
+Exchanges the invite for a node credential and writes `[hub]` config for auto-connect. Without `--ca-pem-file` or `--tls-skip-verify`, join prompts to accept and pin the hub certificate fingerprint.
+
+### hub connect
+
+```bash
+agent-deck hub connect
+```
+
+Connects this node to the configured hub without starting the TUI. Useful for service-style nodes.
+
+### hub status
+
+```bash
+agent-deck hub status [--json]
+```
+
+Shows the configured hub URL, this node's hub id/name, online status, and admin role.
+
+### hub nodes
+
+```bash
+agent-deck hub nodes [--local] [--data <dir>] [--json]
+agent-deck hub nodes promote [--local] [--data <dir>] <node-id>
+agent-deck hub nodes demote [--local] [--data <dir>] <node-id>
+agent-deck hub nodes rename [--local] [--data <dir>] <node-id> <name>
+agent-deck hub nodes revoke [--local] [--data <dir>] <node-id>
+```
+
+Lists and manages registered hub nodes. Joined admin nodes manage nodes through the configured hub by default. Use `--local` or `--data` only when intentionally managing a hub database on the local machine. Demote and revoke refuse to remove the last admin node.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output nodes as JSON |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
+
+### hub invites
+
+```bash
+agent-deck hub invites [--local] [--data <dir>] [--json]
+agent-deck hub invites revoke [--local] [--data <dir>] <invite-id-or-token>
+```
+
+Lists and revokes hub invites. Joined admin nodes manage invites through the configured hub by default. List output shows invite IDs and statuses, never invite tokens or token hashes.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output invites as JSON |
+| `--local` | Use the local hub data directory instead of the configured hub |
+| `--data <dir>` | Local hub data directory |
+
+### hub trust
+
+```bash
+agent-deck hub trust pending [--json]
+agent-deck hub trust allow <node-id>
+agent-deck hub trust deny <node-id>
+```
+
+Lists and answers pending per-node access requests for this configured node. The TUI prompts automatically when a new node joins; these commands are the CLI fallback. Admin status does not bypass this gate: the owner node must allow a requester before the requester can see that owner's snapshots or relay attach/actions to it.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output pending trust requests as JSON |
 
 ## Session Resolution
 

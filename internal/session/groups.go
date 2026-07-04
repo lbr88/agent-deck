@@ -26,6 +26,8 @@ const (
 	ItemTypeSession
 	ItemTypeRemoteGroup
 	ItemTypeRemoteSession
+	ItemTypeHubGroup
+	ItemTypeHubSession
 	ItemTypeWindow
 	ItemTypeDivider // Non-selectable separator between view-mode sections (running-on-top, etc.)
 )
@@ -37,6 +39,10 @@ type Item struct {
 	Session             *Instance
 	RemoteSession       *RemoteSessionInfo // Set for ItemTypeRemoteSession/ItemTypeRemoteGroup
 	RemoteName          string             // Remote name for remote items
+	HubNodeID           string             // Hub node owner for hub items
+	HubNodeName         string             // Display name for hub node items
+	HubGroupPath        string             // Original group path within the hub node
+	HubSession          *HubSessionInfo    // Set for ItemTypeHubSession
 	Level               int                // Indentation level (0 for root groups, 1 for sessions)
 	Path                string             // Group path for this item
 	IsLastInGroup       bool               // True if this is the last session in its group (for tree rendering)
@@ -54,6 +60,19 @@ type Item struct {
 	CreatingTitle       string             // Display title for creating placeholder
 	CreatingTool        string             // Tool for creating placeholder
 	DividerLabel        string             // Label shown on an ItemTypeDivider row (e.g. "idle / done")
+}
+
+// HubSessionInfo is a UI-facing snapshot of a session owned by an Agent Deck
+// Hub node. It intentionally lives in session instead of importing internal/hub,
+// because the hub client already depends on session for local snapshot sources.
+type HubSessionInfo struct {
+	ID               string
+	Title            string
+	Tool             string
+	Status           string
+	GroupPath        string
+	ProjectPath      string
+	DisplaySessionID string
 }
 
 // Group represents a group of sessions
