@@ -1152,7 +1152,7 @@ func setRemoteHubTrust(settings session.HubSettings, nodeID string, allow bool) 
 
 func handleHubTrust(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: agent-deck hub trust <pending|allow|deny> [node-id]")
+		return fmt.Errorf("usage: agent-deck hub trust <pending|allow|deny> [node-id-or-name]")
 	}
 	switch args[0] {
 	case "pending":
@@ -1207,11 +1207,11 @@ func handleHubTrustDecision(args []string, allow bool) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: agent-deck hub trust %s <node-id>", action)
+		return fmt.Errorf("usage: agent-deck hub trust %s <node-id-or-name>", action)
 	}
-	nodeID := strings.TrimSpace(fs.Arg(0))
-	if nodeID == "" {
-		return fmt.Errorf("node id is required")
+	selector := strings.TrimSpace(fs.Arg(0))
+	if selector == "" {
+		return fmt.Errorf("node id or name is required")
 	}
 	config, err := session.LoadUserConfig()
 	if err != nil {
@@ -1220,15 +1220,66 @@ func handleHubTrustDecision(args []string, allow bool) error {
 	if !config.Hub.Enabled() {
 		return fmt.Errorf("hub is not configured; run agent-deck hub join first")
 	}
-	if err := setRemoteHubTrust(config.Hub, nodeID, allow); err != nil {
+	node, err := resolveRemoteHubTrustSelector(config.Hub, selector)
+	if err != nil {
 		return err
 	}
+	if err := setRemoteHubTrust(config.Hub, node.NodeID, allow); err != nil {
+		return err
+	}
+	label := node.NodeID
+	if node.NodeName != "" && node.NodeName != node.NodeID {
+		label = fmt.Sprintf("%s (%s)", node.NodeName, node.NodeID)
+	}
 	if allow {
-		fmt.Printf("Allowed hub node %s\n", nodeID)
+		fmt.Printf("Allowed hub node %s\n", label)
 	} else {
-		fmt.Printf("Denied hub node %s\n", nodeID)
+		fmt.Printf("Denied hub node %s\n", label)
 	}
 	return nil
+}
+
+type resolvedHubTrustNode struct {
+	NodeID   string
+	NodeName string
+}
+
+func resolveRemoteHubTrustSelector(settings session.HubSettings, selector string) (resolvedHubTrustNode, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return resolvedHubTrustNode{}, fmt.Errorf("node id or name is required")
+	}
+	if strings.HasPrefix(selector, "node_") {
+		return resolvedHubTrustNode{NodeID: selector}, nil
+	}
+
+	requests, err := listRemoteHubTrustRequests(settings)
+	if err != nil {
+		return resolvedHubTrustNode{}, err
+	}
+	for _, request := range requests {
+		if strings.TrimSpace(request.NodeID) == selector {
+			return resolvedHubTrustNode{NodeID: strings.TrimSpace(request.NodeID), NodeName: strings.TrimSpace(request.NodeName)}, nil
+		}
+	}
+	var matches []hubTrustRequestOutput
+	for _, request := range requests {
+		if strings.TrimSpace(request.NodeName) == selector {
+			matches = append(matches, request)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return resolvedHubTrustNode{NodeID: strings.TrimSpace(matches[0].NodeID), NodeName: strings.TrimSpace(matches[0].NodeName)}, nil
+	case 0:
+		return resolvedHubTrustNode{}, fmt.Errorf("no pending hub trust request named %q; run agent-deck hub trust pending", selector)
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			ids = append(ids, strings.TrimSpace(match.NodeID))
+		}
+		return resolvedHubTrustNode{}, fmt.Errorf("multiple pending hub trust requests named %q; use one of these node ids: %s", selector, strings.Join(ids, ", "))
+	}
 }
 
 func printHubTrustRequests(requests []hubTrustRequestOutput, jsonOutput bool) error {

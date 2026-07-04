@@ -932,6 +932,116 @@ func TestHubTrustAllowUsesConfiguredNode(t *testing.T) {
 	}
 }
 
+func TestHubTrustAllowAcceptsPendingNodeName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/trust/pending":
+			if r.Method != http.MethodGet {
+				t.Errorf("pending method = %s, want GET", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"requests": []map[string]any{{
+					"node_id":   "node_joining",
+					"node_name": "laptop",
+					"status":    "pending",
+				}, {
+					"node_id":   "node_other",
+					"node_name": "desktop",
+					"status":    "pending",
+				}},
+			}); err != nil {
+				t.Errorf("encode pending response: %v", err)
+			}
+		case "/api/trust/allow":
+			if r.Method != http.MethodPost {
+				t.Errorf("allow method = %s, want POST", r.Method)
+			}
+			var req struct {
+				NodeID string `json:"node_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode request: %v", err)
+			}
+			seen <- req.NodeID
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]bool{"ok": true}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_owner", "owner_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubTrust([]string{"allow", "laptop"}); err != nil {
+			t.Fatalf("handleHubTrust allow by name: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Allowed") || !strings.Contains(out, "laptop") || !strings.Contains(out, "node_joining") {
+		t.Fatalf("trust allow output = %q, want name and node id", out)
+	}
+	select {
+	case got := <-seen:
+		if got != "node_joining" {
+			t.Fatalf("allow request node_id = %q, want node_joining", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hub trust allow by name did not call configured hub")
+	}
+}
+
+func TestHubTrustAllowRejectsAmbiguousPendingNodeName(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/trust/pending" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"requests": []map[string]any{{
+				"node_id":   "node_first",
+				"node_name": "laptop",
+				"status":    "pending",
+			}, {
+				"node_id":   "node_second",
+				"node_name": "laptop",
+				"status":    "pending",
+			}},
+		}); err != nil {
+			t.Errorf("encode pending response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_owner", "owner_secret")
+
+	err := handleHubTrust([]string{"allow", "laptop"})
+	if err == nil {
+		t.Fatal("handleHubTrust allow by ambiguous name succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "multiple pending hub trust requests named") ||
+		!strings.Contains(err.Error(), "node_first") ||
+		!strings.Contains(err.Error(), "node_second") {
+		t.Fatalf("ambiguous name error = %v", err)
+	}
+}
+
 func TestHubInviteErrorsWhenHubURLIsNotConfigured(t *testing.T) {
 	err := handleHubInvite([]string{"--data", t.TempDir(), "laptop"})
 	if err == nil {
