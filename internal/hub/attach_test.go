@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -175,6 +176,51 @@ func TestAttachRouterOpenNotifiesRequesterWhenOwnerUnavailable(t *testing.T) {
 	}
 }
 
+func TestAttachRouterOpenFailureNotifiesOpeningRequesterPeer(t *testing.T) {
+	router := NewAttachRouter()
+	requesterA := newFakePeerConn("laptop", "laptop-a")
+	requesterB := newFakePeerConn("laptop", "laptop-b")
+	router.Register(requesterA)
+	router.Register(requesterB)
+
+	err := router.OpenFromPeer(context.Background(), requesterA, "workstation", AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"})
+	if err == nil {
+		t.Fatal("OpenFromPeer succeeded, want owner unavailable error")
+	}
+
+	closed := requesterA.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester A msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	if len(requesterB.messages) != 0 {
+		t.Fatalf("requester B received %d messages, want none", len(requesterB.messages))
+	}
+}
+
+func TestAttachRouterOwnerSendFailureNotifiesOpeningRequesterPeer(t *testing.T) {
+	router := NewAttachRouter()
+	requesterA := newFakePeerConn("laptop", "laptop-a")
+	requesterB := newFakePeerConn("laptop", "laptop-b")
+	owner := newFakePeer("workstation")
+	owner.sendErr = errors.New("write failed")
+	router.Register(requesterA)
+	router.Register(owner)
+	router.Register(requesterB)
+
+	err := router.OpenFromPeer(context.Background(), requesterA, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"})
+	if err == nil {
+		t.Fatal("OpenFromPeer succeeded, want owner send error")
+	}
+
+	closed := requesterA.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester A msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	if len(requesterB.messages) != 0 {
+		t.Fatalf("requester B received %d messages, want none", len(requesterB.messages))
+	}
+}
+
 func TestAttachRouterRejectsDuplicateStreamID(t *testing.T) {
 	router := NewAttachRouter()
 	requesterA := newFakePeerConn("laptop", "laptop-a")
@@ -255,10 +301,36 @@ func TestAttachRouterPinsStreamToOpeningRequesterConnection(t *testing.T) {
 	assertAttachDataBytes(t, output, "still-open")
 }
 
+func TestAttachRouterUnregisterNodeNotifiesPinnedSurvivingPeer(t *testing.T) {
+	router := NewAttachRouter()
+	requesterA := newFakePeerConn("laptop", "laptop-a")
+	requesterB := newFakePeerConn("laptop", "laptop-b")
+	owner := newFakePeer("workstation")
+	router.Register(requesterA)
+	router.Register(owner)
+	router.Register(requesterB)
+
+	if err := router.OpenFromPeer(context.Background(), requesterA, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"}); err != nil {
+		t.Fatalf("OpenFromPeer: %v", err)
+	}
+	_ = owner.pop(t)
+
+	router.Unregister(owner.ID)
+
+	closed := requesterA.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester A msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	if len(requesterB.messages) != 0 {
+		t.Fatalf("requester B received %d messages, want none", len(requesterB.messages))
+	}
+}
+
 type fakePeer struct {
 	ID       string
 	peerID   string
 	messages []Envelope
+	sendErr  error
 }
 
 func newFakePeer(id string) *fakePeer {
@@ -278,6 +350,9 @@ func (p *fakePeer) PeerID() string {
 }
 
 func (p *fakePeer) Send(env Envelope) error {
+	if p.sendErr != nil {
+		return p.sendErr
+	}
 	p.messages = append(p.messages, env)
 	return nil
 }
