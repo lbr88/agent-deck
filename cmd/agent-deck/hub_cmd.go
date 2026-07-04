@@ -325,6 +325,7 @@ func handleHubConnectWithContext(ctx context.Context, profile string, args []str
 		TLSSkipVerify: hubConfig.TLSSkipVerify,
 		CAPemFile:     strings.TrimSpace(hubConfig.CAPemFile),
 		ServerName:    strings.TrimSpace(hubConfig.ServerName),
+		AttachBackend: hub.NewTmuxAttachBackend(profile),
 	}, hub.LocalSessionSource{Profile: profile})
 
 	fmt.Printf("Connecting to hub %s as %s\n", strings.TrimSpace(hubConfig.URL), nodeName)

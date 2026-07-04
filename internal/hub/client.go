@@ -11,16 +11,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
 	"github.com/gorilla/websocket"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -594,33 +597,67 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 	}
 	defer func() { _ = term.Restore(stdinFD, oldState) }()
 
-	errCh := make(chan error, 2)
+	attachCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 4)
+	sendErr := func(err error) {
+		select {
+		case errCh <- err:
+		case <-attachCtx.Done():
+		}
+	}
+
+	sigwinch := make(chan os.Signal, 1)
+	signal.Notify(sigwinch, syscall.SIGWINCH)
+	defer signal.Stop(sigwinch)
+
+	go func() {
+		for {
+			select {
+			case <-attachCtx.Done():
+				return
+			case <-sigwinch:
+				size := currentTerminalSize()
+				if size.Cols > 0 && size.Rows > 0 {
+					_ = conn.writeEnvelope(MsgAttachResize, c.cfg.NodeID, AttachResizePayload{
+						StreamID: stream.streamID,
+						Cols:     size.Cols,
+						Rows:     size.Rows,
+					})
+				}
+			}
+		}
+	}()
+
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := readTerminalInput(attachCtx, stdinFD, buf)
 			if n > 0 {
 				chunk := append([]byte(nil), buf[:n]...)
 				if idx := tmux.IndexCtrlQ(chunk); idx >= 0 {
 					if idx > 0 {
 						if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(stream.streamID, chunk[:idx])); writeErr != nil {
-							errCh <- writeErr
+							sendErr(writeErr)
 							return
 						}
 					}
-					errCh <- nil
+					sendErr(nil)
 					return
 				}
 				if writeErr := conn.writeEnvelope(MsgAttachData, c.cfg.NodeID, NewAttachData(stream.streamID, chunk)); writeErr != nil {
-					errCh <- writeErr
+					sendErr(writeErr)
 					return
 				}
 			}
 			if err != nil {
 				if err == io.EOF {
-					errCh <- nil
+					sendErr(nil)
+				} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					sendErr(attachCtx.Err())
 				} else {
-					errCh <- err
+					sendErr(err)
 				}
 				return
 			}
@@ -635,14 +672,14 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 					continue
 				}
 				if _, err := os.Stdout.Write(data); err != nil {
-					errCh <- err
+					sendErr(err)
 					return
 				}
 			case closed := <-stream.closed:
-				errCh <- attachClosedError(closed)
+				sendErr(attachClosedError(closed))
 				return
-			case <-ctx.Done():
-				errCh <- ctx.Err()
+			case <-attachCtx.Done():
+				sendErr(attachCtx.Err())
 				return
 			}
 		}
@@ -660,6 +697,28 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: stream.streamID, Reason: reason})
 	}
 	return err
+}
+
+func readTerminalInput(ctx context.Context, fd int, buf []byte) (int, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		events := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(events, 100)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return 0, err
+		}
+		if n == 0 {
+			continue
+		}
+		if events[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			return os.Stdin.Read(buf)
+		}
+	}
 }
 
 func attachClosedError(payload AttachClosePayload) error {
