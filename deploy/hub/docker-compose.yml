@@ -7,6 +7,8 @@ services:
     command:
       - --listen=:8421
       - --data=/data
+    # Set this when the hub is reached through a reverse proxy.
+    #  - --url=wss://hub.example:8421
     ports:
       - "8421:8421"
     volumes:

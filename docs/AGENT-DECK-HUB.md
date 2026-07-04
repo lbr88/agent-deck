@@ -14,7 +14,16 @@ agent-deck hub serve \
   --data ~/.local/share/agent-deck-hub
 ```
 
-The data directory stores `hub.db`, node credentials, invite state, latest session snapshots, and the default self-signed cert/key.
+The data directory stores `hub.db`, node credentials, invite state, latest session snapshots, the hub URL used by invites, and the default self-signed cert/key. By default the hub URL is derived from `--listen`. If that is not the URL clients should use, set it once when starting the hub:
+
+```bash
+agent-deck hub serve \
+  --listen :8421 \
+  --url wss://hub.example:8421 \
+  --data ~/.local/share/agent-deck-hub
+```
+
+`AGENT_DECK_HUB_URL` is also accepted as a fallback for container setups. The `--url` flag takes precedence, and local runs can omit both if the derived `--listen` URL is correct.
 
 To use your own certificate, pass both files:
 
@@ -24,16 +33,16 @@ agent-deck hub serve --tls-cert cert.pem --tls-key key.pem
 
 ## Join A Node
 
-On the hub host, create a single-use invite token:
+On the hub host, create a single-use invite:
 
 ```bash
 agent-deck hub invite laptop
 ```
 
-On the joining machine, exchange that invite for a node credential:
+The invite command prints the exact command to run on the joining machine:
 
 ```bash
-agent-deck hub join wss://hub.example:8421 --token <token>
+agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
 
 On first join with the default self-signed certificate, `agent-deck` shows the hub certificate fingerprint and asks whether to trust it. The accepted fingerprint is stored in `config.toml`, like an SSH known-host key. Future connects reject the hub if that certificate changes.
@@ -74,6 +83,13 @@ docker compose -f deploy/hub/docker-compose.yml up --build -d
 ```
 
 The compose file uses the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`.
+
+```yaml
+command:
+  - --listen=:8421
+  - --url=wss://hub.example:8421
+  - --data=/data
+```
 
 ## Security Model
 

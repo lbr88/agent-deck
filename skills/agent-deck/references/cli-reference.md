@@ -547,11 +547,12 @@ agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
 | Flag | Description |
 |------|-------------|
 | `--listen <addr>` | Listen address (default: `127.0.0.1:8421`) |
+| `--url <wss://host:port>` | Public hub URL stored for invite output; overrides `AGENT_DECK_HUB_URL` and the URL derived from `--listen` |
 | `--data <dir>` | Hub data directory |
 | `--tls-cert <path>` | Optional TLS certificate file |
 | `--tls-key <path>` | Optional TLS private key file |
 
-Starts the hub server. The data directory stores the SQLite hub database and, by default, the generated self-signed cert/key. If you provide custom TLS files, pass both `--tls-cert` and `--tls-key`.
+Starts the hub server. The data directory stores the SQLite hub database, the hub URL that invites print, and, by default, the generated self-signed cert/key. If `--url` is omitted, the hub uses `AGENT_DECK_HUB_URL`; if that is also empty, it derives a local URL from `--listen`. If you provide custom TLS files, pass both `--tls-cert` and `--tls-key`.
 
 ### hub invite
 
@@ -559,7 +560,7 @@ Starts the hub server. The data directory stores the SQLite hub database and, by
 agent-deck hub invite [--data <dir>] [--ttl 24h] <node-name>
 ```
 
-Creates a single-use invite token for `hub join`.
+Creates a single-use invite and prints the exact `agent-deck hub join ... --token ...` command to run on the joining client. The hub URL comes from the hub metadata written by `hub serve`.
 
 ### hub join
 

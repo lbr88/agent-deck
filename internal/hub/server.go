@@ -15,10 +15,11 @@ import (
 )
 
 type ServerConfig struct {
-	ListenAddr string
-	DataDir    string
-	CertFile   string
-	KeyFile    string
+	ListenAddr   string
+	DataDir      string
+	CertFile     string
+	KeyFile      string
+	AdvertiseURL string
 }
 
 type Server struct {
@@ -79,6 +80,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	store, err := OpenStore(filepath.Join(cfg.DataDir, "hub.db"))
 	if err != nil {
 		return nil, err
+	}
+	cfg.AdvertiseURL = strings.TrimSpace(cfg.AdvertiseURL)
+	if cfg.AdvertiseURL != "" {
+		if !strings.HasPrefix(strings.ToLower(cfg.AdvertiseURL), "wss://") {
+			_ = store.Close()
+			return nil, fmt.Errorf("hub advertise URL requires wss://; use TLS even for local deployments")
+		}
+		if err := store.SetAdvertiseURL(cfg.AdvertiseURL); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	return &Server{cfg: cfg, store: store, attachRouter: NewAttachRouter()}, nil
 }
@@ -231,7 +243,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, joinResponse{
-		URL:       hubURLForRequest(r, s.cfg.ListenAddr),
+		URL:       s.hubURLForRequest(r),
 		NodeID:    node.ID,
 		NodeName:  node.Name,
 		NodeToken: nodeToken,
@@ -648,6 +660,20 @@ func hubURLForRequest(r *http.Request, listenAddr string) string {
 		host = "127.0.0.1" + host
 	}
 	return "wss://" + host
+}
+
+func (s *Server) hubURLForRequest(r *http.Request) string {
+	if s != nil {
+		if rawURL := strings.TrimSpace(s.cfg.AdvertiseURL); rawURL != "" {
+			return rawURL
+		}
+		if s.store != nil {
+			if rawURL, err := s.store.AdvertiseURL(); err == nil && strings.TrimSpace(rawURL) != "" {
+				return strings.TrimSpace(rawURL)
+			}
+		}
+	}
+	return hubURLForRequest(r, s.cfg.ListenAddr)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -109,10 +109,11 @@ func handleHubServe(args []string) error {
 	fs.SetOutput(io.Discard)
 	listen := fs.String("listen", "127.0.0.1:8421", "Listen address for the hub server")
 	dataDir := fs.String("data", defaultData, "Hub data directory")
+	advertiseURL := fs.String("url", "", "Public wss:// hub URL printed by invites")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file; defaults to a generated self-signed cert in --data")
 	tlsKey := fs.String("tls-key", "", "TLS private key file; defaults to a generated self-signed key in --data")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--data dir] [--tls-cert cert.pem --tls-key key.pem]")
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub serve [--listen addr] [--url wss://host:port] [--data dir] [--tls-cert cert.pem --tls-key key.pem]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -124,16 +125,21 @@ func handleHubServe(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
+	hubURL, err := configureHubAdvertiseURL(*dataDir, hubServeAdvertiseURL(*advertiseURL), *listen)
+	if err != nil {
+		return err
+	}
 	certFile, keyFile, generated, err := resolveHubServeTLSFiles(*dataDir, *tlsCert, *tlsKey)
 	if err != nil {
 		return err
 	}
 
 	server, err := hub.NewServer(hub.ServerConfig{
-		ListenAddr: *listen,
-		DataDir:    *dataDir,
-		CertFile:   certFile,
-		KeyFile:    keyFile,
+		ListenAddr:   *listen,
+		DataDir:      *dataDir,
+		CertFile:     certFile,
+		KeyFile:      keyFile,
+		AdvertiseURL: hubURL,
 	})
 	if err != nil {
 		return err
@@ -145,6 +151,7 @@ func handleHubServe(args []string) error {
 		fmt.Printf("Generated self-signed hub key: %s\n", keyFile)
 	}
 	fmt.Printf("Agent Deck Hub listening on %s\n", *listen)
+	fmt.Printf("Agent Deck Hub URL: %s\n", hubURL)
 	return server.Serve()
 }
 
@@ -239,6 +246,85 @@ func writeSelfSignedHubCertificate(certFile, keyFile string) error {
 	return nil
 }
 
+func configureHubAdvertiseURL(dataDir, rawURL, listenAddr string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		rawURL = defaultHubAdvertiseURL(listenAddr)
+	}
+	hubURL, err := normalizeHubAdvertiseURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		return "", err
+	}
+	defer store.Close()
+	if err := store.SetAdvertiseURL(hubURL); err != nil {
+		return "", err
+	}
+	return hubURL, nil
+}
+
+func hubServeAdvertiseURL(flagValue string) string {
+	flagValue = strings.TrimSpace(flagValue)
+	if flagValue != "" {
+		return flagValue
+	}
+	return strings.TrimSpace(os.Getenv("AGENT_DECK_HUB_URL"))
+}
+
+func normalizeHubAdvertiseURL(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if err := validateHubJoinURL(rawURL); err != nil {
+		return "", err
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse hub URL: %w", err)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("hub URL must include a host")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	if u.Path == "" || u.Path == "/" {
+		u.Path = ""
+	} else {
+		return "", fmt.Errorf("hub URL must not include a path")
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func defaultHubAdvertiseURL(listenAddr string) string {
+	listenAddr = strings.TrimSpace(listenAddr)
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:8421"
+	}
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		if strings.HasPrefix(listenAddr, ":") {
+			host = ""
+			port = strings.TrimPrefix(listenAddr, ":")
+		} else {
+			return "wss://" + listenAddr
+		}
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = defaultNodeName()
+	}
+	if port == "" {
+		return "wss://" + host
+	}
+	return "wss://" + net.JoinHostPort(host, port)
+}
+
+func hubJoinCommand(hubURL, token string) string {
+	return fmt.Sprintf("agent-deck hub join %s --token %s", strings.TrimSpace(hubURL), strings.TrimSpace(token))
+}
+
 func handleHubInvite(args []string) error {
 	defaultData, err := defaultHubDataDir()
 	if err != nil {
@@ -267,11 +353,22 @@ func handleHubInvite(args []string) error {
 	}
 	defer store.Close()
 
+	hubURL, err := store.AdvertiseURL()
+	if err != nil {
+		if errors.Is(err, hub.ErrAdvertiseURLMissing) {
+			return fmt.Errorf("hub URL is not configured; start the hub with `agent-deck hub serve` once so invites can print the full join command")
+		}
+		return err
+	}
+	hubURL, err = normalizeHubAdvertiseURL(hubURL)
+	if err != nil {
+		return err
+	}
 	token, err := store.CreateInvite(strings.TrimSpace(fs.Arg(0)), *ttl)
 	if err != nil {
 		return err
 	}
-	fmt.Println(token)
+	fmt.Println(hubJoinCommand(hubURL, token))
 	return nil
 }
 
@@ -708,7 +805,7 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  serve   Start the TLS hub server")
-	fmt.Fprintln(w, "  invite  Create a single-use join invite")
+	fmt.Fprintln(w, "  invite  Create a single-use invite and print the join command")
 	fmt.Fprintln(w, "  join    Join this agent-deck node to a hub")
 	fmt.Fprintln(w, "  nodes   List registered hub nodes")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")

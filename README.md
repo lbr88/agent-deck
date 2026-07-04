@@ -829,12 +829,14 @@ Agent Deck Hub connects multiple trusted agent-deck instances through one encryp
 # Run the hub. It creates and reuses a self-signed TLS cert by default.
 agent-deck hub serve --listen :8421 --data ~/.local/share/agent-deck-hub
 
-# Create a single-use invite on the hub host
+# Create a single-use invite on the hub host. This prints the client command.
 agent-deck hub invite laptop
 
-# Join from another machine
-agent-deck hub join wss://hub.example:8421 --token <token>
+# Run the printed command on the joining machine:
+agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
+
+`hub serve` stores the hub URL that invites print. By default it derives this from `--listen`; if the hub is behind Docker, Authentik, or another reverse proxy, start it with `--url wss://hub.example:8421`. `AGENT_DECK_HUB_URL` is also accepted as a fallback for container setups, but local runs do not need it.
 
 After join, the TUI auto-connects on startup. The first join prompts you to accept the hub certificate fingerprint, then stores that pin like an SSH host key. Sessions appear inline as `<node> / <group>`; the current machine is shown as `local / <group>` only when hub is configured. `Enter` attaches through the hub relay, and common actions such as prompt, stop, restart, rename, and create route to the owner node. Joined nodes are trusted, all traffic uses `wss://`, and no SSH connectivity between nodes is required.
 

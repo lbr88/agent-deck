@@ -68,6 +68,39 @@ func TestServerJoinConsumesInviteAndReturnsNodeCredentials(t *testing.T) {
 	}
 }
 
+func TestServerJoinUsesConfiguredAdvertiseURL(t *testing.T) {
+	server, err := NewServer(ServerConfig{
+		DataDir:      t.TempDir(),
+		AdvertiseURL: "wss://public.example:443",
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	inviteToken, err := server.store.CreateInvite("laptop", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/join", bytes.NewBufferString(`{"invite_token":`+strconvQuote(inviteToken)+`}`))
+	req.Host = "internal.invalid:8421"
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/join status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var got struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode join response: %v", err)
+	}
+	if got.URL != "wss://public.example:443" {
+		t.Fatalf("join URL = %q, want advertised public URL", got.URL)
+	}
+}
+
 func TestServerJoinRequiresInviteToken(t *testing.T) {
 	server := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/join", strings.NewReader(`{}`))

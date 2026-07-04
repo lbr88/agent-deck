@@ -47,6 +47,21 @@ func TestStoreInviteConsumeAllowsSubSecondTTL(t *testing.T) {
 	}
 }
 
+func TestStoreAdvertiseURLPersists(t *testing.T) {
+	store := openTestStore(t)
+
+	if err := store.SetAdvertiseURL(" wss://hub.example:8421 "); err != nil {
+		t.Fatalf("SetAdvertiseURL: %v", err)
+	}
+	got, err := store.AdvertiseURL()
+	if err != nil {
+		t.Fatalf("AdvertiseURL: %v", err)
+	}
+	if got != "wss://hub.example:8421" {
+		t.Fatalf("AdvertiseURL = %q, want trimmed URL", got)
+	}
+}
+
 func TestStoreAuthenticateNodeComparesTokenHash(t *testing.T) {
 	store := openTestStore(t)
 	token := "node_secret"

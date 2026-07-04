@@ -206,6 +206,120 @@ func TestHubServeKeepsExplicitCertificatePair(t *testing.T) {
 	}
 }
 
+func TestHubServePersistsAdvertiseURL(t *testing.T) {
+	dataDir := t.TempDir()
+
+	url, err := configureHubAdvertiseURL(dataDir, "wss://hub.example:8421", ":8421")
+	if err != nil {
+		t.Fatalf("configureHubAdvertiseURL: %v", err)
+	}
+	if url != "wss://hub.example:8421" {
+		t.Fatalf("advertise URL = %q, want configured URL", url)
+	}
+
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	got, err := store.AdvertiseURL()
+	if err != nil {
+		t.Fatalf("AdvertiseURL: %v", err)
+	}
+	if got != "wss://hub.example:8421" {
+		t.Fatalf("stored advertise URL = %q, want configured URL", got)
+	}
+}
+
+func TestHubServeAdvertiseURLFlagBeatsEnv(t *testing.T) {
+	t.Setenv("AGENT_DECK_HUB_URL", "wss://env.example:8421")
+
+	got := hubServeAdvertiseURL(" wss://flag.example:8421 ")
+
+	if got != "wss://flag.example:8421" {
+		t.Fatalf("hubServeAdvertiseURL = %q, want flag value", got)
+	}
+}
+
+func TestHubServeAdvertiseURLFallsBackToEnv(t *testing.T) {
+	t.Setenv("AGENT_DECK_HUB_URL", " wss://env.example:8421 ")
+
+	got := hubServeAdvertiseURL("")
+
+	if got != "wss://env.example:8421" {
+		t.Fatalf("hubServeAdvertiseURL = %q, want env value", got)
+	}
+}
+
+func TestHubServeDerivesAdvertiseURLFromListen(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("AGENT_DECK_HUB_URL", "")
+
+	url, err := configureHubAdvertiseURL(dataDir, "", "127.0.0.1:8421")
+	if err != nil {
+		t.Fatalf("configureHubAdvertiseURL: %v", err)
+	}
+	if url != "wss://127.0.0.1:8421" {
+		t.Fatalf("advertise URL = %q, want URL derived from listen address", url)
+	}
+
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	got, err := store.AdvertiseURL()
+	if err != nil {
+		t.Fatalf("AdvertiseURL: %v", err)
+	}
+	if got != "wss://127.0.0.1:8421" {
+		t.Fatalf("stored advertise URL = %q, want derived URL", got)
+	}
+}
+
+func TestHubServeRejectsPlaintextAdvertiseURL(t *testing.T) {
+	if _, err := configureHubAdvertiseURL(t.TempDir(), "http://hub.example:8421", ":8421"); err == nil {
+		t.Fatal("configureHubAdvertiseURL accepted plaintext URL, want error")
+	}
+}
+
+func TestHubInvitePrintsJoinCommandFromHubMetadata(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := hub.OpenStore(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if err := store.SetAdvertiseURL("wss://hub.example:8421"); err != nil {
+		t.Fatalf("SetAdvertiseURL: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := handleHubInvite([]string{"--data", dataDir, "laptop"}); err != nil {
+			t.Fatalf("handleHubInvite: %v", err)
+		}
+	})
+	out = strings.TrimSpace(out)
+	if !strings.HasPrefix(out, "agent-deck hub join wss://hub.example:8421 --token invite_") {
+		t.Fatalf("invite output = %q, want full join command", out)
+	}
+	if strings.Contains(out, "\n") {
+		t.Fatalf("invite output should be one command, got %q", out)
+	}
+}
+
+func TestHubInviteErrorsWhenHubURLIsNotConfigured(t *testing.T) {
+	err := handleHubInvite([]string{"--data", t.TempDir(), "laptop"})
+	if err == nil {
+		t.Fatal("handleHubInvite succeeded without advertised hub URL, want setup guidance")
+	}
+	if !strings.Contains(err.Error(), "hub URL") || !strings.Contains(err.Error(), "hub serve") {
+		t.Fatalf("error = %q, want hub serve guidance", err.Error())
+	}
+}
+
 func TestExchangeHubInviteTrustsAndReturnsPinnedFingerprint(t *testing.T) {
 	server := newJoinResponseServer(t, `{"url":"","node_id":"node_abc","node_name":"laptop","node_token":"adhn_secret"}`)
 	var prompt hubServerCertInfo

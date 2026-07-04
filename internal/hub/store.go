@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,7 +21,10 @@ var (
 	ErrInviteInvalid        = errors.New("hub: invite is invalid, expired, or consumed")
 	ErrNodeNotAuthenticated = errors.New("hub: node authentication failed")
 	ErrNodeNotFound         = errors.New("hub: node not found")
+	ErrAdvertiseURLMissing  = errors.New("hub: advertise URL is not configured")
 )
+
+const hubAdvertiseURLKey = "advertise_url"
 
 type Store struct {
 	db *sql.DB
@@ -91,6 +95,38 @@ func (s *Store) CreateInvite(nodeName string, ttl time.Duration) (plainToken str
 		return "", fmt.Errorf("create invite: %w", err)
 	}
 	return token, nil
+}
+
+func (s *Store) SetAdvertiseURL(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return fmt.Errorf("hub advertise URL is required")
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO hub_settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		hubAdvertiseURLKey, rawURL,
+	)
+	if err != nil {
+		return fmt.Errorf("set hub advertise URL: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) AdvertiseURL() (string, error) {
+	var rawURL string
+	err := s.db.QueryRow(`SELECT value FROM hub_settings WHERE key = ?`, hubAdvertiseURLKey).Scan(&rawURL)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrAdvertiseURLMissing
+		}
+		return "", fmt.Errorf("load hub advertise URL: %w", err)
+	}
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", ErrAdvertiseURLMissing
+	}
+	return rawURL, nil
 }
 
 func (s *Store) ConsumeInvite(plainToken string) (Invite, error) {
@@ -276,6 +312,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
   target TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   metadata_json TEXT
+);
+CREATE TABLE IF NOT EXISTS hub_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate hub db: %w", err)
