@@ -204,13 +204,34 @@ func (r *AttachRouter) Unregister(nodeID string) {
 	if nodeID == "" {
 		return
 	}
+	type notification struct {
+		peer Peer
+		env  Envelope
+	}
+	var notifications []notification
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	delete(r.peers, nodeID)
 	for streamID, route := range r.streams {
 		if route.requesterNodeID == nodeID || route.ownerNodeID == nodeID {
+			if route.requesterNodeID == nodeID {
+				if owner := r.peers[route.ownerNodeID]; owner != nil {
+					if env, err := MarshalEnvelope(MsgAttachClose, nodeID, AttachClosePayload{StreamID: streamID, Reason: "attach requester disconnected"}); err == nil {
+						notifications = append(notifications, notification{peer: owner, env: env})
+					}
+				}
+			} else if requester := r.peers[route.requesterNodeID]; requester != nil {
+				if env, err := MarshalEnvelope(MsgAttachClosed, nodeID, AttachClosePayload{StreamID: streamID, Reason: "attach owner disconnected"}); err == nil {
+					notifications = append(notifications, notification{peer: requester, env: env})
+				}
+			}
 			delete(r.streams, streamID)
 		}
+	}
+	r.mu.Unlock()
+
+	for _, msg := range notifications {
+		_ = msg.peer.Send(msg.env)
 	}
 }
 
@@ -237,8 +258,15 @@ func (r *AttachRouter) Open(ctx context.Context, requesterNodeID, ownerNodeID st
 	r.mu.Lock()
 	owner := r.peers[ownerNodeID]
 	if owner == nil {
+		requester := r.peers[requesterNodeID]
 		r.mu.Unlock()
-		return fmt.Errorf("attach owner node %q is not connected", ownerNodeID)
+		err := fmt.Errorf("attach owner node %q is not connected", ownerNodeID)
+		if requester != nil {
+			if env, marshalErr := MarshalEnvelope(MsgAttachClosed, ownerNodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()}); marshalErr == nil {
+				_ = requester.Send(env)
+			}
+		}
+		return err
 	}
 	r.streams[streamID] = attachRoute{requesterNodeID: requesterNodeID, ownerNodeID: ownerNodeID}
 	r.mu.Unlock()
@@ -251,6 +279,11 @@ func (r *AttachRouter) Open(ctx context.Context, requesterNodeID, ownerNodeID st
 	}
 	if err := owner.Send(env); err != nil {
 		r.removeStream(streamID)
+		if requester := r.peer(requesterNodeID); requester != nil {
+			if closed, marshalErr := MarshalEnvelope(MsgAttachClosed, ownerNodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()}); marshalErr == nil {
+				_ = requester.Send(closed)
+			}
+		}
 		return err
 	}
 	return nil
@@ -402,4 +435,17 @@ func (r *AttachRouter) removeStream(streamID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.streams, streamID)
+}
+
+func (r *AttachRouter) peer(nodeID string) Peer {
+	if r == nil {
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.peers[nodeID]
 }

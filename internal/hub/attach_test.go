@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -103,8 +104,74 @@ func TestAttachRouterUnregisterCleansStreamsForDisconnectedPeer(t *testing.T) {
 
 	router.Unregister(owner.ID)
 
+	closed := requester.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	var closePayload AttachClosePayload
+	if err := json.Unmarshal(closed.Payload, &closePayload); err != nil {
+		t.Fatalf("decode closed payload: %v", err)
+	}
+	if closePayload.StreamID != "stream_1" || !strings.Contains(closePayload.Reason, "owner disconnected") {
+		t.Fatalf("closed payload = %+v", closePayload)
+	}
+
 	if err := router.ForwardFromRequester(requester.ID, NewAttachData("stream_1", []byte("after-disconnect"))); err == nil {
 		t.Fatal("ForwardFromRequester after owner unregister succeeded, want missing stream error")
+	}
+}
+
+func TestAttachRouterUnregisterRequesterNotifiesOwner(t *testing.T) {
+	router := NewAttachRouter()
+	requester := newFakePeer("laptop")
+	owner := newFakePeer("workstation")
+	router.Register(requester)
+	router.Register(owner)
+
+	if err := router.Open(context.Background(), requester.ID, owner.ID, AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = owner.pop(t)
+
+	router.Unregister(requester.ID)
+
+	closed := owner.pop(t)
+	if closed.Type != MsgAttachClose {
+		t.Fatalf("owner msg = %s, want %s", closed.Type, MsgAttachClose)
+	}
+	var closePayload AttachClosePayload
+	if err := json.Unmarshal(closed.Payload, &closePayload); err != nil {
+		t.Fatalf("decode close payload: %v", err)
+	}
+	if closePayload.StreamID != "stream_1" || !strings.Contains(closePayload.Reason, "requester disconnected") {
+		t.Fatalf("close payload = %+v", closePayload)
+	}
+
+	if err := router.ForwardFromOwner(owner.ID, NewAttachData("stream_1", []byte("after-disconnect"))); err == nil {
+		t.Fatal("ForwardFromOwner after requester unregister succeeded, want missing stream error")
+	}
+}
+
+func TestAttachRouterOpenNotifiesRequesterWhenOwnerUnavailable(t *testing.T) {
+	router := NewAttachRouter()
+	requester := newFakePeer("laptop")
+	router.Register(requester)
+
+	err := router.Open(context.Background(), requester.ID, "workstation", AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1"})
+	if err == nil {
+		t.Fatal("Open succeeded, want owner unavailable error")
+	}
+
+	closed := requester.pop(t)
+	if closed.Type != MsgAttachClosed {
+		t.Fatalf("requester msg = %s, want %s", closed.Type, MsgAttachClosed)
+	}
+	var closePayload AttachClosePayload
+	if err := json.Unmarshal(closed.Payload, &closePayload); err != nil {
+		t.Fatalf("decode closed payload: %v", err)
+	}
+	if closePayload.StreamID != "stream_1" || !strings.Contains(closePayload.Reason, "not connected") {
+		t.Fatalf("closed payload = %+v", closePayload)
 	}
 }
 
