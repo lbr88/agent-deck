@@ -457,8 +457,8 @@ func (s *Store) CreatePendingTrustRequestsForNewNode(requesterNodeID string) ([]
 		}
 		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO node_trust_edges (owner_node_id, requester_node_id, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			requesterNodeID, ownerID, string(TrustStatusAllowed), now, now,
+				 VALUES (?, ?, ?, ?, ?)`,
+			requesterNodeID, ownerID, string(TrustStatusPending), now, now,
 		); err != nil {
 			return nil, fmt.Errorf("create reverse trust edge: %w", err)
 		}

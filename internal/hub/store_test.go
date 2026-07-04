@@ -365,8 +365,8 @@ func TestStoreTrustRequestsGateRequesterAccessToOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CanAccessNode reverse: %v", err)
 	}
-	if !allowed {
-		t.Fatal("existing owner cannot access new requester, want allowed reverse trust")
+	if allowed {
+		t.Fatal("existing owner can access new requester without requester approval, want blocked")
 	}
 
 	pending, err := store.PendingTrustRequests("node_owner")
@@ -375,6 +375,13 @@ func TestStoreTrustRequestsGateRequesterAccessToOwner(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].Requester.ID != "node_requester" {
 		t.Fatalf("pending requests = %+v, want requester approval", pending)
+	}
+	reversePending, err := store.PendingTrustRequests("node_requester")
+	if err != nil {
+		t.Fatalf("PendingTrustRequests reverse: %v", err)
+	}
+	if len(reversePending) != 1 || reversePending[0].Requester.ID != "node_owner" {
+		t.Fatalf("reverse pending requests = %+v, want owner approval from new node", reversePending)
 	}
 
 	if err := store.AllowTrust("node_owner", "node_requester"); err != nil {

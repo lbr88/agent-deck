@@ -1250,6 +1250,8 @@ func (s *Server) setTrustDecision(ownerNodeID, requesterNodeID string, allow boo
 	}
 	if allow {
 		s.sendLatestSnapshotToNode(ownerNodeID, requesterNodeID)
+	} else {
+		s.sendClearSnapshotToNode(ownerNodeID, requesterNodeID)
 	}
 	return nil
 }
@@ -1266,13 +1268,30 @@ func (s *Server) sendLatestSnapshotToNode(ownerNodeID, requesterNodeID string) {
 		if latest.Node.ID != ownerNodeID {
 			continue
 		}
-		payload := SnapshotPayload{
-			NodeID:   latest.Node.ID,
-			NodeName: latest.Node.Name,
-			SentAt:   latest.SentAt,
-			Sessions: append([]SessionInfo(nil), latest.Sessions...),
+		env, err := s.snapshotEnvelope(latest, true)
+		if err != nil {
+			return
 		}
-		env, err := MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
+		for _, peer := range s.connectedPeersForNode(requesterNodeID) {
+			_ = s.writePeerJSON(peer, env)
+		}
+		return
+	}
+}
+
+func (s *Server) sendClearSnapshotToNode(ownerNodeID, requesterNodeID string) {
+	if s.store == nil {
+		return
+	}
+	snapshots, err := s.store.LatestSessions()
+	if err != nil {
+		return
+	}
+	for _, latest := range snapshots {
+		if latest.Node.ID != ownerNodeID {
+			continue
+		}
+		env, err := s.snapshotEnvelope(latest, false)
 		if err != nil {
 			return
 		}
@@ -1309,16 +1328,7 @@ func (s *Server) sendLatestSnapshots(peer *hubPeer) error {
 		if err != nil {
 			return err
 		}
-		if !allowed {
-			continue
-		}
-		payload := SnapshotPayload{
-			NodeID:   latest.Node.ID,
-			NodeName: latest.Node.Name,
-			SentAt:   latest.SentAt,
-			Sessions: append([]SessionInfo(nil), latest.Sessions...),
-		}
-		env, err := MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
+		env, err := s.snapshotEnvelope(latest, allowed)
 		if err != nil {
 			return err
 		}
@@ -1330,7 +1340,16 @@ func (s *Server) sendLatestSnapshots(peer *hubPeer) error {
 }
 
 func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload) {
-	env, err := MarshalEnvelope(MsgSnapshot, originNodeID, snapshot)
+	allowedEnv, err := MarshalEnvelope(MsgSnapshot, originNodeID, snapshot)
+	if err != nil {
+		return
+	}
+	clearEnv, err := MarshalEnvelope(MsgSnapshot, originNodeID, SnapshotPayload{
+		NodeID:   snapshot.NodeID,
+		NodeName: snapshot.NodeName,
+		SentAt:   snapshot.SentAt,
+		Sessions: []SessionInfo{},
+	})
 	if err != nil {
 		return
 	}
@@ -1347,11 +1366,28 @@ func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload
 
 	for _, peer := range peers {
 		allowed, err := s.canRequesterAccessNode(peer.nodeID, originNodeID)
-		if err != nil || !allowed {
+		if err != nil {
 			continue
 		}
-		_ = s.writePeerJSON(peer, env)
+		if allowed {
+			_ = s.writePeerJSON(peer, allowedEnv)
+			continue
+		}
+		_ = s.writePeerJSON(peer, clearEnv)
 	}
+}
+
+func (s *Server) snapshotEnvelope(latest NodeSessions, includeSessions bool) (Envelope, error) {
+	payload := SnapshotPayload{
+		NodeID:   latest.Node.ID,
+		NodeName: latest.Node.Name,
+		SentAt:   latest.SentAt,
+		Sessions: []SessionInfo{},
+	}
+	if includeSessions {
+		payload.Sessions = append([]SessionInfo(nil), latest.Sessions...)
+	}
+	return MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
 }
 
 func (s *Server) writePeerJSON(peer *hubPeer, v any) error {

@@ -208,6 +208,53 @@ func TestServerTrustAPIAllowsOwnerDecision(t *testing.T) {
 	}
 }
 
+func TestServerTrustAPIDenyClearsRequesterSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_requester", "laptop", hashSecret("requester_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode requester: %v", err)
+	}
+	allowTestTrust(t, server, "node_owner", "node_requester")
+	if err := server.store.ReplaceSnapshot("node_owner", SnapshotPayload{
+		SentAt:   time.Unix(126, 0).UTC(),
+		Sessions: []SessionInfo{{ID: "s1", Title: "worker", Status: "waiting"}},
+	}); err != nil {
+		t.Fatalf("ReplaceSnapshot: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
+	defer requester.Close()
+	readTestWelcome(t, requester)
+	initial := readTestEnvelope(t, requester)
+	if initial.Type != MsgSnapshot || initial.NodeID != "node_owner" {
+		t.Fatalf("initial snapshot envelope = %+v", initial)
+	}
+
+	denyReq := httptest.NewRequest(http.MethodPost, "/api/trust/deny?node_id=node_owner", strings.NewReader(`{"node_id":"node_requester"}`))
+	denyReq.Header.Set("Authorization", "Bearer owner_secret")
+	denyRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(denyRec, denyReq)
+	if denyRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/trust/deny status = %d, want %d; body=%q", denyRec.Code, http.StatusOK, denyRec.Body.String())
+	}
+
+	cleared := readTestEnvelope(t, requester)
+	if cleared.Type != MsgSnapshot || cleared.NodeID != "node_owner" {
+		t.Fatalf("clear snapshot envelope = %+v", cleared)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal(cleared.Payload, &payload); err != nil {
+		t.Fatalf("decode clear snapshot: %v", err)
+	}
+	if len(payload.Sessions) != 0 {
+		t.Fatalf("clear snapshot sessions = %+v, want none", payload.Sessions)
+	}
+}
+
 func TestServerInviteAPICreatesInviteForAdminNode(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
@@ -654,7 +701,7 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	}
 }
 
-func TestHubNodeWebSocketBlocksUntrustedSnapshotFanout(t *testing.T) {
+func TestHubNodeWebSocketClearsUntrustedSnapshotFanout(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret_1"), "1.0.0", "linux", "amd64"); err != nil {
 		t.Fatalf("UpsertNode node_1: %v", err)
@@ -681,7 +728,18 @@ func TestHubNodeWebSocketBlocksUntrustedSnapshotFanout(t *testing.T) {
 	if err := first.WriteJSON(snapshot); err != nil {
 		t.Fatalf("WriteJSON snapshot: %v", err)
 	}
-	expectNoTestEnvelope(t, second, 150*time.Millisecond)
+
+	got := readTestEnvelope(t, second)
+	if got.Type != MsgSnapshot || got.NodeID != "node_1" {
+		t.Fatalf("clear fanout envelope = %+v", got)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("clear fanout payload: %v", err)
+	}
+	if payload.NodeName != "laptop" || len(payload.Sessions) != 0 {
+		t.Fatalf("clear fanout payload = %+v, want laptop with no sessions", payload)
+	}
 }
 
 func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
