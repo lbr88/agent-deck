@@ -323,6 +323,85 @@ func TestHubSessionRenameUsesHubCommand(t *testing.T) {
 	}
 }
 
+func TestSelectedHubPreviewTarget(t *testing.T) {
+	h, _ := newHubActionHome(t)
+
+	nodeID, sessionID, previewKey, ok := h.selectedHubPreviewTarget()
+
+	if !ok {
+		t.Fatal("selectedHubPreviewTarget should resolve hub session selection")
+	}
+	if nodeID != "node_server" {
+		t.Fatalf("nodeID = %q, want node_server", nodeID)
+	}
+	if sessionID != "r1" {
+		t.Fatalf("sessionID = %q, want r1", sessionID)
+	}
+	if previewKey != "hub:node_server:r1" {
+		t.Fatalf("previewKey = %q, want hub:node_server:r1", previewKey)
+	}
+}
+
+func TestFetchSelectedPreviewSchedulesHubPreview(t *testing.T) {
+	h, _ := newHubActionHome(t)
+
+	cmd := h.fetchSelectedPreview()
+	if cmd == nil {
+		t.Fatal("fetchSelectedPreview returned nil for selected hub session")
+	}
+	msg := cmd()
+	debounce, ok := msg.(previewDebounceMsg)
+	if !ok {
+		t.Fatalf("fetchSelectedPreview returned %T, want previewDebounceMsg", msg)
+	}
+	if debounce.hubNodeID != "node_server" || debounce.sessionID != "r1" || debounce.previewKey != "hub:node_server:r1" {
+		t.Fatalf("hub preview debounce = %+v", debounce)
+	}
+}
+
+func TestFetchHubPreviewUsesHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "Hub answer"})
+	key := hubPreviewCacheKey("node_server", "r1")
+
+	cmd := h.fetchHubPreview("node_server", "r1", key)
+	if cmd == nil {
+		t.Fatal("fetchHubPreview returned nil command")
+	}
+	msg := cmd()
+	fetched, ok := msg.(previewFetchedMsg)
+	if !ok {
+		t.Fatalf("fetchHubPreview returned %T, want previewFetchedMsg", msg)
+	}
+	if fetched.previewKey != key {
+		t.Fatalf("preview key = %q, want %q", fetched.previewKey, key)
+	}
+	if fetched.err != nil {
+		t.Fatalf("preview fetch error = %v", fetched.err)
+	}
+	if fetched.content != "Hub answer" {
+		t.Fatalf("preview content = %q, want Hub answer", fetched.content)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{
+		"session_id": "r1",
+	})
+}
+
+func TestRenderHubPreviewIncludesCachedResponse(t *testing.T) {
+	h, _ := newHubActionHome(t)
+	key := hubPreviewCacheKey("node_server", "r1")
+	h.previewCache[key] = "Hub answer"
+
+	rendered := h.renderHubPreview(h.flatItems[h.cursor], 80, 20)
+
+	if !strings.Contains(rendered, "Last response") {
+		t.Fatalf("rendered preview should include last response header, got: %q", rendered)
+	}
+	if !strings.Contains(rendered, "Hub answer") {
+		t.Fatalf("rendered preview should include cached hub response, got: %q", rendered)
+	}
+}
+
 func TestHubAttachCmdCallsClient(t *testing.T) {
 	client := &fakeHubAttachClient{}
 	cmd := hubAttachCmd{
@@ -340,6 +419,49 @@ func TestHubAttachCmdCallsClient(t *testing.T) {
 	}
 	if client.size.Cols != 120 || client.size.Rows != 40 {
 		t.Fatalf("attach size = %+v, want 120x40", client.size)
+	}
+}
+
+func TestHubAttachCmdRestartsBeforeAttachWhenRequested(t *testing.T) {
+	client := &fakeHubAttachClient{}
+	cmd := hubAttachCmd{
+		client:              client,
+		nodeID:              "node_server",
+		sessionID:           "remote_session",
+		size:                hub.TerminalSize{Cols: 120, Rows: 40},
+		restartBeforeAttach: true,
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands = %d, want restart before attach", len(client.commands))
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "restart", map[string]string{
+		"session_id": "remote_session",
+	})
+	if client.nodeID != "node_server" || client.sessionID != "remote_session" {
+		t.Fatalf("attach call = node %q session %q", client.nodeID, client.sessionID)
+	}
+}
+
+func TestHubSessionNeedsRestartBeforeAttachForStoppedOrError(t *testing.T) {
+	for _, status := range []string{"stopped", "error"} {
+		t.Run(status, func(t *testing.T) {
+			hs := &session.HubSessionInfo{Status: status}
+			if !hubSessionNeedsRestartBeforeAttach(hs) {
+				t.Fatalf("hubSessionNeedsRestartBeforeAttach(%q) = false, want true", status)
+			}
+		})
+	}
+	for _, status := range []string{"running", "waiting", ""} {
+		t.Run("no_restart_"+status, func(t *testing.T) {
+			hs := &session.HubSessionInfo{Status: status}
+			if hubSessionNeedsRestartBeforeAttach(hs) {
+				t.Fatalf("hubSessionNeedsRestartBeforeAttach(%q) = true, want false", status)
+			}
+		})
 	}
 }
 
@@ -440,11 +562,12 @@ func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
 }
 
 type fakeHubAttachClient struct {
-	nodeID     string
-	sessionID  string
-	size       hub.TerminalSize
-	commands   []hubCommandCall
-	commandErr error
+	nodeID        string
+	sessionID     string
+	size          hub.TerminalSize
+	commands      []hubCommandCall
+	commandErr    error
+	commandResult json.RawMessage
 }
 
 func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
@@ -459,7 +582,7 @@ func (c *fakeHubAttachClient) Command(ctx context.Context, nodeID, action string
 	if c.commandErr != nil {
 		return nil, c.commandErr
 	}
-	return nil, nil
+	return c.commandResult, nil
 }
 
 func (c *fakeHubAttachClient) Close() error {
@@ -486,6 +609,15 @@ func assertHubCommand(t *testing.T, got hubCommandCall, nodeID, action string, w
 			t.Fatalf("hub command payload[%q] = %q, want %q (payload=%v)", k, payload[k], v, payload)
 		}
 	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal JSON: %v", err)
+	}
+	return raw
 }
 
 func indexHubSession(t *testing.T, h *Home, id string) int {

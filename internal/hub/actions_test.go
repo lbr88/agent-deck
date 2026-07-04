@@ -64,11 +64,38 @@ func TestCommandDispatcherCreateUsesCreateRequest(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherPreviewReturnsContent(t *testing.T) {
+	fake := &fakeActionBackend{previewContent: "remote pane content"}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(map[string]string{"session_id": "s1"})
+
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "preview",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch preview: %v", err)
+	}
+	if fake.previewSessionID != "s1" {
+		t.Fatalf("preview session id = %q, want s1", fake.previewSessionID)
+	}
+	var result PreviewSessionResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode preview result: %v", err)
+	}
+	if result.Content != "remote pane content" {
+		t.Fatalf("preview content = %q, want remote pane content", result.Content)
+	}
+}
+
 type fakeActionBackend struct {
-	sentSessionID   string
-	sentMessage     string
-	createReq       CreateSessionRequest
-	createSessionID string
+	sentSessionID    string
+	sentMessage      string
+	createReq        CreateSessionRequest
+	createSessionID  string
+	previewSessionID string
+	previewContent   string
 }
 
 func (b *fakeActionBackend) Send(_ context.Context, sessionID, message string) error {
@@ -96,4 +123,9 @@ func (b *fakeActionBackend) Rename(context.Context, string, string) error {
 func (b *fakeActionBackend) Create(_ context.Context, req CreateSessionRequest) (string, error) {
 	b.createReq = req
 	return b.createSessionID, nil
+}
+
+func (b *fakeActionBackend) Preview(_ context.Context, sessionID string) (string, error) {
+	b.previewSessionID = sessionID
+	return b.previewContent, nil
 }

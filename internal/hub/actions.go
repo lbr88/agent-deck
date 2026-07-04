@@ -20,6 +20,7 @@ type ActionBackend interface {
 	Restart(ctx context.Context, sessionID string) error
 	Rename(ctx context.Context, sessionID, title string) error
 	Create(ctx context.Context, req CreateSessionRequest) (string, error)
+	Preview(ctx context.Context, sessionID string) (string, error)
 }
 
 type CreateSessionRequest struct {
@@ -28,6 +29,10 @@ type CreateSessionRequest struct {
 	ProjectPath string `json:"project_path,omitempty"`
 	GroupPath   string `json:"group_path,omitempty"`
 	ModelID     string `json:"model_id,omitempty"`
+}
+
+type PreviewSessionResponse struct {
+	Content string `json:"content"`
 }
 
 type CommandDispatcher struct {
@@ -131,6 +136,20 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: sessionID})
+	case "preview":
+		payload, err := decodeSessionAction(cmd.Payload, "preview")
+		if err != nil {
+			return nil, err
+		}
+		content, err := d.Backend.Preview(ctx, payload.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(PreviewSessionResponse{Content: content})
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
 	default:
 		return nil, fmt.Errorf("unknown hub action %q", action)
 	}
@@ -321,6 +340,25 @@ func (b LocalActionBackend) Create(ctx context.Context, req CreateSessionRequest
 		return "", err
 	}
 	return inst.ID, nil
+}
+
+func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return "", err
+	}
+	inst, closeStorage, err := b.loadInstance(sessionID)
+	if err != nil {
+		return "", err
+	}
+	defer closeStorage()
+	if err := ctxErr(ctx); err != nil {
+		return "", err
+	}
+	content, err := inst.PreviewFull()
+	if err != nil {
+		return "", fmt.Errorf("preview session: %w", err)
+	}
+	return content, nil
 }
 
 func (b LocalActionBackend) loadInstance(sessionID string) (*session.Instance, func(), error) {

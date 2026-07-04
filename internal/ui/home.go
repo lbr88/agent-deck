@@ -1019,6 +1019,7 @@ type previewDebounceMsg struct {
 	sessionID   string // parent session ID (for instance lookup)
 	windowIndex int    // -1 for session, >= 0 for specific window
 	remoteName  string // remote name for remote session preview
+	hubNodeID   string // hub node id for hub session preview
 }
 
 // analyticsFetchedMsg is sent when async analytics parsing is complete
@@ -3608,6 +3609,10 @@ func remotePreviewCacheKey(remoteName, sessionID string) string {
 	return fmt.Sprintf("remote:%s:%s", remoteName, sessionID)
 }
 
+func hubPreviewCacheKey(nodeID, sessionID string) string {
+	return fmt.Sprintf("hub:%s:%s", nodeID, sessionID)
+}
+
 const (
 	remotePreviewMaxLines = 200
 	remotePreviewMaxBytes = 16 * 1024
@@ -3692,6 +3697,20 @@ func (h *Home) fetchRemotePreviewDebounced(remoteName, sessionID string) tea.Cmd
 	}
 }
 
+func (h *Home) fetchHubPreviewDebounced(nodeID, sessionID string) tea.Cmd {
+	const debounceDelay = 150 * time.Millisecond
+
+	key := hubPreviewCacheKey(nodeID, sessionID)
+	h.previewDebounceMu.Lock()
+	h.pendingPreviewKey = key
+	h.previewDebounceMu.Unlock()
+
+	return func() tea.Msg {
+		time.Sleep(debounceDelay)
+		return previewDebounceMsg{previewKey: key, sessionID: sessionID, windowIndex: -1, hubNodeID: nodeID}
+	}
+}
+
 func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 	return func() tea.Msg {
 		config, err := session.LoadUserConfig()
@@ -3722,6 +3741,28 @@ func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 		}
 		content = truncateRemotePreviewContent(content)
 		return previewFetchedMsg{previewKey: key, content: content, err: fetchErr}
+	}
+}
+
+func (h *Home) fetchHubPreview(nodeID, sessionID, key string) tea.Cmd {
+	return func() tea.Msg {
+		if h.hubClient == nil {
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("hub client is not connected")}
+		}
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		raw, err := h.hubClient.Command(ctx, nodeID, "preview", map[string]string{
+			"session_id": sessionID,
+		})
+		if err != nil {
+			return previewFetchedMsg{previewKey: key, err: err}
+		}
+		var result hub.PreviewSessionResponse
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("decode hub preview response: %w", err)}
+		}
+		content := truncateRemotePreviewContent(result.Content)
+		return previewFetchedMsg{previewKey: key, content: content}
 	}
 }
 
@@ -3764,6 +3805,23 @@ func (h *Home) selectedRemotePreviewTarget() (string, string, string, bool) {
 	return item.RemoteName, item.RemoteSession.ID, key, true
 }
 
+func (h *Home) selectedHubPreviewTarget() (string, string, string, bool) {
+	if h.cursor >= len(h.flatItems) {
+		return "", "", "", false
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return "", "", "", false
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		return "", "", "", false
+	}
+	key := hubPreviewCacheKey(nodeID, sessionID)
+	return nodeID, sessionID, key, true
+}
+
 func (h *Home) selectedPreviewCacheExpired(key string, now time.Time) bool {
 	ttl := h.previewRefreshTTL
 	if ttl <= 0 {
@@ -3784,6 +3842,10 @@ func (h *Home) fetchSelectedPreview() tea.Cmd {
 	}
 	inst, _, winIdx := h.selectedPreviewTarget()
 	if inst == nil {
+		nodeID, hubSessionID, _, ok := h.selectedHubPreviewTarget()
+		if ok {
+			return h.fetchHubPreviewDebounced(nodeID, hubSessionID)
+		}
 		remoteName, remoteSessionID, _, ok := h.selectedRemotePreviewTarget()
 		if !ok {
 			return nil
@@ -6207,6 +6269,25 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil // Superseded by newer navigation
 		}
 
+		if msg.hubNodeID != "" {
+			var cmds []tea.Cmd
+
+			h.previewCacheMu.Lock()
+			needsPreviewFetch := h.previewFetchingID != msg.previewKey
+			if needsPreviewFetch {
+				h.previewFetchingID = msg.previewKey
+			}
+			h.previewCacheMu.Unlock()
+			if needsPreviewFetch {
+				cmds = append(cmds, h.fetchHubPreview(msg.hubNodeID, msg.sessionID, msg.previewKey))
+			}
+
+			if len(cmds) > 0 {
+				return h, tea.Batch(cmds...)
+			}
+			return h, nil
+		}
+
 		if msg.remoteName != "" {
 			var cmds []tea.Cmd
 
@@ -6695,8 +6776,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			h.previewCacheMu.Unlock()
 		} else {
-			remoteName, remoteSessionID, remoteKey, ok := h.selectedRemotePreviewTarget()
+			nodeID, hubSessionID, hubKey, ok := h.selectedHubPreviewTarget()
 			if ok {
+				h.previewCacheMu.Lock()
+				cachedTime, hasCached := h.previewCacheTime[hubKey]
+				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
+				if cacheExpired && h.previewFetchingID != hubKey {
+					h.previewFetchingID = hubKey
+					previewCmd = h.fetchHubPreview(nodeID, hubSessionID, hubKey)
+				}
+				h.previewCacheMu.Unlock()
+			} else if remoteName, remoteSessionID, remoteKey, ok := h.selectedRemotePreviewTarget(); ok {
 				h.previewCacheMu.Lock()
 				cachedTime, hasCached := h.previewCacheTime[remoteKey]
 				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
@@ -8151,7 +8241,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Attach to remote session via SSH
 				return h, h.attachRemoteSession(item.RemoteName, item.RemoteSession.ID)
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
-				return h, h.attachHubSession(item.HubNodeID, item.HubSession.ID)
+				return h, h.attachHubSession(item.HubNodeID, item.HubSession.ID, hubSessionNeedsRestartBeforeAttach(item.HubSession))
 			}
 		}
 		return h, nil
@@ -12825,7 +12915,7 @@ func (h *Home) attachRemoteSession(remoteName, sessionID string) tea.Cmd {
 
 // attachHubSession attaches to a hub-owned session through the connected hub
 // client, suspending the TUI while the requester-side terminal bridge runs.
-func (h *Home) attachHubSession(nodeID, sessionID string) tea.Cmd {
+func (h *Home) attachHubSession(nodeID, sessionID string, restartBeforeAttach bool) tea.Cmd {
 	if h.hubClient == nil {
 		h.setHubStatus("hub offline")
 		h.setError(fmt.Errorf("hub client is not connected"))
@@ -12833,7 +12923,7 @@ func (h *Home) attachHubSession(nodeID, sessionID string) tea.Cmd {
 	}
 	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
 	h.isAttaching.Store(true)
-	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size}, func(err error) tea.Msg {
+	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size, restartBeforeAttach: restartBeforeAttach}, func(err error) tea.Msg {
 		return hubAttachResultMsg{err: err}
 	})
 }
@@ -12928,6 +13018,18 @@ func parseHubPromptTarget(target string) (nodeID, sessionID string, ok bool) {
 	return parts[1], parts[2], true
 }
 
+func hubSessionNeedsRestartBeforeAttach(hs *session.HubSessionInfo) bool {
+	if hs == nil {
+		return false
+	}
+	switch session.Status(strings.TrimSpace(hs.Status)) {
+	case session.StatusStopped, session.StatusError:
+		return true
+	default:
+		return false
+	}
+}
+
 // remoteAttachCmd implements tea.ExecCommand for remote SSH attach
 type remoteAttachCmd struct {
 	runner    *session.SSHRunner
@@ -12943,11 +13045,12 @@ func (r remoteAttachCmd) SetStdout(writer io.Writer) {}
 func (r remoteAttachCmd) SetStderr(writer io.Writer) {}
 
 type hubAttachCmd struct {
-	client    hubClientAPI
-	ctx       context.Context
-	nodeID    string
-	sessionID string
-	size      hub.TerminalSize
+	client              hubClientAPI
+	ctx                 context.Context
+	nodeID              string
+	sessionID           string
+	size                hub.TerminalSize
+	restartBeforeAttach bool
 }
 
 func (h hubAttachCmd) Run() error {
@@ -12957,6 +13060,14 @@ func (h hubAttachCmd) Run() error {
 	}
 	if h.client == nil {
 		return fmt.Errorf("hub client is not connected")
+	}
+	if h.restartBeforeAttach {
+		_, err := h.client.Command(ctx, h.nodeID, "restart", map[string]string{
+			"session_id": h.sessionID,
+		})
+		if err != nil {
+			return fmt.Errorf("restart hub session before attach: %w", err)
+		}
 	}
 	return h.client.Attach(ctx, h.nodeID, h.sessionID, h.size)
 }
@@ -16684,6 +16795,31 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 		b.WriteString(dimStyle.Render("Tool:   ") + hs.Tool + "\n")
 	}
 	b.WriteString(dimStyle.Render("Group:  ") + hs.GroupPath + "\n\n")
+
+	pvKey := hubPreviewCacheKey(item.HubNodeID, hs.ID)
+	h.previewCacheMu.RLock()
+	previewContent, hasPreview := h.previewCache[pvKey]
+	_, hasFetched := h.previewCacheTime[pvKey]
+	h.previewCacheMu.RUnlock()
+
+	b.WriteString(dimStyle.Render("Last response") + "\n")
+	b.WriteString(strings.Repeat("-", max(1, min(width-4, 40))))
+	b.WriteString("\n")
+	previewContent = truncateRemotePreviewContent(previewContent)
+	if hasPreview && strings.TrimSpace(previewContent) != "" {
+		b.WriteString(previewContent)
+		b.WriteString("\n\n")
+	} else if hasFetched {
+		b.WriteString(dimStyle.Render("No response available yet."))
+		b.WriteString("\n\n")
+	} else if session.Status(strings.TrimSpace(hs.Status)) == session.StatusRunning || session.Status(strings.TrimSpace(hs.Status)) == session.StatusWaiting {
+		b.WriteString(dimStyle.Render("Fetching hub preview..."))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString(dimStyle.Render("No response available yet."))
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString(dimStyle.Render("Press Enter to attach via hub"))
 	return b.String()
 }
