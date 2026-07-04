@@ -25,7 +25,19 @@ var (
 	ErrAdvertiseURLMissing  = errors.New("hub: advertise URL is not configured")
 )
 
-const hubAdvertiseURLKey = "advertise_url"
+const (
+	hubAdvertiseURLKey   = "advertise_url"
+	hubTrustBackfillKey  = "trust_backfill_v1"
+	hubSettingTrueString = "true"
+)
+
+type TrustStatus string
+
+const (
+	TrustStatusPending TrustStatus = "pending"
+	TrustStatusAllowed TrustStatus = "allowed"
+	TrustStatusDenied  TrustStatus = "denied"
+)
 
 type Store struct {
 	db *sql.DB
@@ -71,6 +83,14 @@ type NodeSessions struct {
 	Node     Node
 	SentAt   time.Time
 	Sessions []SessionInfo
+}
+
+type TrustRequest struct {
+	Owner     Node
+	Requester Node
+	Status    TrustStatus
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type CreateInviteOptions struct {
@@ -367,6 +387,9 @@ func (s *Store) RevokeNode(nodeID string) error {
 	if _, err := tx.Exec(`DELETE FROM snapshots WHERE node_id = ?`, nodeID); err != nil {
 		return fmt.Errorf("delete node snapshots: %w", err)
 	}
+	if _, err := tx.Exec(`DELETE FROM node_trust_edges WHERE owner_node_id = ? OR requester_node_id = ?`, nodeID, nodeID); err != nil {
+		return fmt.Errorf("delete node trust edges: %w", err)
+	}
 	res, err := tx.Exec(`DELETE FROM nodes WHERE id = ?`, nodeID)
 	if err != nil {
 		return fmt.Errorf("delete node: %w", err)
@@ -382,6 +405,149 @@ func (s *Store) RevokeNode(nodeID string) error {
 		return fmt.Errorf("commit revoke node: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) CreatePendingTrustRequestsForNewNode(requesterNodeID string) ([]TrustRequest, error) {
+	requesterNodeID = strings.TrimSpace(requesterNodeID)
+	if requesterNodeID == "" {
+		return nil, ErrNodeNotFound
+	}
+	if _, err := s.nodeByID(requesterNodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNodeNotFound
+		}
+		return nil, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin trust requests: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(`SELECT id FROM nodes WHERE id <> ? ORDER BY name, id`, requesterNodeID)
+	if err != nil {
+		return nil, fmt.Errorf("query existing trust owners: %w", err)
+	}
+	var ownerIDs []string
+	for rows.Next() {
+		var ownerID string
+		if err := rows.Scan(&ownerID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan existing trust owner: %w", err)
+		}
+		ownerIDs = append(ownerIDs, ownerID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("iterate existing trust owners: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close existing trust owners: %w", err)
+	}
+
+	now := time.Now().UnixNano()
+	for _, ownerID := range ownerIDs {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO node_trust_edges (owner_node_id, requester_node_id, status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			ownerID, requesterNodeID, string(TrustStatusPending), now, now,
+		); err != nil {
+			return nil, fmt.Errorf("create pending trust request: %w", err)
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO node_trust_edges (owner_node_id, requester_node_id, status, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			requesterNodeID, ownerID, string(TrustStatusAllowed), now, now,
+		); err != nil {
+			return nil, fmt.Errorf("create reverse trust edge: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit trust requests: %w", err)
+	}
+	return s.trustRequests(`e.requester_node_id = ? AND e.status = ?`, requesterNodeID, string(TrustStatusPending))
+}
+
+func (s *Store) PendingTrustRequests(ownerNodeID string) ([]TrustRequest, error) {
+	ownerNodeID = strings.TrimSpace(ownerNodeID)
+	if ownerNodeID == "" {
+		return nil, nil
+	}
+	return s.trustRequests(`e.owner_node_id = ? AND e.status = ?`, ownerNodeID, string(TrustStatusPending))
+}
+
+func (s *Store) AllowTrust(ownerNodeID, requesterNodeID string) error {
+	return s.SetTrust(ownerNodeID, requesterNodeID, TrustStatusAllowed)
+}
+
+func (s *Store) DenyTrust(ownerNodeID, requesterNodeID string) error {
+	return s.SetTrust(ownerNodeID, requesterNodeID, TrustStatusDenied)
+}
+
+func (s *Store) SetTrust(ownerNodeID, requesterNodeID string, status TrustStatus) error {
+	ownerNodeID = strings.TrimSpace(ownerNodeID)
+	requesterNodeID = strings.TrimSpace(requesterNodeID)
+	if ownerNodeID == "" || requesterNodeID == "" {
+		return ErrNodeNotFound
+	}
+	if ownerNodeID == requesterNodeID {
+		return nil
+	}
+	switch status {
+	case TrustStatusPending, TrustStatusAllowed, TrustStatusDenied:
+	default:
+		return fmt.Errorf("invalid trust status %q", status)
+	}
+	if _, err := s.nodeByID(ownerNodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNodeNotFound
+		}
+		return err
+	}
+	if _, err := s.nodeByID(requesterNodeID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNodeNotFound
+		}
+		return err
+	}
+
+	now := time.Now().UnixNano()
+	_, err := s.db.Exec(
+		`INSERT INTO node_trust_edges (owner_node_id, requester_node_id, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(owner_node_id, requester_node_id) DO UPDATE SET
+		   status = excluded.status,
+		   updated_at = excluded.updated_at`,
+		ownerNodeID, requesterNodeID, string(status), now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("set node trust: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) CanAccessNode(ownerNodeID, requesterNodeID string) (bool, error) {
+	ownerNodeID = strings.TrimSpace(ownerNodeID)
+	requesterNodeID = strings.TrimSpace(requesterNodeID)
+	if ownerNodeID == "" || requesterNodeID == "" {
+		return false, nil
+	}
+	if ownerNodeID == requesterNodeID {
+		return true, nil
+	}
+	var status string
+	err := s.db.QueryRow(
+		`SELECT status FROM node_trust_edges WHERE owner_node_id = ? AND requester_node_id = ?`,
+		ownerNodeID, requesterNodeID,
+	).Scan(&status)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load node trust: %w", err)
+	}
+	return TrustStatus(status) == TrustStatusAllowed, nil
 }
 
 func (s *Store) AuthenticateNode(nodeID, plainToken string) (Node, error) {
@@ -518,6 +684,14 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE TABLE IF NOT EXISTS hub_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_trust_edges (
+  owner_node_id TEXT NOT NULL,
+  requester_node_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (owner_node_id, requester_node_id)
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate hub db: %w", err)
@@ -540,7 +714,93 @@ CREATE TABLE IF NOT EXISTS hub_settings (
 	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_id ON invites(id) WHERE id IS NOT NULL`); err != nil {
 		return fmt.Errorf("create invite id index: %w", err)
 	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_node_trust_owner_status ON node_trust_edges(owner_node_id, status)`); err != nil {
+		return fmt.Errorf("create node trust owner index: %w", err)
+	}
+	if err := s.backfillLegacyTrustEdges(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) backfillLegacyTrustEdges() error {
+	var done string
+	err := s.db.QueryRow(`SELECT value FROM hub_settings WHERE key = ?`, hubTrustBackfillKey).Scan(&done)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("load trust backfill setting: %w", err)
+	}
+	if strings.TrimSpace(done) == hubSettingTrueString {
+		return nil
+	}
+
+	var edgeCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM node_trust_edges`).Scan(&edgeCount); err != nil {
+		return fmt.Errorf("count trust edges: %w", err)
+	}
+	if edgeCount != 0 {
+		return s.markTrustBackfillComplete()
+	}
+	var nodeCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodeCount); err != nil {
+		return fmt.Errorf("count trust backfill nodes: %w", err)
+	}
+	if nodeCount < 2 {
+		return s.markTrustBackfillComplete()
+	}
+	now := time.Now().UnixNano()
+	_, err = s.db.Exec(
+		`INSERT OR IGNORE INTO node_trust_edges (owner_node_id, requester_node_id, status, created_at, updated_at)
+		 SELECT owner.id, requester.id, ?, ?, ?
+		 FROM nodes owner
+		 CROSS JOIN nodes requester
+		 WHERE owner.id <> requester.id`,
+		string(TrustStatusAllowed), now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("backfill legacy trust edges: %w", err)
+	}
+	return s.markTrustBackfillComplete()
+}
+
+func (s *Store) markTrustBackfillComplete() error {
+	_, err := s.db.Exec(
+		`INSERT INTO hub_settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		hubTrustBackfillKey, hubSettingTrueString,
+	)
+	if err != nil {
+		return fmt.Errorf("mark trust backfill complete: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) trustRequests(where string, args ...any) ([]TrustRequest, error) {
+	query := `SELECT owner.id, owner.name, owner.token_hash, owner.version, owner.os, owner.arch, owner.status, owner.last_seen_at, owner.admin,
+	                requester.id, requester.name, requester.token_hash, requester.version, requester.os, requester.arch, requester.status, requester.last_seen_at, requester.admin,
+	                e.status, e.created_at, e.updated_at
+	         FROM node_trust_edges e
+	         JOIN nodes owner ON owner.id = e.owner_node_id
+	         JOIN nodes requester ON requester.id = e.requester_node_id
+	         WHERE ` + where + `
+	         ORDER BY requester.name, requester.id`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query trust requests: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TrustRequest
+	for rows.Next() {
+		request, err := scanTrustRequestValues(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan trust request: %w", err)
+		}
+		out = append(out, request)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trust requests: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) nodeByID(id string) (Node, error) {
@@ -668,6 +928,66 @@ func scanNodeValues(row rowScanner, node *Node) error {
 	}
 	node.Admin = admin != 0
 	return nil
+}
+
+func scanTrustRequestValues(row rowScanner) (TrustRequest, error) {
+	var owner, requester Node
+	var ownerVersion, ownerOS, ownerArch sql.NullString
+	var ownerLastSeenAt sql.NullInt64
+	var ownerAdmin int
+	var requesterVersion, requesterOS, requesterArch sql.NullString
+	var requesterLastSeenAt sql.NullInt64
+	var requesterAdmin int
+	var status string
+	var createdAt, updatedAt int64
+	if err := row.Scan(
+		&owner.ID,
+		&owner.Name,
+		&owner.TokenHash,
+		&ownerVersion,
+		&ownerOS,
+		&ownerArch,
+		&owner.Status,
+		&ownerLastSeenAt,
+		&ownerAdmin,
+		&requester.ID,
+		&requester.Name,
+		&requester.TokenHash,
+		&requesterVersion,
+		&requesterOS,
+		&requesterArch,
+		&requester.Status,
+		&requesterLastSeenAt,
+		&requesterAdmin,
+		&status,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return TrustRequest{}, err
+	}
+	owner.Version = ownerVersion.String
+	owner.OS = ownerOS.String
+	owner.Arch = ownerArch.String
+	owner.Admin = ownerAdmin != 0
+	if ownerLastSeenAt.Valid {
+		t := time.Unix(0, ownerLastSeenAt.Int64)
+		owner.LastSeenAt = &t
+	}
+	requester.Version = requesterVersion.String
+	requester.OS = requesterOS.String
+	requester.Arch = requesterArch.String
+	requester.Admin = requesterAdmin != 0
+	if requesterLastSeenAt.Valid {
+		t := time.Unix(0, requesterLastSeenAt.Int64)
+		requester.LastSeenAt = &t
+	}
+	return TrustRequest{
+		Owner:     owner,
+		Requester: requester,
+		Status:    TrustStatus(status),
+		CreatedAt: time.Unix(0, createdAt),
+		UpdatedAt: time.Unix(0, updatedAt),
+	}, nil
 }
 
 func scanNodeFields(rows *sql.Rows, node *Node, extra ...any) error {

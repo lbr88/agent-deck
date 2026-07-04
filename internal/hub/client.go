@@ -47,8 +47,9 @@ type ClientConfig struct {
 	ReconnectBaseDelay time.Duration
 	ReconnectMaxDelay  time.Duration
 
-	OnStatus   func(string)
-	OnSnapshot func(NodeSessions)
+	OnStatus       func(string)
+	OnSnapshot     func(NodeSessions)
+	OnTrustRequest func(TrustRequestPayload)
 
 	AttachBackend AttachBackend
 	ActionBackend ActionBackend
@@ -366,11 +367,31 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 		c.handleCommand(ctx, conn, env)
 	case MsgCommandResult:
 		c.handleCommandResult(env)
+	case MsgTrustRequest:
+		c.handleTrustRequest(env)
 	case MsgWelcome, MsgHeartbeat, MsgError:
 		return
 	default:
 		return
 	}
+}
+
+func (c *Client) handleTrustRequest(env Envelope) {
+	if c.cfg.OnTrustRequest == nil {
+		return
+	}
+	var payload TrustRequestPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return
+	}
+	payload.NodeID = strings.TrimSpace(payload.NodeID)
+	if payload.NodeID == "" {
+		return
+	}
+	if strings.TrimSpace(payload.NodeName) == "" {
+		payload.NodeName = payload.NodeID
+	}
+	c.cfg.OnTrustRequest(payload)
 }
 
 func (c *Client) handleCommandResult(env Envelope) {
@@ -703,6 +724,30 @@ func (c *Client) Command(ctx context.Context, nodeID, action string, payload any
 		return result.Result, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return fmt.Errorf("hub trust node id is required")
+	}
+	conn := c.currentConn()
+	if conn == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.writeEnvelope(MsgTrustDecision, c.cfg.NodeID, TrustDecisionPayload{NodeID: nodeID, Allow: allow})
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

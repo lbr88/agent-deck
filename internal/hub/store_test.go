@@ -334,6 +334,72 @@ func TestStoreLatestSessionsReturnsErrorForMalformedSnapshotJSON(t *testing.T) {
 	}
 }
 
+func TestStoreTrustRequestsGateRequesterAccessToOwner(t *testing.T) {
+	store := openTestStore(t)
+	if _, err := store.UpsertNode("node_owner", "workstation", "owner_hash", "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	if _, err := store.UpsertNode("node_requester", "laptop", "requester_hash", "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode requester: %v", err)
+	}
+
+	requests, err := store.CreatePendingTrustRequestsForNewNode("node_requester")
+	if err != nil {
+		t.Fatalf("CreatePendingTrustRequestsForNewNode: %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("trust requests = %+v, want one owner approval request", requests)
+	}
+	if requests[0].Owner.ID != "node_owner" || requests[0].Requester.ID != "node_requester" || requests[0].Status != TrustStatusPending {
+		t.Fatalf("trust request = %+v, want node_owner pending node_requester", requests[0])
+	}
+
+	allowed, err := store.CanAccessNode("node_owner", "node_requester")
+	if err != nil {
+		t.Fatalf("CanAccessNode pending: %v", err)
+	}
+	if allowed {
+		t.Fatal("pending requester can access owner, want blocked")
+	}
+	allowed, err = store.CanAccessNode("node_requester", "node_owner")
+	if err != nil {
+		t.Fatalf("CanAccessNode reverse: %v", err)
+	}
+	if !allowed {
+		t.Fatal("existing owner cannot access new requester, want allowed reverse trust")
+	}
+
+	pending, err := store.PendingTrustRequests("node_owner")
+	if err != nil {
+		t.Fatalf("PendingTrustRequests: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Requester.ID != "node_requester" {
+		t.Fatalf("pending requests = %+v, want requester approval", pending)
+	}
+
+	if err := store.AllowTrust("node_owner", "node_requester"); err != nil {
+		t.Fatalf("AllowTrust: %v", err)
+	}
+	allowed, err = store.CanAccessNode("node_owner", "node_requester")
+	if err != nil {
+		t.Fatalf("CanAccessNode allowed: %v", err)
+	}
+	if !allowed {
+		t.Fatal("allowed requester cannot access owner")
+	}
+
+	if err := store.DenyTrust("node_owner", "node_requester"); err != nil {
+		t.Fatalf("DenyTrust: %v", err)
+	}
+	allowed, err = store.CanAccessNode("node_owner", "node_requester")
+	if err != nil {
+		t.Fatalf("CanAccessNode denied: %v", err)
+	}
+	if allowed {
+		t.Fatal("denied requester can access owner")
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "hub.db"))

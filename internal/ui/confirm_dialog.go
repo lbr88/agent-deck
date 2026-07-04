@@ -26,6 +26,7 @@ const (
 	ConfirmArchiveSession
 	ConfirmUnarchiveSession
 	ConfirmNotice // acknowledge-only message (single OK button), e.g. protected-action blocks
+	ConfirmHubTrustNode
 )
 
 // ConfirmDialog handles confirmation for destructive actions
@@ -132,6 +133,15 @@ func (c *ConfirmDialog) ShowCloseRemoteSession(remoteName, sessionID, sessionNam
 	c.targetID = sessionID
 	c.targetName = sessionName
 	c.remoteName = remoteName
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowHubTrustNode(nodeID, nodeName string) {
+	c.visible = true
+	c.confirmType = ConfirmHubTrustNode
+	c.targetID = nodeID
+	c.targetName = nodeName
 	c.buttonCount = 2
 	c.focusedButton = 1
 }
@@ -434,6 +444,17 @@ func (c *ConfirmDialog) View() string {
 			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
 		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
 			hintStyle.Render("y remove · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmHubTrustNode:
+		title = "Hub Node Join Request"
+		warning = fmt.Sprintf("Allow this hub node to access this agent-deck?\n\n  \"%s\"", c.targetName)
+		details = fmt.Sprintf("Node ID: %s\nAllows this node to see and control sessions on this machine through the hub.", c.targetID)
+		borderColor = ColorYellow
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Allow", ColorGreen, c.focusedButton == 0), "  ",
+			renderButton("Deny", ColorRed, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y allow · n deny · ←/→ navigate · Enter select · Esc later"))
 
 	case ConfirmDeleteGroup:
 		title = "⚠  Delete Group?"

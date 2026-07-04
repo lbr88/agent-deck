@@ -1,6 +1,6 @@
 # Agent Deck Hub
 
-Agent Deck Hub connects multiple trusted `agent-deck` instances through one encrypted relay. Each joined `agent-deck` owns its local sessions and keeps an outbound `wss://` connection to the hub. Any connected TUI can see, attach to, prompt, stop, restart, rename, and create sessions on other connected nodes.
+Agent Deck Hub connects multiple `agent-deck` instances through one encrypted relay. Each joined `agent-deck` owns its local sessions and keeps an outbound `wss://` connection to the hub. Joined nodes can publish their own sessions immediately, but each existing node must approve a new node before that new node can see, attach to, prompt, stop, restart, rename, or create sessions on the existing node.
 
 The hub is not a browser UI and it is not a multi-user auth system. It is a coordination service for nodes you trust and intentionally join.
 
@@ -55,6 +55,9 @@ agent-deck hub nodes rename node_... desktop
 agent-deck hub nodes revoke node_...
 agent-deck hub invites
 agent-deck hub invites revoke inv_...
+agent-deck hub trust pending
+agent-deck hub trust allow node_...
+agent-deck hub trust deny node_...
 ```
 
 The invite command prints the exact command to run on the joining machine:
@@ -64,6 +67,14 @@ agent-deck hub join wss://hub.example:8421 --token invite_...
 ```
 
 Use `agent-deck hub invite --admin <node-name>` when the new node should also be able to administer the hub. Non-admin nodes can connect, publish sessions, and use the relay, but cannot create/revoke invites or manage registered nodes.
+
+An invite grants hub membership, not automatic access to every other node. When a new node joins, each already joined node receives a TUI confirmation asking whether to allow that new node to access that node's local sessions. The owner node can also use the CLI fallback:
+
+```bash
+agent-deck hub trust pending
+agent-deck hub trust allow node_...
+agent-deck hub trust deny node_...
+```
 
 If you are on the hub host and want to manage the local hub database instead of the configured joined hub, use:
 
@@ -132,7 +143,7 @@ For local development, build the image directly from the repository root:
 docker build -f deploy/hub/Dockerfile -t agent-deck-hub:local .
 ```
 
-The compose file uses `ghcr.io/lbr88/agent-deck-hub:latest` and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`, `/api/status`, `/api/invites`, `/api/invites/revoke`, `/api/nodes`, `/api/nodes/promote`, `/api/nodes/demote`, `/api/nodes/rename`, and `/api/nodes/revoke`.
+The compose file uses the published hub image and the default self-signed certificate. If you run behind a reverse proxy, it must pass WebSocket upgrades to `/ws/node` and HTTPS requests to `/api/join`, `/api/status`, `/api/invites`, `/api/invites/revoke`, `/api/nodes`, `/api/nodes/promote`, `/api/nodes/demote`, `/api/nodes/rename`, `/api/nodes/revoke`, `/api/trust/pending`, `/api/trust/allow`, and `/api/trust/deny`.
 
 ```yaml
 command:
@@ -151,6 +162,8 @@ command:
 - Admin nodes can create/revoke invites and manage registered nodes. Bootstrap admin invite creation only happens while the hub has no registered nodes.
 - Demote and revoke refuse to remove the last admin node.
 - Revoking a node removes its stored credential and latest snapshot, and the hub closes any active websocket for that node.
-- Joined nodes are trusted. A node that can connect can see session metadata and relay actions to other connected nodes. A non-admin node cannot create/revoke invites or manage registered nodes.
+- Invite tokens grant hub membership. Access to another node's sessions requires an explicit allow decision from that owner node.
+- Admin status controls hub administration only. Admin nodes do not bypass per-owner trust gates.
+- Until an owner node allows a requester, the hub withholds that owner's snapshots and rejects attach/action relay attempts from the requester.
 - There is no offline queue. Actions require the owner node to be connected.
 - No SSH connectivity between nodes is required.

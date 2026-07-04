@@ -536,7 +536,7 @@ agent-deck remote update dev      # update specific remote
 
 ## Hub Commands
 
-Run an encrypted relay for trusted agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. `hub serve` creates a self-signed certificate by default, and `hub join` pins the accepted certificate fingerprint like an SSH host key. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`.
+Run an encrypted relay for agent-deck nodes. Hub traffic uses `wss://`; plaintext joins are refused. `hub serve` creates a self-signed certificate by default, and `hub join` pins the accepted certificate fingerprint like an SSH host key. Joined TUI instances auto-connect on startup and show sessions inline as `<node> / <group>`. An invite grants hub membership; each owner node still approves whether a new node may access that owner node's sessions.
 
 ### hub serve
 
@@ -634,6 +634,20 @@ Lists and revokes hub invites. Joined admin nodes manage invites through the con
 | `--json` | Output invites as JSON |
 | `--local` | Use the local hub data directory instead of the configured hub |
 | `--data <dir>` | Local hub data directory |
+
+### hub trust
+
+```bash
+agent-deck hub trust pending [--json]
+agent-deck hub trust allow <node-id>
+agent-deck hub trust deny <node-id>
+```
+
+Lists and answers pending per-node access requests for this configured node. The TUI prompts automatically when a new node joins; these commands are the CLI fallback. Admin status does not bypass this gate: the owner node must allow a requester before the requester can see that owner's snapshots or relay attach/actions to it.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output pending trust requests as JSON |
 
 ## Session Resolution
 

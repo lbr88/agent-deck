@@ -116,6 +116,62 @@ func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
 	}
 }
 
+func TestHubTrustRequestShowsConfirmation(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+
+	h.handleHubTrustRequest(hub.TrustRequestPayload{NodeID: "node_joining", NodeName: "new laptop"})
+
+	var msg hubTrustRequestMsg
+	select {
+	case msg = <-h.hubTrustRequestCh:
+	default:
+		t.Fatal("hub trust callback did not enqueue an update message")
+	}
+	model, _ := h.Update(msg)
+	h = model.(*Home)
+
+	if !h.confirmDialog.IsVisible() {
+		t.Fatal("trust request did not show confirmation dialog")
+	}
+	if got := h.confirmDialog.GetConfirmType(); got != ConfirmHubTrustNode {
+		t.Fatalf("confirm type = %v, want ConfirmHubTrustNode", got)
+	}
+	if got := h.confirmDialog.GetTargetID(); got != "node_joining" {
+		t.Fatalf("confirm target = %q, want node_joining", got)
+	}
+}
+
+func TestHubTrustAllowSendsDecisionThroughHubClient(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.applyHubTrustRequest(hub.TrustRequestPayload{NodeID: "node_joining", NodeName: "new laptop"})
+
+	model, cmd := h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("allow trust returned no command")
+	}
+	msg := cmd()
+	result, ok := msg.(hubTrustDecisionResultMsg)
+	if !ok {
+		t.Fatalf("trust decision command returned %T", msg)
+	}
+	if result.err != nil || !result.allow || result.nodeID != "node_joining" {
+		t.Fatalf("trust decision result = %+v", result)
+	}
+	if len(client.trustDecisions) != 1 {
+		t.Fatalf("trust decisions = %d, want 1", len(client.trustDecisions))
+	}
+	if got := client.trustDecisions[0]; got.nodeID != "node_joining" || !got.allow {
+		t.Fatalf("trust decision = %+v", got)
+	}
+	if h.confirmDialog.IsVisible() {
+		t.Fatal("trust dialog still visible after allow")
+	}
+}
+
 func TestHubStatusRendersWhenConfigured(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
@@ -622,12 +678,13 @@ func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
 }
 
 type fakeHubAttachClient struct {
-	nodeID        string
-	sessionID     string
-	size          hub.TerminalSize
-	commands      []hubCommandCall
-	commandErr    error
-	commandResult json.RawMessage
+	nodeID         string
+	sessionID      string
+	size           hub.TerminalSize
+	commands       []hubCommandCall
+	trustDecisions []hubTrustDecisionCall
+	commandErr     error
+	commandResult  json.RawMessage
 }
 
 func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
@@ -645,6 +702,11 @@ func (c *fakeHubAttachClient) Command(ctx context.Context, nodeID, action string
 	return c.commandResult, nil
 }
 
+func (c *fakeHubAttachClient) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
+	c.trustDecisions = append(c.trustDecisions, hubTrustDecisionCall{nodeID: nodeID, allow: allow})
+	return nil
+}
+
 func (c *fakeHubAttachClient) Close() error {
 	return nil
 }
@@ -653,6 +715,11 @@ type hubCommandCall struct {
 	nodeID  string
 	action  string
 	payload any
+}
+
+type hubTrustDecisionCall struct {
+	nodeID string
+	allow  bool
 }
 
 func assertHubCommand(t *testing.T, got hubCommandCall, nodeID, action string, wantPayload map[string]string) {

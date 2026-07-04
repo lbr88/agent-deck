@@ -29,6 +29,8 @@ const (
 	MsgAttachResize  MessageType = "attach_resize"
 	MsgAttachClose   MessageType = "attach_close"
 	MsgAttachClosed  MessageType = "attach_closed"
+	MsgTrustRequest  MessageType = "trust_request"
+	MsgTrustDecision MessageType = "trust_decision"
 	MsgError         MessageType = "error"
 )
 
@@ -126,6 +128,20 @@ type AttachResizePayload struct {
 type AttachClosePayload struct {
 	StreamID string `json:"stream_id"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+type TrustRequestPayload struct {
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	Version  string `json:"version,omitempty"`
+	OS       string `json:"os,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
+type TrustDecisionPayload struct {
+	NodeID string `json:"node_id"`
+	Allow  bool   `json:"allow"`
 }
 
 type ErrorPayload struct {

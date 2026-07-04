@@ -79,6 +79,10 @@ type hubInvitesResult struct {
 	Invites []hubInviteOutput `json:"invites"`
 }
 
+type hubTrustRequestsResult struct {
+	Requests []hubTrustRequestOutput `json:"requests"`
+}
+
 type hubPromoteNodeRequest struct {
 	NodeID string `json:"node_id"`
 }
@@ -90,6 +94,10 @@ type hubRenameNodeRequest struct {
 
 type hubRevokeInviteRequest struct {
 	InviteID string `json:"invite_id"`
+}
+
+type hubTrustDecisionRequest struct {
+	NodeID string `json:"node_id"`
 }
 
 type hubBootstrapInviteResult struct {
@@ -127,6 +135,15 @@ type hubInviteOutput struct {
 	Status          string     `json:"status"`
 }
 
+type hubTrustRequestOutput struct {
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	Version  string `json:"version,omitempty"`
+	OS       string `json:"os,omitempty"`
+	Arch     string `json:"arch,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
 func handleHub(profile string, args []string) {
 	if len(args) == 0 {
 		printHubUsage(os.Stderr)
@@ -147,6 +164,8 @@ func handleHub(profile string, args []string) {
 		err = handleHubNodes(args[1:])
 	case "invites":
 		err = handleHubInvites(args[1:])
+	case "trust":
+		err = handleHubTrust(args[1:])
 	case "connect":
 		err = handleHubConnect(profile, args[1:])
 	case "help", "--help", "-h":
@@ -1115,6 +1134,117 @@ func revokeRemoteHubInvite(settings session.HubSettings, inviteID string) error 
 	return hubRemoteJSON(settings, http.MethodPost, "/api/invites/revoke", hubRevokeInviteRequest{InviteID: strings.TrimSpace(inviteID)}, nil)
 }
 
+func listRemoteHubTrustRequests(settings session.HubSettings) ([]hubTrustRequestOutput, error) {
+	var result hubTrustRequestsResult
+	if err := hubRemoteJSON(settings, http.MethodGet, "/api/trust/pending", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Requests, nil
+}
+
+func setRemoteHubTrust(settings session.HubSettings, nodeID string, allow bool) error {
+	path := "/api/trust/deny"
+	if allow {
+		path = "/api/trust/allow"
+	}
+	return hubRemoteJSON(settings, http.MethodPost, path, hubTrustDecisionRequest{NodeID: strings.TrimSpace(nodeID)}, nil)
+}
+
+func handleHubTrust(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: agent-deck hub trust <pending|allow|deny> [node-id]")
+	}
+	switch args[0] {
+	case "pending":
+		return handleHubTrustPending(args[1:])
+	case "allow":
+		return handleHubTrustDecision(args[1:], true)
+	case "deny":
+		return handleHubTrustDecision(args[1:], false)
+	default:
+		return fmt.Errorf("unknown hub trust command %q", args[0])
+	}
+}
+
+func handleHubTrustPending(args []string) error {
+	fs := flag.NewFlagSet("hub trust pending", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Output pending trust requests as JSON")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: agent-deck hub trust pending [--json]")
+	}
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+	if !config.Hub.Enabled() {
+		return fmt.Errorf("hub is not configured; run agent-deck hub join first")
+	}
+	requests, err := listRemoteHubTrustRequests(config.Hub)
+	if err != nil {
+		return err
+	}
+	return printHubTrustRequests(requests, *jsonOutput)
+}
+
+func handleHubTrustDecision(args []string, allow bool) error {
+	action := "deny"
+	if allow {
+		action = "allow"
+	}
+	fs := flag.NewFlagSet("hub trust "+action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub trust %s <node-id>", action)
+	}
+	nodeID := strings.TrimSpace(fs.Arg(0))
+	if nodeID == "" {
+		return fmt.Errorf("node id is required")
+	}
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+	if !config.Hub.Enabled() {
+		return fmt.Errorf("hub is not configured; run agent-deck hub join first")
+	}
+	if err := setRemoteHubTrust(config.Hub, nodeID, allow); err != nil {
+		return err
+	}
+	if allow {
+		fmt.Printf("Allowed hub node %s\n", nodeID)
+	} else {
+		fmt.Printf("Denied hub node %s\n", nodeID)
+	}
+	return nil
+}
+
+func printHubTrustRequests(requests []hubTrustRequestOutput, jsonOutput bool) error {
+	if jsonOutput {
+		return json.NewEncoder(os.Stdout).Encode(requests)
+	}
+	if len(requests) == 0 {
+		fmt.Println("No pending hub trust requests.")
+		return nil
+	}
+	for _, request := range requests {
+		fmt.Printf("%s\t%s\t%s\t%s/%s\n", request.NodeID, request.NodeName, request.Status, request.OS, request.Arch)
+	}
+	return nil
+}
+
 func handleHubInvites(args []string) error {
 	if len(args) > 0 && args[0] == "revoke" {
 		return handleHubInvitesRevoke(args[1:])
@@ -1579,5 +1709,6 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  status  Show this node's configured hub status")
 	fmt.Fprintln(w, "  nodes   List registered hub nodes")
 	fmt.Fprintln(w, "  invites List hub invites")
+	fmt.Fprintln(w, "  trust   List or answer pending node trust requests")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }

@@ -214,6 +214,91 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	}
 }
 
+func TestClientDispatchesTrustRequestCallback(t *testing.T) {
+	requests := make(chan TrustRequestPayload, 1)
+	client := NewClient(ClientConfig{
+		OnTrustRequest: func(request TrustRequestPayload) {
+			requests <- request
+		},
+	}, nil)
+	payload := TrustRequestPayload{
+		NodeID:   "node_joining",
+		NodeName: "new laptop",
+		Version:  "1.0.0",
+		OS:       "linux",
+		Arch:     "amd64",
+		Status:   string(TrustStatusPending),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal trust request payload: %v", err)
+	}
+
+	client.dispatch(Envelope{Version: ProtocolVersion, Type: MsgTrustRequest, NodeID: "node_owner", Payload: raw})
+
+	got := waitTrustRequest(t, requests)
+	if got.NodeID != "node_joining" || got.NodeName != "new laptop" || got.Status != string(TrustStatusPending) {
+		t.Fatalf("trust request = %+v", got)
+	}
+}
+
+func TestClientTrustDecisionSendsEnvelope(t *testing.T) {
+	messages := make(chan observedMessage, 16)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_owner", WelcomePayload{NodeID: "node_owner", NodeName: "workstation"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_owner",
+		NodeName:          "workstation",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+	if err := client.TrustDecision(ctx, "node_joining", true); err != nil {
+		t.Fatalf("TrustDecision: %v", err)
+	}
+	decision := assertNextMessageType(t, messages, MsgTrustDecision)
+	if decision.envelope.NodeID != "node_owner" {
+		t.Fatalf("trust decision NodeID = %q, want node_owner", decision.envelope.NodeID)
+	}
+	var payload TrustDecisionPayload
+	if err := json.Unmarshal(decision.payload, &payload); err != nil {
+		t.Fatalf("decode trust decision: %v", err)
+	}
+	if payload.NodeID != "node_joining" || !payload.Allow {
+		t.Fatalf("trust decision payload = %+v", payload)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
 func TestClientOwnerAttachOpenUsesBackendAndBridgesFrames(t *testing.T) {
 	backend := newFakeAttachBackend()
 	messages := make(chan observedMessage, 16)
@@ -744,6 +829,17 @@ func waitNodeSessions(t *testing.T, ch <-chan NodeSessions) NodeSessions {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for node sessions")
 		return NodeSessions{}
+	}
+}
+
+func waitTrustRequest(t *testing.T, ch <-chan TrustRequestPayload) TrustRequestPayload {
+	t.Helper()
+	select {
+	case got := <-ch:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trust request")
+		return TrustRequestPayload{}
 	}
 }
 

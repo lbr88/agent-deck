@@ -165,6 +165,49 @@ func TestServerInviteAPIRequiresAdminNode(t *testing.T) {
 	}
 }
 
+func TestServerTrustAPIAllowsOwnerDecision(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_requester", "laptop", hashSecret("requester_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode requester: %v", err)
+	}
+	if err := server.store.SetTrust("node_owner", "node_requester", TrustStatusPending); err != nil {
+		t.Fatalf("SetTrust pending: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/trust/pending?node_id=node_owner", nil)
+	req.Header.Set("Authorization", "Bearer owner_secret")
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/trust/pending status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var pending trustRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
+		t.Fatalf("decode pending trust response: %v", err)
+	}
+	if len(pending.Requests) != 1 || pending.Requests[0].NodeID != "node_requester" {
+		t.Fatalf("pending trust response = %+v, want node_requester", pending)
+	}
+
+	allowReq := httptest.NewRequest(http.MethodPost, "/api/trust/allow?node_id=node_owner", strings.NewReader(`{"node_id":"node_requester"}`))
+	allowReq.Header.Set("Authorization", "Bearer owner_secret")
+	allowRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(allowRec, allowReq)
+	if allowRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/trust/allow status = %d, want %d; body=%q", allowRec.Code, http.StatusOK, allowRec.Body.String())
+	}
+	allowed, err := server.store.CanAccessNode("node_owner", "node_requester")
+	if err != nil {
+		t.Fatalf("CanAccessNode: %v", err)
+	}
+	if !allowed {
+		t.Fatal("requester cannot access owner after allow")
+	}
+}
+
 func TestServerInviteAPICreatesInviteForAdminNode(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "laptop", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
@@ -566,6 +609,7 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	if _, err := server.store.UpsertNode("node_2", "server1", hashSecret("node_secret_2"), "1.0.0", "linux", "amd64"); err != nil {
 		t.Fatalf("UpsertNode node_2: %v", err)
 	}
+	allowTestTrust(t, server, "node_1", "node_2")
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 	first := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret_1")
@@ -610,6 +654,36 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketBlocksUntrustedSnapshotFanout(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret_1"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode node_1: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_2", "server1", hashSecret("node_secret_2"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode node_2: %v", err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	first := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret_1")
+	defer first.Close()
+	readTestWelcome(t, first)
+	second := dialTestNodeWebSocket(t, httpServer.URL, "node_2", "node_secret_2")
+	defer second.Close()
+	readTestWelcome(t, second)
+
+	snapshot, err := MarshalEnvelope(MsgSnapshot, "node_1", SnapshotPayload{
+		SentAt:   time.Unix(125, 0).UTC(),
+		Sessions: []SessionInfo{{ID: "s1", Title: "worker", Status: "waiting"}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope snapshot: %v", err)
+	}
+	if err := first.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON snapshot: %v", err)
+	}
+	expectNoTestEnvelope(t, second, 150*time.Millisecond)
+}
+
 func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_requester", "laptop", hashSecret("requester_secret"), "1.0.0", "linux", "amd64"); err != nil {
@@ -618,6 +692,7 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
 		t.Fatalf("UpsertNode owner: %v", err)
 	}
+	allowTestTrust(t, server, "node_owner", "node_requester")
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
@@ -702,6 +777,7 @@ func TestHubNodeWebSocketRoutesCommandRelay(t *testing.T) {
 	if _, err := server.store.UpsertNode("node_owner", "workstation", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
 		t.Fatalf("UpsertNode owner: %v", err)
 	}
+	allowTestTrust(t, server, "node_owner", "node_requester")
 	httpServer := httptest.NewServer(server.Handler())
 	defer httpServer.Close()
 	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
@@ -926,6 +1002,25 @@ func readTestEnvelope(t *testing.T, conn *websocket.Conn) Envelope {
 		t.Fatalf("ReadJSON envelope: %v", err)
 	}
 	return env
+}
+
+func expectNoTestEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	var env Envelope
+	if err := conn.ReadJSON(&env); err == nil {
+		t.Fatalf("unexpected envelope = %+v", env)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+}
+
+func allowTestTrust(t *testing.T, server *Server, ownerNodeID, requesterNodeID string) {
+	t.Helper()
+	if err := server.store.AllowTrust(ownerNodeID, requesterNodeID); err != nil {
+		t.Fatalf("AllowTrust %s <- %s: %v", ownerNodeID, requesterNodeID, err)
+	}
 }
 
 func waitNodeStatus(t *testing.T, server *Server, nodeID, want string) {

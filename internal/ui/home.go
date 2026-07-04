@@ -562,16 +562,18 @@ type Home struct {
 
 	// Hub sessions are projected inline as <node> / <group> and are distinct
 	// from SSH remotes, which keep their remotes/<name> behavior.
-	hubConfigured    bool
-	hubLocalNodeID   string
-	hubLocalNodeName string
-	hubClient        hubClientAPI
-	hubStarter       hubStarter
-	hubSessions      map[string]hub.NodeSessions // nodeID -> latest snapshot
-	hubSessionsMu    sync.RWMutex
-	hubStatus        string
-	hubStatusMu      sync.Mutex
-	hubSnapshotCh    chan hubSnapshotMsg
+	hubConfigured     bool
+	hubLocalNodeID    string
+	hubLocalNodeName  string
+	hubClient         hubClientAPI
+	hubStarter        hubStarter
+	hubSessions       map[string]hub.NodeSessions // nodeID -> latest snapshot
+	hubSessionsMu     sync.RWMutex
+	hubStatus         string
+	hubStatusMu       sync.Mutex
+	hubSnapshotCh     chan hubSnapshotMsg
+	hubTrustRequestCh chan hubTrustRequestMsg
+	hubTrustQueue     []hub.TrustRequestPayload
 
 	// Cost tracking
 	costStore            *costs.Store
@@ -942,13 +944,24 @@ type statusUpdateMsg struct {
 type hubClientAPI interface {
 	Attach(context.Context, string, string, hub.TerminalSize) error
 	Command(context.Context, string, string, any) (json.RawMessage, error)
+	TrustDecision(context.Context, string, bool) error
 	Close() error
 }
 
-type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions)) (hubClientAPI, error)
+type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions), func(hub.TrustRequestPayload)) (hubClientAPI, error)
 
 type hubSnapshotMsg struct {
 	snapshot hub.NodeSessions
+}
+
+type hubTrustRequestMsg struct {
+	request hub.TrustRequestPayload
+}
+
+type hubTrustDecisionResultMsg struct {
+	nodeID string
+	allow  bool
+	err    error
 }
 
 type hubAttachResultMsg struct {
@@ -1247,6 +1260,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		hubSessions:               make(map[string]hub.NodeSessions),
 		hubStarter:                startHubClient,
 		hubSnapshotCh:             make(chan hubSnapshotMsg, 64),
+		hubTrustRequestCh:         make(chan hubTrustRequestMsg, 64),
 	}
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
 
@@ -1552,7 +1566,7 @@ func (h *Home) configureHubFromConfig(config *session.UserConfig) {
 	if starter == nil {
 		starter = startHubClient
 	}
-	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus, h.handleHubSnapshot)
+	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus, h.handleHubSnapshot, h.handleHubTrustRequest)
 	if err != nil {
 		h.setHubStatus("hub offline")
 		uiLog.Warn("hub_autoconnect_start_failed", slog.String("error", err.Error()))
@@ -1622,6 +1636,82 @@ func (h *Home) drainHubSnapshots() bool {
 	}
 }
 
+func (h *Home) handleHubTrustRequest(request hub.TrustRequestPayload) {
+	if h.hubTrustRequestCh == nil {
+		return
+	}
+	select {
+	case h.hubTrustRequestCh <- hubTrustRequestMsg{request: request}:
+	default:
+		uiLog.Warn("hub_trust_request_queue_full", slog.String("node_id", request.NodeID))
+	}
+}
+
+func (h *Home) applyHubTrustRequest(request hub.TrustRequestPayload) {
+	request.NodeID = strings.TrimSpace(request.NodeID)
+	if request.NodeID == "" {
+		return
+	}
+	if strings.TrimSpace(request.NodeName) == "" {
+		request.NodeName = request.NodeID
+	}
+	if h.confirmDialog != nil && h.confirmDialog.IsVisible() {
+		h.hubTrustQueue = append(h.hubTrustQueue, request)
+		h.setHubStatus("hub trust pending")
+		return
+	}
+	h.showHubTrustRequest(request)
+}
+
+func (h *Home) drainHubTrustRequests() bool {
+	if h.hubTrustRequestCh == nil {
+		return false
+	}
+	changed := false
+	for {
+		select {
+		case msg := <-h.hubTrustRequestCh:
+			h.applyHubTrustRequest(msg.request)
+			changed = true
+		default:
+			return changed
+		}
+	}
+}
+
+func (h *Home) showHubTrustRequest(request hub.TrustRequestPayload) {
+	if h.confirmDialog == nil {
+		h.confirmDialog = NewConfirmDialog()
+	}
+	h.confirmDialog.ShowHubTrustNode(request.NodeID, request.NodeName)
+	h.setHubStatus("hub trust pending")
+}
+
+func (h *Home) showNextHubTrustRequest() {
+	if len(h.hubTrustQueue) == 0 {
+		return
+	}
+	next := h.hubTrustQueue[0]
+	copy(h.hubTrustQueue, h.hubTrustQueue[1:])
+	h.hubTrustQueue = h.hubTrustQueue[:len(h.hubTrustQueue)-1]
+	h.showHubTrustRequest(next)
+}
+
+func (h *Home) confirmHubTrustDecision(allow bool) tea.Cmd {
+	nodeID := h.confirmDialog.GetTargetID()
+	h.confirmDialog.Hide()
+	h.showNextHubTrustRequest()
+	client := h.hubClient
+	if client == nil {
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	return func() tea.Msg {
+		err := client.TrustDecision(context.Background(), nodeID, allow)
+		return hubTrustDecisionResultMsg{nodeID: nodeID, allow: allow, err: err}
+	}
+}
+
 type runningHubClient struct {
 	client *hub.Client
 	cancel context.CancelFunc
@@ -1642,6 +1732,13 @@ func (c *runningHubClient) Command(ctx context.Context, nodeID, action string, p
 	return c.client.Command(ctx, nodeID, action, payload)
 }
 
+func (c *runningHubClient) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.TrustDecision(ctx, nodeID, allow)
+}
+
 func (c *runningHubClient) Close() error {
 	if c == nil {
 		return nil
@@ -1655,7 +1752,7 @@ func (c *runningHubClient) Close() error {
 	return nil
 }
 
-func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions)) (hubClientAPI, error) {
+func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions), onTrustRequest func(hub.TrustRequestPayload)) (hubClientAPI, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -1694,7 +1791,8 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 				setStatus("hub " + strings.TrimSpace(status))
 			}
 		},
-		OnSnapshot: onSnapshot,
+		OnSnapshot:     onSnapshot,
+		OnTrustRequest: onTrustRequest,
 	}, hub.LocalSessionSource{Profile: profile})
 
 	handle := &runningHubClient{client: client, cancel: cancel, done: make(chan struct{})}
@@ -5897,6 +5995,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItemsPreservingSelection(selectedBefore)
 		return h, nil
 
+	case hubTrustRequestMsg:
+		h.applyHubTrustRequest(msg.request)
+		return h, nil
+
 	case remoteLatenciesFetchedMsg:
 		h.remoteLatencyMu.Lock()
 		if h.remoteLatency == nil {
@@ -6139,6 +6241,19 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.action != "" {
 			h.setHubStatus("hub " + msg.action + " sent")
+		}
+		return h, nil
+
+	case hubTrustDecisionResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub trust failed")
+			h.setError(fmt.Errorf("hub trust: %w", msg.err))
+			return h, nil
+		}
+		if msg.allow {
+			h.setHubStatus("hub trust allowed")
+		} else {
+			h.setHubStatus("hub trust denied")
 		}
 		return h, nil
 
@@ -6603,6 +6718,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var remoteFetchCmd tea.Cmd
 		var remoteLatencyCmd tea.Cmd
 
+		h.drainHubTrustRequests()
 		if h.drainHubSnapshots() {
 			selectedBefore := h.captureSelectedItemIdentity()
 			h.rebuildFlatItemsPreservingSelection(selectedBefore)
@@ -9499,6 +9615,22 @@ func (h *Home) handleConfirmDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter", "esc", "o", "O", "y", "Y", "n", "N", " ":
 			h.confirmDialog.Hide()
+			return h, nil
+		}
+		return h, nil
+
+	case ConfirmHubTrustNode:
+		switch msg.String() {
+		case "y", "Y":
+			return h, h.confirmHubTrustDecision(true)
+		case "n", "N":
+			return h, h.confirmHubTrustDecision(false)
+		case "enter":
+			return h, h.confirmHubTrustDecision(h.confirmDialog.GetFocusedButton() == 0)
+		case "esc":
+			h.confirmDialog.Hide()
+			h.setHubStatus("hub trust pending")
+			h.showNextHubTrustRequest()
 			return h, nil
 		}
 		return h, nil

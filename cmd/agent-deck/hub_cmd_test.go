@@ -821,6 +821,117 @@ func TestHubInvitesRevokeUsesConfiguredAdminNode(t *testing.T) {
 	}
 }
 
+func TestHubTrustPendingUsesConfiguredNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan struct{}, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/trust/pending" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_owner" {
+			t.Errorf("node_id = %q, want node_owner", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer owner_secret" {
+			t.Errorf("Authorization = %q, want bearer owner token", got)
+		}
+		seen <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"requests": []map[string]any{{
+				"node_id":   "node_joining",
+				"node_name": "new laptop",
+				"status":    "pending",
+				"os":        "linux",
+				"arch":      "amd64",
+			}},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_owner", "owner_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubTrust([]string{"pending"}); err != nil {
+			t.Fatalf("handleHubTrust pending: %v", err)
+		}
+	})
+	if !strings.Contains(out, "node_joining") || !strings.Contains(out, "new laptop") || !strings.Contains(out, "pending") {
+		t.Fatalf("trust pending output = %q, want request", out)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("hub trust pending did not call configured hub")
+	}
+}
+
+func TestHubTrustAllowUsesConfiguredNode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	seen := make(chan string, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/trust/allow" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_owner" {
+			t.Errorf("node_id = %q, want node_owner", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer owner_secret" {
+			t.Errorf("Authorization = %q, want bearer owner token", got)
+		}
+		var req struct {
+			NodeID string `json:"node_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		seen <- req.NodeID
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]bool{"ok": true}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+	writeTestHubConfig(t, home, server, "node_owner", "owner_secret")
+
+	out := captureStdout(t, func() {
+		if err := handleHubTrust([]string{"allow", "node_joining"}); err != nil {
+			t.Fatalf("handleHubTrust allow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Allowed") || !strings.Contains(out, "node_joining") {
+		t.Fatalf("trust allow output = %q, want allow confirmation", out)
+	}
+	select {
+	case got := <-seen:
+		if got != "node_joining" {
+			t.Fatalf("allow request node_id = %q, want node_joining", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hub trust allow did not call configured hub")
+	}
+}
+
 func TestHubInviteErrorsWhenHubURLIsNotConfigured(t *testing.T) {
 	err := handleHubInvite([]string{"--data", t.TempDir(), "laptop"})
 	if err == nil {

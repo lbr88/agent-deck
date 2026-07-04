@@ -171,6 +171,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/nodes/demote", s.handleDemoteNode)
 	mux.HandleFunc("/api/nodes/rename", s.handleRenameNode)
 	mux.HandleFunc("/api/nodes/revoke", s.handleRevokeNode)
+	mux.HandleFunc("/api/trust/pending", s.handlePendingTrust)
+	mux.HandleFunc("/api/trust/allow", s.handleAllowTrust)
+	mux.HandleFunc("/api/trust/deny", s.handleDenyTrust)
 	mux.HandleFunc("/ws/node", s.handleNodeWebSocket)
 	return mux
 }
@@ -250,6 +253,11 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	trustRequests, err := s.store.CreatePendingTrustRequestsForNewNode(node.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, joinResponse{
 		URL:       s.hubURLForRequest(r),
@@ -257,6 +265,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		NodeName:  node.Name,
 		NodeToken: nodeToken,
 	})
+	s.notifyTrustRequests(trustRequests)
 }
 
 type createInviteRequest struct {
@@ -398,6 +407,14 @@ type nodeResponse struct {
 	Status     string     `json:"status"`
 	Admin      bool       `json:"admin"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+}
+
+type trustRequestsResponse struct {
+	Requests []TrustRequestPayload `json:"requests"`
+}
+
+type trustDecisionRequest struct {
+	NodeID string `json:"node_id"`
 }
 
 func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
@@ -693,6 +710,83 @@ func nodeResponseFromNode(node Node) nodeResponse {
 	}
 }
 
+func (s *Server) handlePendingTrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	node, err := s.authenticateNodeRequest(r)
+	if err != nil {
+		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
+		return
+	}
+	requests, err := s.store.PendingTrustRequests(node.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, trustRequestsResponse{Requests: trustRequestPayloads(requests)})
+}
+
+func (s *Server) handleAllowTrust(w http.ResponseWriter, r *http.Request) {
+	s.handleSetTrustDecision(w, r, true)
+}
+
+func (s *Server) handleDenyTrust(w http.ResponseWriter, r *http.Request) {
+	s.handleSetTrustDecision(w, r, false)
+}
+
+func (s *Server) handleSetTrustDecision(w http.ResponseWriter, r *http.Request, allow bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	owner, err := s.authenticateNodeRequest(r)
+	if err != nil {
+		http.Error(w, ErrNodeNotAuthenticated.Error(), http.StatusUnauthorized)
+		return
+	}
+	var req trustDecisionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid trust decision request JSON", http.StatusBadRequest)
+		return
+	}
+	req.NodeID = strings.TrimSpace(req.NodeID)
+	if req.NodeID == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.setTrustDecision(owner.ID, req.NodeID, allow); err != nil {
+		if errors.Is(err, ErrNodeNotFound) {
+			http.Error(w, "hub node not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func trustRequestPayloads(requests []TrustRequest) []TrustRequestPayload {
+	out := make([]TrustRequestPayload, 0, len(requests))
+	for _, request := range requests {
+		out = append(out, trustRequestPayload(request))
+	}
+	return out
+}
+
+func trustRequestPayload(request TrustRequest) TrustRequestPayload {
+	return TrustRequestPayload{
+		NodeID:   request.Requester.ID,
+		NodeName: request.Requester.Name,
+		Version:  request.Requester.Version,
+		OS:       request.Requester.OS,
+		Arch:     request.Requester.Arch,
+		Status:   string(request.Status),
+	}
+}
+
 func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -725,6 +819,9 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		_ = s.writePeerJSON(peer, welcome)
+	}
+	if err := s.sendPendingTrustRequests(peer, node.ID); err != nil {
+		return
 	}
 	if err := s.sendLatestSnapshots(peer); err != nil {
 		return
@@ -779,6 +876,13 @@ func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPee
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
 			return fmt.Errorf("decode attach open: %w", err)
 		}
+		allowed, err := s.canPeerAccessNode(peer, payload.NodeID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return s.sendAttachTrustDenied(peer, payload)
+		}
 		return s.attachRouter.OpenFromPeer(ctx, peer, payload.NodeID, payload)
 	case MsgAttachReady:
 		var payload AttachOpenPayload
@@ -822,6 +926,12 @@ func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPee
 			return fmt.Errorf("decode command result: %w", err)
 		}
 		return s.routeCommandResultFromPeer(peer, payload)
+	case MsgTrustDecision:
+		var payload TrustDecisionPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return fmt.Errorf("decode trust decision: %w", err)
+		}
+		return s.handleTrustDecisionFromPeer(peer, payload)
 	default:
 		return nil
 	}
@@ -915,6 +1025,15 @@ func (s *Server) routeCommandFromPeer(ctx context.Context, requester Peer, paylo
 	}
 	if requester == nil || strings.TrimSpace(requester.NodeID()) == "" || strings.TrimSpace(requester.PeerID()) == "" {
 		return fmt.Errorf("command requester peer is required")
+	}
+	allowed, err := s.canRequesterAccessNode(requester.NodeID(), targetNodeID)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		err := fmt.Errorf("hub trust is required for node %q", targetNodeID)
+		s.sendCommandFailure(requester, targetNodeID, commandID, err)
+		return err
 	}
 
 	if s.attachRouter == nil {
@@ -1044,12 +1163,155 @@ func (s *Server) sendCommandFailure(requester Peer, ownerNodeID, commandID strin
 	}
 }
 
+func (s *Server) canPeerAccessNode(peer *hubPeer, ownerNodeID string) (bool, error) {
+	if peer == nil {
+		return false, nil
+	}
+	return s.canRequesterAccessNode(peer.nodeID, ownerNodeID)
+}
+
+func (s *Server) canRequesterAccessNode(requesterNodeID, ownerNodeID string) (bool, error) {
+	requesterNodeID = strings.TrimSpace(requesterNodeID)
+	ownerNodeID = strings.TrimSpace(ownerNodeID)
+	if requesterNodeID == "" || ownerNodeID == "" {
+		return false, nil
+	}
+	if s.store == nil {
+		return true, nil
+	}
+	return s.store.CanAccessNode(ownerNodeID, requesterNodeID)
+}
+
+func (s *Server) sendAttachTrustDenied(peer *hubPeer, payload AttachOpenPayload) error {
+	reason := fmt.Sprintf("hub trust is required for node %q", strings.TrimSpace(payload.NodeID))
+	env, err := MarshalEnvelope(MsgAttachClosed, payload.NodeID, AttachClosePayload{
+		StreamID: payload.StreamID,
+		Reason:   reason,
+	})
+	if err != nil {
+		return err
+	}
+	_ = s.writePeerJSON(peer, env)
+	return nil
+}
+
+func (s *Server) sendPendingTrustRequests(peer *hubPeer, ownerNodeID string) error {
+	if s.store == nil {
+		return nil
+	}
+	requests, err := s.store.PendingTrustRequests(ownerNodeID)
+	if err != nil {
+		return err
+	}
+	for _, request := range requests {
+		env, err := MarshalEnvelope(MsgTrustRequest, ownerNodeID, trustRequestPayload(request))
+		if err != nil {
+			return err
+		}
+		if err := s.writePeerJSON(peer, env); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) notifyTrustRequests(requests []TrustRequest) {
+	for _, request := range requests {
+		env, err := MarshalEnvelope(MsgTrustRequest, request.Owner.ID, trustRequestPayload(request))
+		if err != nil {
+			continue
+		}
+		for _, peer := range s.connectedPeersForNode(request.Owner.ID) {
+			_ = s.writePeerJSON(peer, env)
+		}
+	}
+}
+
+func (s *Server) handleTrustDecisionFromPeer(peer *hubPeer, payload TrustDecisionPayload) error {
+	if peer == nil {
+		return fmt.Errorf("trust decision peer is required")
+	}
+	requesterNodeID := strings.TrimSpace(payload.NodeID)
+	if requesterNodeID == "" {
+		return fmt.Errorf("trust decision node_id is required")
+	}
+	return s.setTrustDecision(peer.nodeID, requesterNodeID, payload.Allow)
+}
+
+func (s *Server) setTrustDecision(ownerNodeID, requesterNodeID string, allow bool) error {
+	var err error
+	if allow {
+		err = s.store.AllowTrust(ownerNodeID, requesterNodeID)
+	} else {
+		err = s.store.DenyTrust(ownerNodeID, requesterNodeID)
+	}
+	if err != nil {
+		return err
+	}
+	if allow {
+		s.sendLatestSnapshotToNode(ownerNodeID, requesterNodeID)
+	}
+	return nil
+}
+
+func (s *Server) sendLatestSnapshotToNode(ownerNodeID, requesterNodeID string) {
+	if s.store == nil {
+		return
+	}
+	snapshots, err := s.store.LatestSessions()
+	if err != nil {
+		return
+	}
+	for _, latest := range snapshots {
+		if latest.Node.ID != ownerNodeID {
+			continue
+		}
+		payload := SnapshotPayload{
+			NodeID:   latest.Node.ID,
+			NodeName: latest.Node.Name,
+			SentAt:   latest.SentAt,
+			Sessions: append([]SessionInfo(nil), latest.Sessions...),
+		}
+		env, err := MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
+		if err != nil {
+			return
+		}
+		for _, peer := range s.connectedPeersForNode(requesterNodeID) {
+			_ = s.writePeerJSON(peer, env)
+		}
+		return
+	}
+}
+
+func (s *Server) connectedPeersForNode(nodeID string) []*hubPeer {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	peers := make([]*hubPeer, 0)
+	for peer := range s.peers {
+		if peer.nodeID == nodeID {
+			peers = append(peers, peer)
+		}
+	}
+	return peers
+}
+
 func (s *Server) sendLatestSnapshots(peer *hubPeer) error {
 	snapshots, err := s.store.LatestSessions()
 	if err != nil {
 		return err
 	}
 	for _, latest := range snapshots {
+		allowed, err := s.canRequesterAccessNode(peer.nodeID, latest.Node.ID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
 		payload := SnapshotPayload{
 			NodeID:   latest.Node.ID,
 			NodeName: latest.Node.Name,
@@ -1084,6 +1346,10 @@ func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload
 	s.mu.Unlock()
 
 	for _, peer := range peers {
+		allowed, err := s.canRequesterAccessNode(peer.nodeID, originNodeID)
+		if err != nil || !allowed {
+			continue
+		}
 		_ = s.writePeerJSON(peer, env)
 	}
 }
