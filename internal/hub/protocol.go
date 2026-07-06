@@ -10,7 +10,7 @@ import (
 const ProtocolVersion = 1
 
 const (
-	MaxAttachFrameBytes = 256 * 1024
+	MaxAttachFrameBytes = 4 * 1024 * 1024
 	maxHubEnvelopeBytes = 8 * 1024 * 1024
 )
 

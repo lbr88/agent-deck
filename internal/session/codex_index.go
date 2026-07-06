@@ -2,15 +2,19 @@ package session
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // CodexIndexEntry is the latest known display metadata for a saved Codex session.
@@ -66,19 +70,42 @@ func GetCodexHomeDirForCommand(command string) string {
 }
 
 // ListCodexIndex reads CODEX_HOME/session_index.jsonl and returns the latest
-// record for each Codex session ID, newest first.
+// record for each Codex session ID, newest first. Modern Codex stores resume
+// picker metadata in state_5.sqlite, so this also merges that thread index when
+// it is present.
 func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
-	path := filepath.Join(codexHome, "session_index.jsonl")
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+	latest := make(map[string]CodexIndexEntry)
+
+	if err := readCodexJSONIndex(codexHome, latest); err != nil {
+		return nil, err
 	}
+	stateEntries, err := listCodexStateThreads(codexHome)
 	if err != nil {
 		return nil, err
 	}
+	for _, entry := range stateEntries {
+		mergeCodexIndexEntry(latest, entry)
+	}
+
+	entries := make([]CodexIndexEntry, 0, len(latest))
+	for _, entry := range latest {
+		entries = append(entries, entry)
+	}
+	sortCodexIndexEntries(entries)
+	return entries, nil
+}
+
+func readCodexJSONIndex(codexHome string, latest map[string]CodexIndexEntry) error {
+	path := filepath.Join(codexHome, "session_index.jsonl")
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 
-	latest := make(map[string]CodexIndexEntry)
 	scanner := bufio.NewScanner(f)
 	lineNo := 0
 	for scanner.Scan() {
@@ -89,11 +116,11 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 		}
 		var raw codexIndexLine
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			return nil, fmt.Errorf("parse %s line %d: %w", path, lineNo, err)
+			return fmt.Errorf("parse %s line %d: %w", path, lineNo, err)
 		}
 		updatedAt, err := time.Parse(time.RFC3339Nano, raw.UpdatedAt)
 		if err != nil {
-			return nil, fmt.Errorf("parse %s line %d updated_at: %w", path, lineNo, err)
+			return fmt.Errorf("parse %s line %d updated_at: %w", path, lineNo, err)
 		}
 		id := strings.ToLower(strings.TrimSpace(raw.ID))
 		if !isCodexSessionUUID(id) {
@@ -105,22 +132,124 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 			Path:       firstNonEmpty(raw.CWD, raw.Path, raw.ProjectPath),
 			UpdatedAt:  updatedAt,
 		}
-		if prev, ok := latest[id]; !ok || entry.UpdatedAt.After(prev.UpdatedAt) {
-			latest[id] = entry
-		}
+		mergeCodexIndexEntry(latest, entry)
 	}
 	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func listCodexStateThreads(codexHome string) ([]CodexIndexEntry, error) {
+	path := filepath.Join(codexHome, "state_5.sqlite")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
 		return nil, err
 	}
 
-	entries := make([]CodexIndexEntry, 0, len(latest))
-	for _, entry := range latest {
-		entries = append(entries, entry)
+	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
+	if err != nil {
+		return nil, err
 	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT id, title, preview, cwd, updated_at, updated_at_ms, recency_at, recency_at_ms
+		FROM threads
+		WHERE COALESCE(archived, 0) = 0
+	`)
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []CodexIndexEntry
+	for rows.Next() {
+		var id, title, preview, cwd sql.NullString
+		var updatedAt, updatedAtMS, recencyAt, recencyAtMS sql.NullInt64
+		if err := rows.Scan(&id, &title, &preview, &cwd, &updatedAt, &updatedAtMS, &recencyAt, &recencyAtMS); err != nil {
+			return nil, err
+		}
+		sessionID := strings.ToLower(strings.TrimSpace(id.String))
+		if !isCodexSessionUUID(sessionID) {
+			continue
+		}
+		entries = append(entries, CodexIndexEntry{
+			ID:         sessionID,
+			ThreadName: firstNonEmpty(title.String, preview.String),
+			Path:       cwd.String,
+			UpdatedAt:  codexStateThreadTime(recencyAtMS, updatedAtMS, recencyAt, updatedAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func codexSQLiteReadOnlyDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(5000)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func isMissingCodexStateSchema(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such table") || strings.Contains(msg, "no such column")
+}
+
+func codexStateThreadTime(values ...sql.NullInt64) time.Time {
+	for i, value := range values {
+		if !value.Valid || value.Int64 <= 0 {
+			continue
+		}
+		if i < 2 {
+			return time.UnixMilli(value.Int64).UTC()
+		}
+		return time.Unix(value.Int64, 0).UTC()
+	}
+	return time.Time{}
+}
+
+func mergeCodexIndexEntry(latest map[string]CodexIndexEntry, entry CodexIndexEntry) {
+	entry.ID = strings.ToLower(strings.TrimSpace(entry.ID))
+	if !isCodexSessionUUID(entry.ID) {
+		return
+	}
+	if prev, ok := latest[entry.ID]; ok {
+		if entry.UpdatedAt.After(prev.UpdatedAt) {
+			if strings.TrimSpace(entry.ThreadName) == "" {
+				entry.ThreadName = prev.ThreadName
+			}
+			if strings.TrimSpace(entry.Path) == "" {
+				entry.Path = prev.Path
+			}
+			latest[entry.ID] = entry
+			return
+		}
+		if strings.TrimSpace(prev.ThreadName) == "" && strings.TrimSpace(entry.ThreadName) != "" {
+			prev.ThreadName = entry.ThreadName
+		}
+		if strings.TrimSpace(prev.Path) == "" && strings.TrimSpace(entry.Path) != "" {
+			prev.Path = entry.Path
+		}
+		latest[entry.ID] = prev
+		return
+	}
+	latest[entry.ID] = entry
+}
+
+func sortCodexIndexEntries(entries []CodexIndexEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
 	})
-	return entries, nil
 }
 
 func isCodexSessionUUID(id string) bool {

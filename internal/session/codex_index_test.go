@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestListCodexIndexLatestRecordWins(t *testing.T) {
@@ -69,6 +72,51 @@ func TestListCodexIndexMissingFileReturnsEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("entries = %#v, want empty", got)
+	}
+}
+
+func TestListCodexIndexMergesModernCodexStateThreads(t *testing.T) {
+	home := t.TempDir()
+	id := "33333333-3333-3333-3333-333333333333"
+	projectPath := "/home/user/git/domutech/domain-monitor"
+	writeCodexStateThread(t, home, id, "domain-monitor health checks", "staging lambda details", projectPath, 1783330000000)
+
+	got, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %#v, want one modern state thread", got)
+	}
+	if got[0].ID != id || got[0].ThreadName != "domain-monitor health checks" || got[0].Path != projectPath {
+		t.Fatalf("entry = %#v, want id/title/path from state thread", got[0])
+	}
+	if got[0].UpdatedAt.UnixMilli() != 1783330000000 {
+		t.Fatalf("UpdatedAt = %s, want unix ms 1783330000000", got[0].UpdatedAt)
+	}
+}
+
+func TestListCodexIndexModernStateFillsLegacyPath(t *testing.T) {
+	home := t.TempDir()
+	id := "44444444-4444-4444-4444-444444444444"
+	projectPath := "/home/user/git/domutech/domain-monitor"
+	writeCodexIndex(t, home,
+		`{"id":"`+id+`","thread_name":"legacy title","updated_at":"2026-06-30T10:00:00Z"}`,
+	)
+	writeCodexStateThread(t, home, id, "", "state preview", projectPath, time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC).UnixMilli())
+
+	got, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("entries = %#v, want one merged entry", got)
+	}
+	if got[0].ThreadName != "legacy title" {
+		t.Fatalf("ThreadName = %q, want legacy title", got[0].ThreadName)
+	}
+	if got[0].Path != projectPath {
+		t.Fatalf("Path = %q, want state cwd %q", got[0].Path, projectPath)
 	}
 }
 
@@ -279,5 +327,48 @@ func writeCodexRolloutBody(t *testing.T, home, sessionID, body string) {
 	path := filepath.Join(dir, "rollout-2026-06-30T10-00-00-"+sessionID+".jsonl")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("write codex rollout: %v", err)
+	}
+}
+
+func writeCodexStateThread(t *testing.T, home, id, title, preview, cwd string, updatedAtMS int64) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir codex home: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(home, "state_5.sqlite"))
+	if err != nil {
+		t.Fatalf("open codex state sqlite: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`
+		CREATE TABLE threads (
+			id TEXT PRIMARY KEY,
+			rollout_path TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL DEFAULT '',
+			model_provider TEXT NOT NULL DEFAULT '',
+			cwd TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			sandbox_policy TEXT NOT NULL DEFAULT '',
+			approval_mode TEXT NOT NULL DEFAULT '',
+			tokens_used INTEGER NOT NULL DEFAULT 0,
+			has_user_event INTEGER NOT NULL DEFAULT 0,
+			archived INTEGER NOT NULL DEFAULT 0,
+			preview TEXT NOT NULL DEFAULT '',
+			recency_at INTEGER NOT NULL DEFAULT 0,
+			recency_at_ms INTEGER NOT NULL DEFAULT 0,
+			updated_at_ms INTEGER
+		)
+	`)
+	if err != nil {
+		t.Fatalf("create codex threads table: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO threads (id, title, preview, cwd, updated_at, updated_at_ms, recency_at, recency_at_ms, archived)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+	`, id, title, preview, cwd, updatedAtMS/1000, updatedAtMS, updatedAtMS/1000, updatedAtMS)
+	if err != nil {
+		t.Fatalf("insert codex thread: %v", err)
 	}
 }

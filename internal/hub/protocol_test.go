@@ -55,6 +55,17 @@ func TestAttachDataIsBase64TerminalBytes(t *testing.T) {
 	}
 }
 
+func TestAttachDataAcceptsLargeTerminalImagePayload(t *testing.T) {
+	frame := NewAttachData("str_1", bytes.Repeat([]byte("x"), 1024*1024))
+	data, err := frame.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes rejected terminal image-sized payload: %v", err)
+	}
+	if len(data) != 1024*1024 {
+		t.Fatalf("decoded size = %d, want 1 MiB", len(data))
+	}
+}
+
 func TestAttachDataRejectsOversizedPayload(t *testing.T) {
 	frame := NewAttachData("str_1", bytes.Repeat([]byte("x"), MaxAttachFrameBytes+1))
 	if _, err := frame.Bytes(); err == nil {
