@@ -85,6 +85,44 @@ func TestHubSessionsRespectStatusFilterAndRenderWithoutPanic(t *testing.T) {
 	}
 }
 
+func TestActiveTopPlacesHubWaitingAboveIdleDivider(t *testing.T) {
+	local := session.NewInstanceWithTool("local-active", "/tmp/local-active", "claude")
+	local.Status = session.StatusRunning
+	local.GroupPath = "local"
+	idle := session.NewInstanceWithTool("local-idle", "/tmp/local-idle", "claude")
+	idle.Status = session.StatusIdle
+	idle.GroupPath = "local"
+
+	h := newHubProjectionHome(t, []*session.Instance{local, idle})
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{
+				{ID: "hub-waiting", Title: "remote needs input", Tool: "claude", Status: "waiting", GroupPath: "ops"},
+				{ID: "hub-idle", Title: "remote quiet", Tool: "claude", Status: "idle", GroupPath: "ops"},
+			},
+		},
+	}
+
+	h.groupViewMode = session.GroupViewActiveTop
+	h.rebuildFlatItems()
+
+	div := dividerIndex(h)
+	waiting := hubSessionIndexByID(h, "hub-waiting")
+	idleIdx := hubSessionIndexByID(h, "hub-idle")
+	if div < 0 {
+		t.Fatalf("expected active-top divider with local active and idle sessions")
+	}
+	if waiting < 0 || waiting >= div {
+		t.Fatalf("waiting hub session must be above idle divider: waiting=%d divider=%d\nitems=%#v", waiting, div, h.flatItems)
+	}
+	if idleIdx < 0 || idleIdx <= div {
+		t.Fatalf("idle hub session must be below idle divider: idle=%d divider=%d\nitems=%#v", idleIdx, div, h.flatItems)
+	}
+}
+
 func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true

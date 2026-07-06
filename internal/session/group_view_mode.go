@@ -149,23 +149,52 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 		return items
 	}
 
+	isSessionRow := func(it Item) bool {
+		return it.Type == ItemTypeSession || it.Type == ItemTypeRemoteSession || it.Type == ItemTypeHubSession
+	}
+	isGroupRow := func(it Item) bool {
+		return it.Type == ItemTypeGroup || it.Type == ItemTypeRemoteGroup || it.Type == ItemTypeHubGroup
+	}
+	itemStatus := func(it Item) Status {
+		switch it.Type {
+		case ItemTypeSession:
+			if it.Session != nil {
+				return it.Session.Status
+			}
+		case ItemTypeRemoteSession:
+			if it.RemoteSession != nil {
+				return Status(strings.TrimSpace(it.RemoteSession.Status))
+			}
+		case ItemTypeHubSession:
+			if it.HubSession != nil {
+				return Status(strings.TrimSpace(it.HubSession.Status))
+			}
+		}
+		return ""
+	}
+
 	// sessionGoesTop classifies a single session item.
 	sessionGoesTop := func(it Item) bool {
-		if it.Session == nil {
+		if !isSessionRow(it) {
 			return true
 		}
-		// Pin overrides the status split (pin-sessions, requirement 3 "fully
-		// fixed"): a pin-top session stays in the top section even when idle, a
-		// pin-bottom session sinks even when active.
-		switch it.Session.Pin {
-		case PinTop:
-			return true
-		case PinBottom:
-			return false
+		if it.Type == ItemTypeSession {
+			if it.Session == nil {
+				return true
+			}
+			// Pin overrides the status split (pin-sessions, requirement 3 "fully
+			// fixed"): a pin-top session stays in the top section even when idle, a
+			// pin-bottom session sinks even when active.
+			switch it.Session.Pin {
+			case PinTop:
+				return true
+			case PinBottom:
+				return false
+			}
 		}
 		switch mode {
 		case GroupViewActiveTop:
-			return isActiveStatus(it.Session.Status)
+			return isActiveStatus(itemStatus(it))
 		case GroupViewPopulatedTop:
 			return true // every real session is "top"; only empty groups sink
 		}
@@ -176,7 +205,7 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 	hasTopRow := make(map[string]bool)
 	hasBottomRow := make(map[string]bool)
 	for _, it := range items {
-		if it.Type != ItemTypeSession || it.Session == nil {
+		if !isSessionRow(it) {
 			continue
 		}
 		if sessionGoesTop(it) {
@@ -197,7 +226,7 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 	if mode == GroupViewPopulatedTop {
 		var sink []string
 		for _, it := range items {
-			if it.Type != ItemTypeGroup {
+			if !isGroupRow(it) {
 				continue
 			}
 			if hasTopRow[it.Path] || hasBottomRow[it.Path] || activity[it.Path].HasAny {
@@ -217,10 +246,14 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 	bottom := make([]Item, 0, len(items))
 	for _, it := range items {
 		switch it.Type {
-		case ItemTypeGroup:
+		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubGroup:
 			inTop := hasTopRow[it.Path]
 			inBottom := hasBottomRow[it.Path]
 			if !inTop && !inBottom {
+				if it.Type != ItemTypeGroup {
+					bottom = append(bottom, it)
+					continue
+				}
 				// No visible session rows: the group is either collapsed (rows
 				// hidden) or genuinely empty. Decide from the tree-wide activity.
 				act := activity[it.Path]
@@ -257,7 +290,7 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 			if inBottom {
 				bottom = append(bottom, it)
 			}
-		case ItemTypeSession:
+		case ItemTypeSession, ItemTypeRemoteSession, ItemTypeHubSession:
 			if sessionGoesTop(it) {
 				top = append(top, it)
 			} else {
@@ -299,10 +332,18 @@ func partitionActiveTopInactiveSections(top, bottom []Item) []Item {
 	hasIdleRow := make(map[string]bool)
 	hasDoneRow := make(map[string]bool)
 	sessionIsDone := func(it Item) bool {
-		return it.Session != nil && it.Session.Status == StatusStopped
+		switch it.Type {
+		case ItemTypeSession:
+			return it.Session != nil && it.Session.Status == StatusStopped
+		case ItemTypeRemoteSession:
+			return it.RemoteSession != nil && Status(strings.TrimSpace(it.RemoteSession.Status)) == StatusStopped
+		case ItemTypeHubSession:
+			return it.HubSession != nil && Status(strings.TrimSpace(it.HubSession.Status)) == StatusStopped
+		}
+		return false
 	}
 	for _, it := range bottom {
-		if it.Type != ItemTypeSession || it.Session == nil {
+		if it.Type != ItemTypeSession && it.Type != ItemTypeRemoteSession && it.Type != ItemTypeHubSession {
 			continue
 		}
 		if sessionIsDone(it) {
@@ -316,7 +357,7 @@ func partitionActiveTopInactiveSections(top, bottom []Item) []Item {
 	done := make([]Item, 0, len(bottom))
 	for _, it := range bottom {
 		switch it.Type {
-		case ItemTypeGroup:
+		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubGroup:
 			inIdle := hasIdleRow[it.Path]
 			inDone := hasDoneRow[it.Path]
 			if !inIdle && !inDone {
@@ -329,7 +370,7 @@ func partitionActiveTopInactiveSections(top, bottom []Item) []Item {
 			if inDone {
 				done = append(done, it)
 			}
-		case ItemTypeSession:
+		case ItemTypeSession, ItemTypeRemoteSession, ItemTypeHubSession:
 			if sessionIsDone(it) {
 				done = append(done, it)
 			} else {

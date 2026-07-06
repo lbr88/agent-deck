@@ -75,6 +75,15 @@ func remoteSessionIndexByID(h *Home, id string) int {
 	return -1
 }
 
+func hubSessionIndexByID(h *Home, id string) int {
+	for i, it := range h.flatItems {
+		if it.Type == session.ItemTypeHubSession && it.HubSession != nil && it.HubSession.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestActiveTopWiringSplitsList(t *testing.T) {
 	home, _ := buildTwoGroupHome(t)
 
@@ -450,6 +459,32 @@ func TestActiveTopDuplicateGroupRestoreKeepsSameOccurrence(t *testing.T) {
 	}
 }
 
-func TestViewModePartitionRemoteSessionNotApplicable(t *testing.T) {
-	t.Skip("RemoteSession N/A: group view-mode partitioning runs before remote rows are appended; remote parity is selection preservation across rebuilds.")
+func TestActiveTopPlacesRemoteWaitingAboveIdleDivider(t *testing.T) {
+	home, _ := buildTwoGroupHome(t)
+	setOnlySessionRunning(t, home, "a1")
+
+	home.remoteSessionsMu.Lock()
+	home.remoteSessions = map[string][]session.RemoteSessionInfo{
+		"dev": {
+			{ID: "remote-waiting", Title: "remote waiting", RemoteName: "dev", Status: string(session.StatusWaiting)},
+			{ID: "remote-idle", Title: "remote idle", RemoteName: "dev", Status: string(session.StatusIdle)},
+		},
+	}
+	home.remoteSessionsMu.Unlock()
+
+	home.groupViewMode = session.GroupViewActiveTop
+	home.rebuildFlatItems()
+
+	div := dividerIndex(home)
+	waiting := remoteSessionIndexByID(home, "remote-waiting")
+	idle := remoteSessionIndexByID(home, "remote-idle")
+	if div < 0 {
+		t.Fatalf("expected active-top divider with local active and idle sessions")
+	}
+	if waiting < 0 || waiting >= div {
+		t.Fatalf("waiting remote session must be above idle divider: waiting=%d divider=%d\nitems=%#v", waiting, div, home.flatItems)
+	}
+	if idle < 0 || idle <= div {
+		t.Fatalf("idle remote session must be below idle divider: idle=%d divider=%d\nitems=%#v", idle, div, home.flatItems)
+	}
 }

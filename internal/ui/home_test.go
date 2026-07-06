@@ -4084,6 +4084,40 @@ func TestRebuildFlatItemsArchivedViewOmitsRemoteSessions(t *testing.T) {
 	}
 }
 
+func TestRebuildFlatItemsStatusFilterFiltersRemoteSessions(t *testing.T) {
+	h := NewHome()
+	h.statusFilter = session.StatusWaiting
+	h.groupTree = session.NewGroupTree(nil)
+	h.windowsCollapsed = make(map[string]bool)
+
+	h.remoteSessionsMu.Lock()
+	h.remoteSessions = map[string][]session.RemoteSessionInfo{
+		"dev": {
+			{ID: "remote-waiting", Title: "remote waiting", RemoteName: "dev", Status: string(session.StatusWaiting)},
+			{ID: "remote-idle", Title: "remote idle", RemoteName: "dev", Status: string(session.StatusIdle)},
+		},
+	}
+	h.remoteSessionsMu.Unlock()
+
+	h.rebuildFlatItems()
+
+	foundWaiting := false
+	for _, item := range h.flatItems {
+		if item.Type != session.ItemTypeRemoteSession || item.RemoteSession == nil {
+			continue
+		}
+		switch item.RemoteSession.ID {
+		case "remote-waiting":
+			foundWaiting = true
+		case "remote-idle":
+			t.Fatalf("idle remote session should be hidden by waiting filter: %+v", item)
+		}
+	}
+	if !foundWaiting {
+		t.Fatalf("waiting remote session missing after waiting filter; flatItems=%#v", h.flatItems)
+	}
+}
+
 func TestRebuildFlatItemsGroupScopeComposesWithStatusFilter(t *testing.T) {
 	h := &Home{}
 	h.groupScope = "work"

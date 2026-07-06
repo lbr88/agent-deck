@@ -2345,7 +2345,7 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		// Auto-clear filter if it matches nothing but sessions exist
-		if len(filtered) == 0 && len(allItems) > 0 && !h.hasHubSessionMatchingStatusFilter(h.statusFilter) {
+		if len(filtered) == 0 && len(allItems) > 0 && !h.hasHubSessionMatchingStatusFilter(h.statusFilter) && !h.hasRemoteSessionMatchingStatusFilter(h.statusFilter) {
 			h.statusFilter = ""
 			h.flatItems = allItems
 		} else {
@@ -2364,6 +2364,11 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		h.flatItems = scoped
+	}
+
+	if h.statusFilter != FilterModeArchived {
+		h.flatItems = append(h.flatItems, h.projectHubItems()...)
+		h.flatItems = append(h.flatItems, h.projectRemoteItems()...)
 	}
 
 	// Partition into top/bottom sections by view mode (active-on-top / populated-on-top).
@@ -2414,44 +2419,6 @@ func (h *Home) rebuildFlatItems() {
 			}
 		}
 		h.flatItems = expanded
-	}
-
-	if h.statusFilter != FilterModeArchived {
-		h.flatItems = append(h.flatItems, h.projectHubItems()...)
-	}
-
-	// Append remote sessions as selectable items
-	h.remoteSessionsMu.RLock()
-	remoteNames := make([]string, 0, len(h.remoteSessions))
-	remotes := make(map[string][]session.RemoteSessionInfo, len(h.remoteSessions))
-	for name, sessions := range h.remoteSessions {
-		remoteNames = append(remoteNames, name)
-		remotes[name] = append([]session.RemoteSessionInfo(nil), sessions...)
-	}
-	h.remoteSessionsMu.RUnlock()
-	sort.Strings(remoteNames)
-	if len(remotes) > 0 && h.statusFilter != FilterModeArchived {
-		for _, remoteName := range remoteNames {
-			sessions := remotes[remoteName]
-			// Add remote group header
-			h.flatItems = append(h.flatItems, session.Item{
-				Type:       session.ItemTypeRemoteGroup,
-				RemoteName: remoteName,
-				Path:       "remotes/" + remoteName,
-				Level:      0,
-			})
-			// Add remote sessions
-			for i := range sessions {
-				h.flatItems = append(h.flatItems, session.Item{
-					Type:          session.ItemTypeRemoteSession,
-					RemoteSession: &sessions[i],
-					RemoteName:    remoteName,
-					Path:          "remotes/" + remoteName,
-					Level:         1,
-					IsLastInGroup: i == len(sessions)-1,
-				})
-			}
-		}
 	}
 
 	// Pre-compute root group numbers for O(1) hotkey lookup (replaces O(n) loop in renderGroupItem).
@@ -2594,6 +2561,22 @@ func (h *Home) hasHubSessionMatchingStatusFilter(filter session.Status) bool {
 	return false
 }
 
+func (h *Home) hasRemoteSessionMatchingStatusFilter(filter session.Status) bool {
+	if filter == "" || filter == FilterModeArchived {
+		return false
+	}
+	h.remoteSessionsMu.RLock()
+	defer h.remoteSessionsMu.RUnlock()
+	for _, sessions := range h.remoteSessions {
+		for _, info := range sessions {
+			if h.matchesStatusFilter(filter, session.Status(strings.TrimSpace(info.Status))) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (h *Home) hubSessionSnapshots() []hub.NodeSessions {
 	h.hubSessionsMu.RLock()
 	defer h.hubSessionsMu.RUnlock()
@@ -2696,6 +2679,59 @@ func (h *Home) projectHubItems() []session.Item {
 					IsLastInGroup: i == len(sessions)-1,
 				})
 			}
+		}
+	}
+	return items
+}
+
+func (h *Home) projectRemoteItems() []session.Item {
+	if h.statusFilter == FilterModeArchived {
+		return nil
+	}
+
+	h.remoteSessionsMu.RLock()
+	remoteNames := make([]string, 0, len(h.remoteSessions))
+	remotes := make(map[string][]session.RemoteSessionInfo, len(h.remoteSessions))
+	for name, sessions := range h.remoteSessions {
+		remoteNames = append(remoteNames, name)
+		remotes[name] = append([]session.RemoteSessionInfo(nil), sessions...)
+	}
+	h.remoteSessionsMu.RUnlock()
+
+	sort.Strings(remoteNames)
+	items := make([]session.Item, 0)
+	for _, remoteName := range remoteNames {
+		sessions := remotes[remoteName]
+		visible := make([]session.RemoteSessionInfo, 0, len(sessions))
+		for _, info := range sessions {
+			if strings.TrimSpace(info.RemoteName) == "" {
+				info.RemoteName = remoteName
+			}
+			if h.statusFilter != "" && !h.matchesStatusFilter(h.statusFilter, session.Status(strings.TrimSpace(info.Status))) {
+				continue
+			}
+			visible = append(visible, info)
+		}
+		if len(visible) == 0 {
+			continue
+		}
+
+		path := "remotes/" + remoteName
+		items = append(items, session.Item{
+			Type:       session.ItemTypeRemoteGroup,
+			RemoteName: remoteName,
+			Path:       path,
+			Level:      0,
+		})
+		for i := range visible {
+			items = append(items, session.Item{
+				Type:          session.ItemTypeRemoteSession,
+				RemoteSession: &visible[i],
+				RemoteName:    remoteName,
+				Path:          path,
+				Level:         1,
+				IsLastInGroup: i == len(visible)-1,
+			})
 		}
 	}
 	return items
