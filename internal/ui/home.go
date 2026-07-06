@@ -9082,12 +9082,6 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "i":
-		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
-			item := h.flatItems[h.cursor]
-			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
-				return h, h.hubCommand(item.HubNodeID, item.HubNodeName, "import_tmux", nil)
-			}
-		}
 		if h.importSourceDialog != nil {
 			h.importSourceDialog.Show(ImportSourceCounts{})
 			h.importSourceDialog.SetSize(h.width, h.height)

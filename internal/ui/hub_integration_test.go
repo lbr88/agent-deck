@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -417,25 +418,29 @@ func TestHubSessionRenameUsesHubCommand(t *testing.T) {
 	}
 }
 
-func TestHubSessionImportUsesHubCommand(t *testing.T) {
+func TestHubSessionImportHotkeyOpensLocalImportDialog(t *testing.T) {
 	h, client := newHubActionHome(t)
+	codexHome := filepath.Join(t.TempDir(), ".codex")
+	t.Setenv("CODEX_HOME", codexHome)
+	id := "88888888-8888-8888-8888-888888888888"
+	writeCodexIndexForHomeImport(t, codexHome, id, "saved codex", "2026-06-30T10:00:00Z")
+	writeCodexRolloutForHomeImport(t, codexHome, id)
 
 	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 	h = model.(*Home)
 	if cmd == nil {
-		t.Fatal("i on hub session returned no command")
+		t.Fatal("i on hub session should load local import options")
 	}
-	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
-		t.Fatalf("import hub command error = %v", msg.(hubActionResultMsg).err)
+	model, _ = h.updateInner(cmd())
+	h = model.(*Home)
+	if h.importSourceDialog == nil || !h.importSourceDialog.IsVisible() {
+		t.Fatal("i on hub session should open the local import source dialog")
 	}
-	if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
-		t.Fatal("i on hub session opened the local import source dialog")
+	if got := h.importSourceDialog.CodexCount(); got != 1 {
+		t.Fatalf("codex count = %d, want 1", got)
 	}
-	if len(client.commands) != 1 {
-		t.Fatalf("hub commands after i = %d, want 1", len(client.commands))
-	}
-	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "import_tmux" {
-		t.Fatalf("import command = %+v, want node_server import_tmux", got)
+	if len(client.commands) != 0 {
+		t.Fatalf("hub commands after i = %d, want 0", len(client.commands))
 	}
 }
 
