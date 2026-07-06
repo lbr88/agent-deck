@@ -22,6 +22,7 @@ type ClaudeImportDialog struct {
 	height       int
 	searchActive bool
 	searchQuery  string
+	startAfter   bool
 }
 
 func NewClaudeImportDialog() *ClaudeImportDialog {
@@ -35,6 +36,7 @@ func (d *ClaudeImportDialog) Show(entries []session.ClaudeImportCandidate) {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *ClaudeImportDialog) Hide() {
@@ -44,6 +46,7 @@ func (d *ClaudeImportDialog) Hide() {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *ClaudeImportDialog) Visible() bool {
@@ -64,6 +67,10 @@ func (d *ClaudeImportDialog) Selected() (session.ClaudeImportCandidate, bool) {
 		return session.ClaudeImportCandidate{}, false
 	}
 	return *d.selected, true
+}
+
+func (d *ClaudeImportDialog) StartAfterImport() bool {
+	return d.startAfter
 }
 
 func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) {
@@ -87,6 +94,8 @@ func (d *ClaudeImportDialog) Update(msg tea.Msg) (*ClaudeImportDialog, tea.Cmd) 
 		d.searchActive = true
 		d.searchQuery = ""
 		d.cursor = importDialogFirstMatch(d.matchingIndexes())
+	case " ", "space":
+		d.startAfter = !d.startAfter
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -163,7 +172,7 @@ func (d *ClaudeImportDialog) View() string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery))))
+	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery, d.startAfter))))
 
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)

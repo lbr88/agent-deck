@@ -23,6 +23,7 @@ type KiroImportDialog struct {
 	height       int
 	searchActive bool
 	searchQuery  string
+	startAfter   bool
 }
 
 func NewKiroImportDialog() *KiroImportDialog {
@@ -36,6 +37,7 @@ func (d *KiroImportDialog) Show(entries []session.KiroSavedSession) {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *KiroImportDialog) Hide() {
@@ -45,6 +47,7 @@ func (d *KiroImportDialog) Hide() {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *KiroImportDialog) Visible() bool {
@@ -65,6 +68,10 @@ func (d *KiroImportDialog) Selected() (session.KiroSavedSession, bool) {
 		return session.KiroSavedSession{}, false
 	}
 	return *d.selected, true
+}
+
+func (d *KiroImportDialog) StartAfterImport() bool {
+	return d.startAfter
 }
 
 func (d *KiroImportDialog) Update(msg tea.Msg) (*KiroImportDialog, tea.Cmd) {
@@ -88,6 +95,8 @@ func (d *KiroImportDialog) Update(msg tea.Msg) (*KiroImportDialog, tea.Cmd) {
 		d.searchActive = true
 		d.searchQuery = ""
 		d.cursor = importDialogFirstMatch(d.matchingIndexes())
+	case " ", "space":
+		d.startAfter = !d.startAfter
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -171,7 +180,7 @@ func (d *KiroImportDialog) View() string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery))))
+	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery, d.startAfter))))
 
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)

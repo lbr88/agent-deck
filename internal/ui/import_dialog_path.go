@@ -248,39 +248,66 @@ func importDialogCursorPosition(cursor int, indexes []int) int {
 	return -1
 }
 
-func importDialogHandleSearchKey(key tea.KeyMsg, active *bool, query *string) (bool, bool) {
-	if !*active {
-		return false, false
-	}
-
+func importDialogHandleSearchKey(key tea.KeyMsg, active *bool, query *string) (handled bool, changed bool) {
 	switch key.String() {
 	case "enter", "up", "down":
 		return false, false
 	case "esc":
+		if !*active && strings.TrimSpace(*query) == "" {
+			return false, false
+		}
 		*active = false
 		*query = ""
 		return true, true
+	case " ", "space":
+		if !*active {
+			return false, false
+		}
 	case "backspace", "ctrl+h":
+		if !*active && strings.TrimSpace(*query) == "" {
+			return false, false
+		}
+		*active = true
 		runes := []rune(*query)
 		if len(runes) > 0 {
 			*query = string(runes[:len(runes)-1])
 		}
 		return true, true
 	case "ctrl+u":
+		if !*active && strings.TrimSpace(*query) == "" {
+			return false, false
+		}
+		*active = true
 		*query = ""
 		return true, true
 	}
 
 	if key.Type == tea.KeyRunes {
+		if !*active && strings.TrimSpace(*query) == "" && string(key.Runes) == "/" {
+			*active = true
+			return true, false
+		}
+		*active = true
 		*query += string(key.Runes)
 		return true, true
 	}
-	return true, false
+	if *active {
+		return true, false
+	}
+	return false, false
 }
 
-func importDialogFooter(searchActive bool, query string) string {
-	if searchActive || strings.TrimSpace(query) != "" {
-		return "Search: " + query
+func importDialogToggleLabel(startAfterImport bool) string {
+	if startAfterImport {
+		return "[x] Start after import"
 	}
-	return "Enter import | / search | Esc cancel | j/k navigate"
+	return "[ ] Start after import"
+}
+
+func importDialogFooter(searchActive bool, query string, startAfterImport bool) string {
+	startLabel := importDialogToggleLabel(startAfterImport)
+	if searchActive || strings.TrimSpace(query) != "" {
+		return "Search: " + query + " | Space " + startLabel
+	}
+	return "Enter import | type or / search | Space " + startLabel + " | Esc cancel | j/k navigate"
 }

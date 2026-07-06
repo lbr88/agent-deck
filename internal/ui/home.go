@@ -13342,11 +13342,12 @@ func (h *Home) handleCodexImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return h, cmd
 	}
+	startAfterImport := h.codexImportDialog.StartAfterImport()
 	h.codexImportDialog.Hide()
-	return h, h.createSessionFromCodexImport(entry)
+	return h, h.createSessionFromCodexImport(entry, startAfterImport)
 }
 
-func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.Cmd {
+func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry, startAfterImport bool) tea.Cmd {
 	return func() tea.Msg {
 		if strings.TrimSpace(entry.ID) == "" {
 			return sessionCreatedMsg{err: session.ErrCodexSessionNotFound}
@@ -13370,6 +13371,11 @@ func (h *Home) createSessionFromCodexImport(entry session.CodexIndexEntry) tea.C
 		inst.CodexSessionID = strings.ToLower(strings.TrimSpace(entry.ID))
 		inst.CodexDetectedAt = entry.UpdatedAt
 		inst.Status = session.StatusStopped
+		if startAfterImport {
+			if err := startImportedSession(inst); err != nil {
+				return sessionCreatedMsg{err: fmt.Errorf("failed to start imported Codex session: %w", err)}
+			}
+		}
 		return sessionCreatedMsg{instance: inst}
 	}
 }
@@ -13381,11 +13387,12 @@ func (h *Home) handleClaudeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	if !ok {
 		return h, cmd
 	}
+	startAfterImport := h.claudeImportDialog.StartAfterImport()
 	h.claudeImportDialog.Hide()
-	return h, h.createSessionFromClaudeImport(entry)
+	return h, h.createSessionFromClaudeImport(entry, startAfterImport)
 }
 
-func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate) tea.Cmd {
+func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate, startAfterImport bool) tea.Cmd {
 	return func() tea.Msg {
 		sessionID := strings.TrimSpace(entry.SessionID)
 		if sessionID == "" {
@@ -13411,6 +13418,11 @@ func (h *Home) createSessionFromClaudeImport(entry session.ClaudeImportCandidate
 		inst.ClaudeSessionID = sessionID
 		inst.ClaudeDetectedAt = entry.UpdatedAt
 		inst.Status = session.StatusStopped
+		if startAfterImport {
+			if err := startImportedSession(inst); err != nil {
+				return sessionCreatedMsg{err: fmt.Errorf("failed to start imported Claude session: %w", err)}
+			}
+		}
 		return sessionCreatedMsg{instance: inst}
 	}
 }
@@ -13422,11 +13434,12 @@ func (h *Home) handleOpenCodeImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if !ok {
 		return h, cmd
 	}
+	startAfterImport := h.openCodeImportDialog.StartAfterImport()
 	h.openCodeImportDialog.Hide()
-	return h, h.createSessionFromOpenCodeImport(entry)
+	return h, h.createSessionFromOpenCodeImport(entry, startAfterImport)
 }
 
-func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry) tea.Cmd {
+func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry, startAfterImport bool) tea.Cmd {
 	return func() tea.Msg {
 		projectPath := importDialogPath(entry.Directory, entry.Path)
 		if projectPath == "" {
@@ -13446,6 +13459,11 @@ func (h *Home) createSessionFromOpenCodeImport(entry session.OpenCodeImportEntry
 		if isDupe, existingInst := isExactDuplicateImport(h.instances, inst.Title, inst.ProjectPath); isDupe {
 			return sessionCreatedMsg{err: fmt.Errorf("session already exists with same title and path: %s (%s)", existingInst.Title, existingInst.ID)}
 		}
+		if startAfterImport {
+			if err := startImportedSession(inst); err != nil {
+				return sessionCreatedMsg{err: fmt.Errorf("failed to start imported OpenCode session: %w", err)}
+			}
+		}
 		return sessionCreatedMsg{instance: inst}
 	}
 }
@@ -13457,11 +13475,12 @@ func (h *Home) handleKiroImportDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return h, cmd
 	}
+	startAfterImport := h.kiroImportDialog.StartAfterImport()
 	h.kiroImportDialog.Hide()
-	return h, h.createSessionFromKiroImport(entry)
+	return h, h.createSessionFromKiroImport(entry, startAfterImport)
 }
 
-func (h *Home) createSessionFromKiroImport(entry session.KiroSavedSession) tea.Cmd {
+func (h *Home) createSessionFromKiroImport(entry session.KiroSavedSession, startAfterImport bool) tea.Cmd {
 	return func() tea.Msg {
 		projectPath := strings.TrimSpace(entry.CWD)
 		if projectPath == "" {
@@ -13482,8 +13501,21 @@ func (h *Home) createSessionFromKiroImport(entry session.KiroSavedSession) tea.C
 		if isDupe, existingInst := isExactDuplicateImport(h.instances, inst.Title, inst.ProjectPath); isDupe {
 			return sessionCreatedMsg{err: fmt.Errorf("session already exists with same title and path: %s (%s)", existingInst.Title, existingInst.ID)}
 		}
+		if startAfterImport {
+			if err := startImportedSession(inst); err != nil {
+				return sessionCreatedMsg{err: fmt.Errorf("failed to start imported Kiro session: %w", err)}
+			}
+		}
 		return sessionCreatedMsg{instance: inst}
 	}
+}
+
+var startImportedSession = func(inst *session.Instance) error {
+	if err := inst.Start(); err != nil {
+		return err
+	}
+	inst.PostStartSync(3 * time.Second)
+	return nil
 }
 
 var startHandoverTarget = func(inst *session.Instance, prompt string) error {

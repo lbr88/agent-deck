@@ -23,6 +23,7 @@ type OpenCodeImportDialog struct {
 	height       int
 	searchActive bool
 	searchQuery  string
+	startAfter   bool
 }
 
 func NewOpenCodeImportDialog() *OpenCodeImportDialog {
@@ -36,6 +37,7 @@ func (d *OpenCodeImportDialog) Show(entries []session.OpenCodeImportEntry) {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *OpenCodeImportDialog) Hide() {
@@ -45,6 +47,7 @@ func (d *OpenCodeImportDialog) Hide() {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *OpenCodeImportDialog) Visible() bool {
@@ -65,6 +68,10 @@ func (d *OpenCodeImportDialog) Selected() (session.OpenCodeImportEntry, bool) {
 		return session.OpenCodeImportEntry{}, false
 	}
 	return *d.selected, true
+}
+
+func (d *OpenCodeImportDialog) StartAfterImport() bool {
+	return d.startAfter
 }
 
 func (d *OpenCodeImportDialog) Update(msg tea.Msg) (*OpenCodeImportDialog, tea.Cmd) {
@@ -88,6 +95,8 @@ func (d *OpenCodeImportDialog) Update(msg tea.Msg) (*OpenCodeImportDialog, tea.C
 		d.searchActive = true
 		d.searchQuery = ""
 		d.cursor = importDialogFirstMatch(d.matchingIndexes())
+	case " ", "space":
+		d.startAfter = !d.startAfter
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -171,7 +180,7 @@ func (d *OpenCodeImportDialog) View() string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery))))
+	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery, d.startAfter))))
 
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)

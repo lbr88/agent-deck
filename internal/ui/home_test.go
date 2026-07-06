@@ -582,6 +582,7 @@ func TestHomeCodexImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 	}
 	writeCodexRolloutForHomeImport(t, codexHome, entry.ID)
 	h.codexImportDialog.Show([]session.CodexIndexEntry{entry})
+	h.handleCodexImportDialogKey(tea.KeyMsg{Type: tea.KeySpace})
 
 	_, cmd := h.handleCodexImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
@@ -618,6 +619,7 @@ func TestHomeClaudeImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
 	h.claudeImportDialog.Show([]session.ClaudeImportCandidate{entry})
+	h.handleClaudeImportDialogKey(tea.KeyMsg{Type: tea.KeySpace})
 
 	_, cmd := h.handleClaudeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
@@ -652,6 +654,7 @@ func TestHomeOpenCodeImportSelectionCreatesPersistedStoppedSession(t *testing.T)
 		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
 	h.openCodeImportDialog.Show([]session.OpenCodeImportEntry{entry})
+	h.handleOpenCodeImportDialogKey(tea.KeyMsg{Type: tea.KeySpace})
 
 	_, cmd := h.handleOpenCodeImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
@@ -686,6 +689,7 @@ func TestHomeKiroImportSelectionCreatesPersistedStoppedSession(t *testing.T) {
 		UpdatedAt: time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC),
 	}
 	h.kiroImportDialog.Show([]session.KiroSavedSession{entry})
+	h.handleKiroImportDialogKey(tea.KeyMsg{Type: tea.KeySpace})
 
 	_, cmd := h.handleKiroImportDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {

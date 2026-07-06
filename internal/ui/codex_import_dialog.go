@@ -23,6 +23,7 @@ type CodexImportDialog struct {
 	height       int
 	searchActive bool
 	searchQuery  string
+	startAfter   bool
 }
 
 func NewCodexImportDialog() *CodexImportDialog {
@@ -36,6 +37,7 @@ func (d *CodexImportDialog) Show(entries []session.CodexIndexEntry) {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *CodexImportDialog) Hide() {
@@ -45,6 +47,7 @@ func (d *CodexImportDialog) Hide() {
 	d.selected = nil
 	d.searchActive = false
 	d.searchQuery = ""
+	d.startAfter = true
 }
 
 func (d *CodexImportDialog) Visible() bool {
@@ -65,6 +68,10 @@ func (d *CodexImportDialog) Selected() (session.CodexIndexEntry, bool) {
 		return session.CodexIndexEntry{}, false
 	}
 	return *d.selected, true
+}
+
+func (d *CodexImportDialog) StartAfterImport() bool {
+	return d.startAfter
 }
 
 func (d *CodexImportDialog) Update(msg tea.Msg) (*CodexImportDialog, tea.Cmd) {
@@ -88,6 +95,8 @@ func (d *CodexImportDialog) Update(msg tea.Msg) (*CodexImportDialog, tea.Cmd) {
 		d.searchActive = true
 		d.searchQuery = ""
 		d.cursor = importDialogFirstMatch(d.matchingIndexes())
+	case " ", "space":
+		d.startAfter = !d.startAfter
 	case "j", "down":
 		if indexes := d.matchingIndexes(); len(indexes) > 0 {
 			d.cursor = importDialogMoveCursor(d.cursor, indexes, 1)
@@ -167,7 +176,7 @@ func (d *CodexImportDialog) View() string {
 		}
 	}
 	lines = append(lines, "")
-	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery))))
+	lines = append(lines, fit(footerStyle.Render(importDialogFooter(d.searchActive, d.searchQuery, d.startAfter))))
 
 	box := DialogBoxStyle.Width(dialogWidth).Render(strings.Join(lines, "\n"))
 	return centerInScreen(box, d.width, d.height)
