@@ -379,6 +379,28 @@ func TestHubSessionRenameUsesHubCommand(t *testing.T) {
 	}
 }
 
+func TestHubSessionImportUsesHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("i on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("import hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if h.importSourceDialog != nil && h.importSourceDialog.IsVisible() {
+		t.Fatal("i on hub session opened the local import source dialog")
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands after i = %d, want 1", len(client.commands))
+	}
+	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "import_tmux" {
+		t.Fatalf("import command = %+v, want node_server import_tmux", got)
+	}
+}
+
 func TestSelectedHubPreviewTarget(t *testing.T) {
 	h, _ := newHubActionHome(t)
 

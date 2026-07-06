@@ -89,6 +89,29 @@ func TestCommandDispatcherPreviewReturnsContent(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherImportTmuxUsesBackend(t *testing.T) {
+	fake := &fakeActionBackend{importTmuxCount: 2}
+	dispatcher := CommandDispatcher{Backend: fake}
+
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "import_tmux",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch import_tmux: %v", err)
+	}
+	if !fake.importTmuxCalled {
+		t.Fatal("ImportTmux was not called")
+	}
+	var result ImportTmuxSessionsResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode import_tmux result: %v", err)
+	}
+	if result.Imported != 2 {
+		t.Fatalf("imported count = %d, want 2", result.Imported)
+	}
+}
+
 type fakeActionBackend struct {
 	sentSessionID    string
 	sentMessage      string
@@ -96,6 +119,8 @@ type fakeActionBackend struct {
 	createSessionID  string
 	previewSessionID string
 	previewContent   string
+	importTmuxCalled bool
+	importTmuxCount  int
 }
 
 func (b *fakeActionBackend) Send(_ context.Context, sessionID, message string) error {
@@ -128,4 +153,9 @@ func (b *fakeActionBackend) Create(_ context.Context, req CreateSessionRequest) 
 func (b *fakeActionBackend) Preview(_ context.Context, sessionID string) (string, error) {
 	b.previewSessionID = sessionID
 	return b.previewContent, nil
+}
+
+func (b *fakeActionBackend) ImportTmux(context.Context) (int, error) {
+	b.importTmuxCalled = true
+	return b.importTmuxCount, nil
 }

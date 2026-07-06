@@ -21,6 +21,7 @@ type ActionBackend interface {
 	Rename(ctx context.Context, sessionID, title string) error
 	Create(ctx context.Context, req CreateSessionRequest) (string, error)
 	Preview(ctx context.Context, sessionID string) (string, error)
+	ImportTmux(ctx context.Context) (int, error)
 }
 
 type CreateSessionRequest struct {
@@ -33,6 +34,10 @@ type CreateSessionRequest struct {
 
 type PreviewSessionResponse struct {
 	Content string `json:"content"`
+}
+
+type ImportTmuxSessionsResponse struct {
+	Imported int `json:"imported"`
 }
 
 type CommandDispatcher struct {
@@ -146,6 +151,16 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		raw, err := json.Marshal(PreviewSessionResponse{Content: content})
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
+	case "import_tmux":
+		imported, err := d.Backend.ImportTmux(ctx)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(ImportTmuxSessionsResponse{Imported: imported})
 		if err != nil {
 			return nil, err
 		}
@@ -359,6 +374,40 @@ func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (stri
 		return "", fmt.Errorf("preview session: %w", err)
 	}
 	return content, nil
+}
+
+func (b LocalActionBackend) ImportTmux(ctx context.Context) (int, error) {
+	if err := ctxErr(ctx); err != nil {
+		return 0, err
+	}
+	storage, err := session.NewStorageWithProfile(b.Profile)
+	if err != nil {
+		return 0, err
+	}
+	defer storage.Close()
+	instances, groups, err := storage.LoadWithGroups()
+	if err != nil {
+		return 0, err
+	}
+	if err := ctxErr(ctx); err != nil {
+		return 0, err
+	}
+	discovered, err := session.DiscoverExistingTmuxSessions(instances)
+	if err != nil {
+		return 0, err
+	}
+	if len(discovered) == 0 {
+		return 0, nil
+	}
+	instances = append(instances, discovered...)
+	groupTree := session.NewGroupTreeWithGroups(instances, groups)
+	for _, inst := range discovered {
+		groupTree.AddSession(inst)
+	}
+	if err := storage.SaveWithGroups(instances, groupTree); err != nil {
+		return 0, err
+	}
+	return len(discovered), nil
 }
 
 func (b LocalActionBackend) loadInstance(sessionID string) (*session.Instance, func(), error) {
