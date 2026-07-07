@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.10] - 2026-07-07
+
+### Added
+
+- **Private fork update source support.** `[updates].repo` and `agent-deck update --repo owner/repo` let self-update fetch verified GitHub release assets from a public fork while keeping the existing SHA-256 `checksums.txt` verification gate.
+- **Agent Deck Hub remote access foundation.** Added the hub server/client path for encrypted node connectivity, session snapshots, remote attach, invite/bootstrap administration, node trust approval, and admin node management.
+
+### Fixed
+
+- **Saved Codex import now finds modern Codex state.** The import dialog reads Codex's SQLite state in addition to the legacy JSONL index, searches paths, defaults imported sessions to start, and keeps the import hotkey local even when a hub session is selected.
+- **Hub sessions render and attach more naturally.** Remote hub sessions are grouped by node, sorted with local status sections, support larger paste payloads, and restarted stopped/error sessions before attach.
+
 ## [1.10.9] - 2026-07-02
 
 ### Fixed

@@ -173,12 +173,11 @@ ci:
 
 # Local release using GoReleaser
 # Prerequisites: brew install goreleaser
-# Required env: GITHUB_TOKEN, HOMEBREW_TAP_GITHUB_TOKEN
+# Required env: GITHUB_TOKEN
 release-local:
 	@echo "=== Pre-flight checks ==="
 	@which goreleaser > /dev/null || (echo "ERROR: goreleaser not found. Run: brew install goreleaser" && exit 1)
 	@test -n "$$GITHUB_TOKEN" || (echo "ERROR: GITHUB_TOKEN not set" && exit 1)
-	@test -n "$$HOMEBREW_TAP_GITHUB_TOKEN" || (echo "ERROR: HOMEBREW_TAP_GITHUB_TOKEN not set" && exit 1)
 	@TAG=$$(git describe --tags --exact-match 2>/dev/null) || (echo "ERROR: HEAD is not tagged. Run: git tag vX.Y.Z" && exit 1); \
 	CODE_VERSION=$$(grep 'var Version' cmd/agent-deck/main.go | sed 's/.*"\(.*\)".*/\1/'); \
 	TAG_VERSION=$${TAG#v}; \
@@ -190,9 +189,9 @@ release-local:
 	@echo "=== Running tests ==="
 	go test -race ./...
 	@echo "=== Running GoReleaser ==="
-	goreleaser release --clean
+	GITHUB_REPOSITORY=$$(gh repo view --json nameWithOwner -q .nameWithOwner) goreleaser release --clean
 	@echo "=== Release complete ==="
-	@echo "Verify: gh release view $$(git describe --tags --exact-match) --repo asheshgoplani/agent-deck"
+	@echo "Verify: gh release view $$(git describe --tags --exact-match) --repo $$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 
 # Web UI test targets
 # Vitest (unit) + Playwright (e2e + screenshot regression). Both run against

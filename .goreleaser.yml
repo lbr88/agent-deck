@@ -60,9 +60,6 @@ changelog:
       - Merge branch
 
 release:
-  github:
-    owner: asheshgoplani
-    name: agent-deck
   draft: false
   prerelease: auto
   mode: append
@@ -74,36 +71,14 @@ release:
 
     ### Installation
 
-    **Homebrew (recommended):**
+    **Self-update from an existing semver build:**
     ```bash
-    brew install asheshgoplani/tap/agent-deck
+    agent-deck update --repo {{ .Env.GITHUB_REPOSITORY }}
     ```
 
-    **Quick Install:**
-    ```bash
-    curl -fsSL https://raw.githubusercontent.com/asheshgoplani/agent-deck/main/install.sh | bash
-    ```
-
-    **Go Install:**
-    ```bash
-    go install github.com/asheshgoplani/agent-deck/cmd/agent-deck@v{{.Version}}
-    ```
+    Or download the matching archive from this release and place the
+    `agent-deck` binary on your `PATH`.
   footer: |
     ---
 
-    **Full Changelog**: https://github.com/asheshgoplani/agent-deck/compare/{{ .PreviousTag }}...{{ .Tag }}
-
-brews:
-  - name: agent-deck
-    repository:
-      owner: asheshgoplani
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
-    homepage: "https://github.com/asheshgoplani/agent-deck"
-    description: "Terminal session manager for AI coding agents"
-    license: "MIT"
-    dependencies:
-      - name: tmux
-    test: |
-      system "#{bin}/agent-deck", "version"
+    **Full Changelog**: https://github.com/{{ .Env.GITHUB_REPOSITORY }}/compare/{{ .PreviousTag }}...{{ .Tag }}
