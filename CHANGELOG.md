@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.10.10] - 2026-07-07
+## [1.10.11] - 2026-07-07
 
 ### Added
 
@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Saved Codex import now finds modern Codex state.** The import dialog reads Codex's SQLite state in addition to the legacy JSONL index, searches paths, defaults imported sessions to start, and keeps the import hotkey local even when a hub session is selected.
 - **Hub sessions render and attach more naturally.** Remote hub sessions are grouped by node, sorted with local status sections, support larger paste payloads, and restarted stopped/error sessions before attach.
+- **Hub UI tests are race-safe under the release gate.** Hub projection tests now update session state under the same lock used by the live-pipe reconciler and cancel model goroutines during cleanup.
 
 ## [1.10.9] - 2026-07-02
 

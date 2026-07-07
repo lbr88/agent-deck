@@ -705,14 +705,17 @@ func newHubProjectionHome(t *testing.T, instances []*session.Instance) *Home {
 	t.Helper()
 	setXDGTestHome(t)
 	h := NewHome()
+	t.Cleanup(h.cancel)
 	h.width = 120
 	h.height = 40
 	h.initialLoading = false
+	h.instancesMu.Lock()
 	h.instances = instances
 	h.instanceByID = make(map[string]*session.Instance, len(instances))
 	for _, inst := range instances {
 		h.instanceByID[inst.ID] = inst
 	}
+	h.instancesMu.Unlock()
 	h.groupTree = session.NewGroupTree(instances)
 	return h
 }
