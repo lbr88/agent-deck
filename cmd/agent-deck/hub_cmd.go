@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -166,6 +167,10 @@ func handleHub(profile string, args []string) {
 		err = handleHubInvites(args[1:])
 	case "trust":
 		err = handleHubTrust(args[1:])
+	case "shell":
+		err = handleHubShell(profile, args[1:])
+	case "install-skill":
+		err = handleHubInstallSkill(args[1:])
 	case "connect":
 		err = handleHubConnect(profile, args[1:])
 	case "help", "--help", "-h":
@@ -1150,6 +1155,337 @@ func setRemoteHubTrust(settings session.HubSettings, nodeID string, allow bool) 
 	return hubRemoteJSON(settings, http.MethodPost, path, hubTrustDecisionRequest{NodeID: strings.TrimSpace(nodeID)}, nil)
 }
 
+type hubShellClient interface {
+	Command(context.Context, string, string, any) (json.RawMessage, error)
+	Attach(context.Context, string, string, hub.TerminalSize) error
+}
+
+type hubShellOptions struct {
+	NodeID   string
+	NodeName string
+	Title    string
+	CWD      string
+	Group    string
+	Attach   bool
+}
+
+type hubShellResult struct {
+	NodeID    string `json:"node_id"`
+	NodeName  string `json:"node_name,omitempty"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title,omitempty"`
+	CWD       string `json:"cwd,omitempty"`
+	Group     string `json:"group,omitempty"`
+}
+
+type resolvedHubShellNode struct {
+	NodeID   string
+	NodeName string
+}
+
+var errHubShellNodeNotFound = errors.New("hub shell node not found")
+
+func runHubShellWithClient(ctx context.Context, client hubShellClient, opts hubShellOptions) (hubShellResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if client == nil {
+		return hubShellResult{}, fmt.Errorf("hub shell client is required")
+	}
+	nodeID := strings.TrimSpace(opts.NodeID)
+	if nodeID == "" {
+		return hubShellResult{}, fmt.Errorf("hub shell node id is required")
+	}
+	req := hub.CreateSessionRequest{
+		Title:       strings.TrimSpace(opts.Title),
+		Tool:        "shell",
+		ProjectPath: strings.TrimSpace(opts.CWD),
+		GroupPath:   strings.TrimSpace(opts.Group),
+	}
+	raw, err := client.Command(ctx, nodeID, "create", req)
+	if err != nil {
+		return hubShellResult{}, err
+	}
+	sessionID, err := decodeHubCreateSessionResult(raw)
+	if err != nil {
+		return hubShellResult{}, err
+	}
+	result := hubShellResult{
+		NodeID:    nodeID,
+		NodeName:  strings.TrimSpace(opts.NodeName),
+		SessionID: sessionID,
+		Title:     req.Title,
+		CWD:       req.ProjectPath,
+		Group:     req.GroupPath,
+	}
+	if opts.Attach {
+		if err := client.Attach(ctx, nodeID, sessionID, hub.TerminalSize{}); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func decodeHubCreateSessionResult(raw json.RawMessage) (string, error) {
+	var result struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("decode hub create result: %w", err)
+	}
+	result.SessionID = strings.TrimSpace(result.SessionID)
+	if result.SessionID == "" {
+		return "", fmt.Errorf("hub create result missing session_id")
+	}
+	return result.SessionID, nil
+}
+
+func resolveHubShellNodeSelectorFromSnapshots(snapshots []hub.NodeSessions, selector string) (resolvedHubShellNode, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return resolvedHubShellNode{}, fmt.Errorf("hub shell node id or name is required")
+	}
+	for _, snapshot := range snapshots {
+		nodeID := strings.TrimSpace(snapshot.Node.ID)
+		if nodeID == selector {
+			return resolvedHubShellNode{NodeID: nodeID, NodeName: strings.TrimSpace(snapshot.Node.Name)}, nil
+		}
+	}
+	if strings.HasPrefix(selector, "node_") {
+		return resolvedHubShellNode{NodeID: selector}, nil
+	}
+	var matches []resolvedHubShellNode
+	for _, snapshot := range snapshots {
+		nodeID := strings.TrimSpace(snapshot.Node.ID)
+		nodeName := strings.TrimSpace(snapshot.Node.Name)
+		if nodeID == "" || nodeName != selector {
+			continue
+		}
+		matches = append(matches, resolvedHubShellNode{NodeID: nodeID, NodeName: nodeName})
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return resolvedHubShellNode{}, fmt.Errorf("%w: %q", errHubShellNodeNotFound, selector)
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, match := range matches {
+			ids = append(ids, match.NodeID)
+		}
+		return resolvedHubShellNode{}, fmt.Errorf("multiple hub nodes named %q; use one of these node ids: %s", selector, strings.Join(ids, ", "))
+	}
+}
+
+type hubShellSnapshotCache struct {
+	mu        sync.Mutex
+	snapshots map[string]hub.NodeSessions
+	changed   chan struct{}
+}
+
+func newHubShellSnapshotCache() *hubShellSnapshotCache {
+	return &hubShellSnapshotCache{
+		snapshots: make(map[string]hub.NodeSessions),
+		changed:   make(chan struct{}, 1),
+	}
+}
+
+func (c *hubShellSnapshotCache) update(snapshot hub.NodeSessions) {
+	if c == nil {
+		return
+	}
+	nodeID := strings.TrimSpace(snapshot.Node.ID)
+	if nodeID == "" {
+		return
+	}
+	c.mu.Lock()
+	c.snapshots[nodeID] = snapshot
+	c.mu.Unlock()
+	select {
+	case c.changed <- struct{}{}:
+	default:
+	}
+}
+
+func (c *hubShellSnapshotCache) list() []hub.NodeSessions {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]hub.NodeSessions, 0, len(c.snapshots))
+	for _, snapshot := range c.snapshots {
+		out = append(out, snapshot)
+	}
+	return out
+}
+
+func (c *hubShellSnapshotCache) waitResolve(ctx context.Context, selector string) (resolvedHubShellNode, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lastErr error
+	for {
+		node, err := resolveHubShellNodeSelectorFromSnapshots(c.list(), selector)
+		if err == nil {
+			return node, nil
+		}
+		if !errors.Is(err, errHubShellNodeNotFound) {
+			return resolvedHubShellNode{}, err
+		}
+		lastErr = err
+		select {
+		case <-c.changed:
+		case <-ctx.Done():
+			if lastErr != nil {
+				return resolvedHubShellNode{}, lastErr
+			}
+			return resolvedHubShellNode{}, ctx.Err()
+		}
+	}
+}
+
+type configuredHubClientCallbacks struct {
+	OnStatus       func(string)
+	OnSnapshot     func(hub.NodeSessions)
+	OnTrustRequest func(hub.TrustRequestPayload)
+}
+
+func newConfiguredHubClient(profile string, hubConfig session.HubSettings, callbacks configuredHubClientCallbacks) (*hub.Client, error) {
+	if !hubConfig.Enabled() {
+		return nil, fmt.Errorf("hub is not configured; run agent-deck hub join first")
+	}
+	token, err := hubNodeToken(hubConfig)
+	if err != nil {
+		return nil, err
+	}
+	nodeName := strings.TrimSpace(hubConfig.NodeName)
+	if nodeName == "" {
+		nodeName = strings.TrimSpace(hubConfig.NodeID)
+	}
+	return hub.NewClient(hub.ClientConfig{
+		URL:              strings.TrimSpace(hubConfig.URL),
+		NodeID:           strings.TrimSpace(hubConfig.NodeID),
+		NodeName:         nodeName,
+		Token:            token,
+		Version:          Version,
+		TLSSkipVerify:    hubConfig.TLSSkipVerify,
+		CAPemFile:        strings.TrimSpace(hubConfig.CAPemFile),
+		ServerName:       strings.TrimSpace(hubConfig.ServerName),
+		PinnedCertSHA256: strings.TrimSpace(hubConfig.PinnedCertSHA256),
+		OnStatus:         callbacks.OnStatus,
+		OnSnapshot:       callbacks.OnSnapshot,
+		OnTrustRequest:   callbacks.OnTrustRequest,
+		AttachBackend:    hub.NewTmuxAttachBackend(profile),
+		ActionBackend:    hub.LocalActionBackend{Profile: profile},
+	}, hub.LocalSessionSource{Profile: profile}), nil
+}
+
+func handleHubShell(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub shell", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	title := fs.String("title", "", "Title for the remote shell session")
+	cwd := fs.String("cwd", "", "Working directory for the remote shell session")
+	group := fs.String("group", "", "Group path for the remote shell session")
+	noAttach := fs.Bool("no-attach", false, "Create the remote shell session without attaching")
+	jsonOutput := fs.Bool("json", false, "Output the created session as JSON; implies --no-attach")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node-name resolution from hub snapshots")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub shell <node-id-or-name> [--cwd path] [--title name] [--group group] [--no-attach]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub shell <node-id-or-name> [--cwd path] [--title name] [--group group]")
+	}
+	selector := strings.TrimSpace(fs.Arg(0))
+
+	config, err := session.LoadUserConfig()
+	if err != nil {
+		return fmt.Errorf("load user config: %w", err)
+	}
+	snapshots := newHubShellSnapshotCache()
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	client, err := newConfiguredHubClient(profile, config.Hub, configuredHubClientCallbacks{
+		OnStatus: func(status string) {
+			if status == "connected" {
+				connectedOnce.Do(func() { close(connected) })
+			}
+		},
+		OnSnapshot: snapshots.update,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	clientCtx, cancelClient := context.WithCancel(ctx)
+	defer cancelClient()
+	connectErr := make(chan error, 1)
+	go func() {
+		connectErr <- client.Connect(clientCtx)
+	}()
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, *connectTimeout)
+	defer cancelWait()
+	select {
+	case <-connected:
+	case err := <-connectErr:
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("hub connection ended before it became ready")
+	case <-waitCtx.Done():
+		return fmt.Errorf("hub connection timed out after %s", connectTimeout.String())
+	}
+
+	var node resolvedHubShellNode
+	if strings.HasPrefix(selector, "node_") {
+		node = resolvedHubShellNode{NodeID: selector}
+	} else {
+		resolveCtx, cancelResolve := context.WithTimeout(ctx, *resolveTimeout)
+		defer cancelResolve()
+		node, err = snapshots.waitResolve(resolveCtx, selector)
+		if err != nil {
+			if errors.Is(err, errHubShellNodeNotFound) {
+				return fmt.Errorf("hub node %q was not visible; check the node name, connection state, and hub trust", selector)
+			}
+			return err
+		}
+	}
+
+	result, err := runHubShellWithClient(ctx, client, hubShellOptions{
+		NodeID:   node.NodeID,
+		NodeName: node.NodeName,
+		Title:    *title,
+		CWD:      *cwd,
+		Group:    *group,
+		Attach:   !*noAttach && !*jsonOutput,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+	if *noAttach {
+		label := result.NodeID
+		if result.NodeName != "" {
+			label = result.NodeName
+		}
+		fmt.Printf("Created hub shell session %s on %s\n", result.SessionID, label)
+	}
+	return nil
+}
+
 func handleHubTrust(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: agent-deck hub trust <pending|allow|deny> [node-id-or-name]")
@@ -1761,5 +2097,7 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  nodes   List registered hub nodes")
 	fmt.Fprintln(w, "  invites List hub invites")
 	fmt.Fprintln(w, "  trust   List or answer pending node trust requests")
+	fmt.Fprintln(w, "  shell   Open a shell session on a trusted hub node")
+	fmt.Fprintln(w, "  install-skill Install a bundled hub skill into the skill pool")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }
