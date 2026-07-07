@@ -163,6 +163,91 @@ func TestCheckForUpdate_PopulatesReleasesBehind(t *testing.T) {
 	assert.Equal(t, 7, info.ReleasesBehind)
 }
 
+func TestCheckForUpdate_UsesConfiguredGitHubRepo(t *testing.T) {
+	require.NoError(t, SetGitHubRepo("lbr88/agent-deck"))
+	t.Cleanup(func() { require.NoError(t, SetGitHubRepo("")) })
+
+	latestRelease := Release{
+		TagName: "v1.7.58",
+		Name:    "v1.7.58",
+		HTMLURL: "https://github.com/lbr88/agent-deck/releases/tag/v1.7.58",
+		Assets: []Asset{{
+			Name:               "agent-deck_1.7.58_linux_amd64.tar.gz",
+			BrowserDownloadURL: "https://github.com/lbr88/agent-deck/releases/download/v1.7.58/agent-deck_1.7.58_linux_amd64.tar.gz",
+		}},
+	}
+	recent := []Release{{TagName: "v1.7.58"}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+GitHubRepo+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream repo endpoint should not be used when updates.repo is configured")
+	})
+	mux.HandleFunc("/repos/lbr88/agent-deck/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(latestRelease)
+	})
+	mux.HandleFunc("/repos/lbr88/agent-deck/releases", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(recent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origURL := apiBaseURL
+	apiBaseURL = srv.URL
+	t.Cleanup(func() { apiBaseURL = origURL })
+	isolateUpdatePaths(t)
+
+	info, err := CheckForUpdate("1.7.50", true)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.True(t, info.Available)
+	assert.Equal(t, "1.7.58", info.LatestVersion)
+	assert.Equal(t, "https://github.com/lbr88/agent-deck/releases/tag/v1.7.58", info.ReleaseURL)
+}
+
+func TestCheckForUpdate_IgnoresCacheForDifferentConfiguredRepo(t *testing.T) {
+	isolateUpdatePaths(t)
+	require.NoError(t, saveCache(&UpdateCache{
+		CheckedAt:      time.Now(),
+		LatestVersion:  "9.9.9",
+		CurrentVersion: "1.7.50",
+		ReleaseURL:     "https://github.com/asheshgoplani/agent-deck/releases/tag/v9.9.9",
+		Repo:           GitHubRepo,
+	}))
+	require.NoError(t, SetGitHubRepo("lbr88/agent-deck"))
+	t.Cleanup(func() { require.NoError(t, SetGitHubRepo("")) })
+
+	latestRelease := Release{
+		TagName: "v1.7.58",
+		Name:    "v1.7.58",
+		HTMLURL: "https://github.com/lbr88/agent-deck/releases/tag/v1.7.58",
+	}
+	recent := []Release{{TagName: "v1.7.58"}}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/lbr88/agent-deck/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(latestRelease)
+	})
+	mux.HandleFunc("/repos/lbr88/agent-deck/releases", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(recent)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origURL := apiBaseURL
+	apiBaseURL = srv.URL
+	t.Cleanup(func() { apiBaseURL = origURL })
+
+	info, err := CheckForUpdate("1.7.50", false)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, "1.7.58", info.LatestVersion)
+	assert.NotEqual(t, "9.9.9", info.LatestVersion)
+}
+
 func TestCachedUpdateInfo_OfflineReadFromCache(t *testing.T) {
 	// `agent-deck --version` must be instant — never hit the network.
 	// CachedUpdateInfo reads the on-disk cache directly.

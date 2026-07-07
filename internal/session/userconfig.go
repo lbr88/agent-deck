@@ -953,6 +953,10 @@ type LogSettings struct {
 
 // UpdateSettings defines auto-update configuration
 type UpdateSettings struct {
+	// Repo is the public GitHub repository used for self-update checks.
+	// Default: asheshgoplani/agent-deck
+	Repo string `toml:"repo,omitempty"`
+
 	// AutoUpdate automatically installs updates without prompting
 	// Default: false
 	AutoUpdate bool `toml:"auto_update,omitempty"`
@@ -3974,6 +3978,8 @@ remove_orphans = true
 # Update settings
 # Controls automatic update checking and installation
 [updates]
+# Public GitHub repo to fetch Agent Deck releases from (default: "asheshgoplani/agent-deck")
+# repo = "lbr88/agent-deck"
 # Automatically install updates without prompting (default: false)
 # auto_update = true
 # Enable update checks on startup (default: true)

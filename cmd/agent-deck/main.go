@@ -57,8 +57,17 @@ func init() {
 func initUpdateSettings() {
 	settings := session.GetUpdateSettings()
 	update.SetCheckInterval(settings.CheckIntervalHours)
+	_ = update.SetGitHubRepo(settings.Repo)
 	update.SetBridgeScriptInstaller(session.InstallBridgeScript)
 	update.SetConductorDirResolver(session.ConductorDir)
+}
+
+func resolveUpdateRepo(settings session.UpdateSettings, override string) (string, error) {
+	repo := strings.TrimSpace(settings.Repo)
+	if strings.TrimSpace(override) != "" {
+		repo = override
+	}
+	return update.NormalizeGitHubRepo(repo)
 }
 
 // writeVersionOutput prints `Agent Deck vX.Y.Z` to `w`, appending
@@ -2768,6 +2777,7 @@ func handleUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	checkOnly := fs.Bool("check", false, "Only check for updates, don't install")
 	targetVersion := fs.String("version", "", "Install a specific released version (e.g. 1.7.3); may be a downgrade")
+	repoOverride := fs.String("repo", "", "GitHub repo to fetch releases from for this run (owner/repo)")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck update [options]")
@@ -2781,9 +2791,20 @@ func handleUpdate(args []string) {
 		fmt.Println("  agent-deck update              # Check and install latest if available")
 		fmt.Println("  agent-deck update --check      # Only check, don't install")
 		fmt.Println("  agent-deck update --version 1.7.3  # Install a specific version (may downgrade)")
+		fmt.Println("  agent-deck update --repo lbr88/agent-deck  # Use a public fork for this run")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	repo, err := resolveUpdateRepo(session.GetUpdateSettings(), *repoOverride)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := update.SetGitHubRepo(repo); err != nil {
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 

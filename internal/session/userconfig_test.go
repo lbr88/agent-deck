@@ -2492,6 +2492,37 @@ theme = "dark"
 	}
 }
 
+func TestGetUpdateSettings_ReadsConfiguredRepo(t *testing.T) {
+	tempDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tempDir)
+	defer os.Setenv("HOME", originalHome)
+	isolateConfigHomeXDG(t)
+
+	configPath, err := GetUserConfigPath()
+	if err != nil {
+		t.Fatalf("GetUserConfigPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`[updates]
+repo = "lbr88/agent-deck"
+check_interval_hours = 6
+`), 0600); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+	ClearUserConfigCache()
+
+	settings := GetUpdateSettings()
+	if settings.Repo != "lbr88/agent-deck" {
+		t.Fatalf("Repo = %q, want lbr88/agent-deck", settings.Repo)
+	}
+	if settings.CheckIntervalHours != 6 {
+		t.Fatalf("CheckIntervalHours = %d, want 6", settings.CheckIntervalHours)
+	}
+}
+
 // TestSaveUserConfig_PreservesPointerFalse verifies that *bool fields set to
 // explicit false survive the save round-trip (they must not be stripped by
 // omitempty since nil and *false have different semantics).

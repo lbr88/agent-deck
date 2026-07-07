@@ -360,6 +360,33 @@ func TestNormalizeReleaseTag(t *testing.T) {
 	}
 }
 
+func TestNormalizeGitHubRepo(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"empty uses default", "", GitHubRepo, false},
+		{"owner repo", "lbr88/agent-deck", "lbr88/agent-deck", false},
+		{"github url", "https://github.com/lbr88/agent-deck", "lbr88/agent-deck", false},
+		{"github url with git suffix", "https://github.com/lbr88/agent-deck.git", "lbr88/agent-deck", false},
+		{"too few path parts", "lbr88", "", true},
+		{"too many path parts", "github.com/lbr88/agent-deck/releases", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeGitHubRepo(tt.input)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestFetchReleaseByTag(t *testing.T) {
 	rel := Release{
 		TagName: "v1.7.4",
@@ -408,6 +435,36 @@ func TestFetchReleaseByTag(t *testing.T) {
 		_, err := FetchReleaseByTag("  ")
 		require.Error(t, err)
 	})
+}
+
+func TestFetchReleaseByTagUsesConfiguredGitHubRepo(t *testing.T) {
+	require.NoError(t, SetGitHubRepo("lbr88/agent-deck"))
+	t.Cleanup(func() { require.NoError(t, SetGitHubRepo("")) })
+
+	rel := Release{
+		TagName: "v1.7.4",
+		Name:    "v1.7.4",
+		HTMLURL: "https://github.com/lbr88/agent-deck/releases/tag/v1.7.4",
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/"+GitHubRepo+"/releases/tags/v1.7.4", func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("upstream repo endpoint should not be used when updates.repo is configured")
+	})
+	mux.HandleFunc("GET /repos/lbr88/agent-deck/releases/tags/v1.7.4", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rel)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origURL := apiBaseURL
+	apiBaseURL = srv.URL
+	t.Cleanup(func() { apiBaseURL = origURL })
+
+	got, err := FetchReleaseByTag("1.7.4")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "https://github.com/lbr88/agent-deck/releases/tag/v1.7.4", got.HTMLURL)
 }
 
 func TestPerformVerifiedUpdate_MatchingChecksumInstalls(t *testing.T) {

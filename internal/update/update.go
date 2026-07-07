@@ -89,6 +89,7 @@ type Asset struct {
 // UpdateCache stores the last check result
 type UpdateCache struct {
 	CheckedAt      time.Time `json:"checked_at"`
+	Repo           string    `json:"repo,omitempty"`
 	LatestVersion  string    `json:"latest_version"`
 	CurrentVersion string    `json:"current_version"`
 	DownloadURL    string    `json:"download_url"`
@@ -123,6 +124,48 @@ const SkipUpdateCheckEnv = "AGENTDECK_SKIP_UPDATE_CHECK"
 // counting how far behind the user is. We only need to know "more than
 // NudgeThreshold", so a single page is plenty.
 const recentReleasesLimit = 30
+
+var configuredGitHubRepo = GitHubRepo
+
+// NormalizeGitHubRepo accepts the configured update repository in the common
+// forms users paste into config files or CLI flags and returns "owner/repo".
+// Empty input means the built-in upstream repository.
+func NormalizeGitHubRepo(repo string) (string, error) {
+	trimmed := strings.TrimSpace(repo)
+	if trimmed == "" {
+		return GitHubRepo, nil
+	}
+	trimmed = strings.TrimSuffix(trimmed, ".git")
+	trimmed = strings.TrimPrefix(trimmed, "https://github.com/")
+	trimmed = strings.TrimPrefix(trimmed, "http://github.com/")
+	trimmed = strings.TrimPrefix(trimmed, "github.com/")
+	trimmed = strings.TrimPrefix(trimmed, "git@github.com:")
+	trimmed = strings.Trim(trimmed, "/")
+
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("invalid GitHub repo %q; expected owner/repo", repo)
+	}
+	return parts[0] + "/" + parts[1], nil
+}
+
+// SetGitHubRepo configures which public GitHub repository update checks use.
+// Passing an empty string restores the built-in upstream repository.
+func SetGitHubRepo(repo string) error {
+	normalized, err := NormalizeGitHubRepo(repo)
+	if err != nil {
+		return err
+	}
+	configuredGitHubRepo = normalized
+	return nil
+}
+
+func ConfiguredGitHubRepo() string {
+	if configuredGitHubRepo == "" {
+		return GitHubRepo
+	}
+	return configuredGitHubRepo
+}
 
 // isUpdateCheckSkipped reports whether AGENTDECK_SKIP_UPDATE_CHECK is set to
 // a truthy value.
@@ -239,7 +282,7 @@ func fetchRecentReleases(limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = recentReleasesLimit
 	}
-	url := fmt.Sprintf("%s/repos/%s/releases?per_page=%d", apiBaseURL, GitHubRepo, limit)
+	url := fmt.Sprintf("%s/repos/%s/releases?per_page=%d", apiBaseURL, ConfiguredGitHubRepo(), limit)
 
 	resp, authed, err := githubAPIGet(url)
 	if err != nil {
@@ -297,6 +340,9 @@ func CachedUpdateInfo(currentVersion string) (*UpdateInfo, error) {
 	if cache == nil || cache.LatestVersion == "" {
 		return nil, nil
 	}
+	if !cacheMatchesConfiguredRepo(cache) {
+		return nil, nil
+	}
 	info := &UpdateInfo{
 		CurrentVersion: currentVersion,
 		LatestVersion:  cache.LatestVersion,
@@ -324,7 +370,7 @@ func ShouldNudge(info *UpdateInfo) bool {
 
 // fetchLatestRelease fetches the latest release from GitHub
 func fetchLatestRelease() (*Release, error) {
-	url := fmt.Sprintf("%s/repos/%s/releases/latest", apiBaseURL, GitHubRepo)
+	url := fmt.Sprintf("%s/repos/%s/releases/latest", apiBaseURL, ConfiguredGitHubRepo())
 
 	resp, authed, err := githubAPIGet(url)
 	if err != nil {
@@ -387,7 +433,7 @@ func FetchReleaseByTag(tag string) (*Release, error) {
 		return nil, fmt.Errorf("empty release tag")
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", apiBaseURL, GitHubRepo, normalized)
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", apiBaseURL, ConfiguredGitHubRepo(), normalized)
 
 	resp, authed, err := githubAPIGet(url)
 	if err != nil {
@@ -486,7 +532,7 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 	// Try to use cache first (unless force check)
 	if !forceCheck {
 		cache, err := loadCache()
-		if err == nil && time.Since(cache.CheckedAt) < checkInterval {
+		if err == nil && cacheMatchesConfiguredRepo(cache) && time.Since(cache.CheckedAt) < checkInterval {
 			// Cache is fresh, use it
 			info.LatestVersion = cache.LatestVersion
 			info.DownloadURL = cache.DownloadURL
@@ -517,6 +563,7 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 	// Update cache
 	cache := &UpdateCache{
 		CheckedAt:      time.Now(),
+		Repo:           ConfiguredGitHubRepo(),
 		LatestVersion:  latestVersion,
 		CurrentVersion: currentVersion,
 		DownloadURL:    downloadURL,
@@ -551,6 +598,17 @@ func CheckForUpdateAsync(currentVersion string) <-chan *UpdateInfo {
 	}()
 
 	return ch
+}
+
+func cacheMatchesConfiguredRepo(cache *UpdateCache) bool {
+	if cache == nil {
+		return false
+	}
+	repo := strings.TrimSpace(cache.Repo)
+	if repo == "" {
+		repo = GitHubRepo
+	}
+	return repo == ConfiguredGitHubRepo()
 }
 
 // PerformUpdate downloads and installs the latest version
@@ -714,7 +772,7 @@ type ChangelogEntry struct {
 
 // FetchChangelog fetches the CHANGELOG.md from GitHub
 func FetchChangelog() (string, error) {
-	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/CHANGELOG.md", GitHubRepo)
+	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/CHANGELOG.md", ConfiguredGitHubRepo())
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
