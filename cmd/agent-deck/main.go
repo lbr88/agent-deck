@@ -38,6 +38,7 @@ import (
 )
 
 var Version = "1.10.11" // overridden at build time via -ldflags "-X main.Version=..."
+var Commit = ""         // overridden at build time via -ldflags "-X main.Commit=..."
 
 // Table column widths for list command output
 const (
@@ -70,6 +71,22 @@ func resolveUpdateRepo(settings session.UpdateSettings, override string) (string
 	return update.NormalizeGitHubRepo(repo)
 }
 
+func resolveUpdateChannel(settings session.UpdateSettings, override string) (string, error) {
+	channel := strings.TrimSpace(settings.Channel)
+	if strings.TrimSpace(override) != "" {
+		channel = override
+	}
+	return update.NormalizeUpdateChannel(channel)
+}
+
+func resolveUpdateBranch(settings session.UpdateSettings, override string) string {
+	branch := strings.TrimSpace(settings.Branch)
+	if strings.TrimSpace(override) != "" {
+		branch = override
+	}
+	return update.NormalizeUpdateBranch(branch)
+}
+
 // writeVersionOutput prints `Agent Deck vX.Y.Z` to `w`, appending
 // ` (update available: vA.B.C)` when the on-disk cache says the user
 // is behind. Offline — never touches the network. Conductor task #45.
@@ -90,6 +107,20 @@ func printUpdateNotice() {
 		return
 	}
 
+	channel, err := resolveUpdateChannel(settings, "")
+	if err != nil {
+		return
+	}
+	if channel == update.UpdateChannelBranch {
+		info, err := update.CheckBranchUpdate(Commit, resolveUpdateBranch(settings, ""), false)
+		if err != nil || info == nil || !info.Available {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "\n💡 Source update available: %s %s → %s (run: agent-deck update)\n",
+			info.Branch, update.ShortCommit(info.CurrentCommit), update.ShortCommit(info.LatestCommit))
+		return
+	}
+
 	info, err := update.CheckForUpdate(Version, false)
 	if err != nil || info == nil || !info.Available {
 		return
@@ -105,6 +136,14 @@ func promptForUpdate() bool {
 	settings := session.GetUpdateSettings()
 	if !settings.GetCheckEnabled() {
 		return false
+	}
+
+	channel, err := resolveUpdateChannel(settings, "")
+	if err != nil {
+		return false
+	}
+	if channel == update.UpdateChannelBranch {
+		return promptForBranchUpdate(settings)
 	}
 
 	info, err := update.CheckForUpdate(Version, false)
@@ -142,6 +181,44 @@ func promptForUpdate() bool {
 	if err := update.PerformVerifiedUpdate(release, runtime.GOOS, runtime.GOARCH); err != nil {
 		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
 		return false
+	}
+
+	fmt.Println("Restart agent-deck to use the new version.")
+	return true
+}
+
+func promptForBranchUpdate(settings session.UpdateSettings) bool {
+	branch := resolveUpdateBranch(settings, "")
+	info, err := update.CheckBranchUpdate(Commit, branch, false)
+	if err != nil || info == nil || !info.Available {
+		return false
+	}
+
+	if !settings.AutoUpdate {
+		fmt.Fprintf(os.Stderr, "\n💡 Source update available: %s %s → %s (run: agent-deck update)\n",
+			info.Branch, update.ShortCommit(info.CurrentCommit), update.ShortCommit(info.LatestCommit))
+		return false
+	}
+
+	fmt.Printf("\n⬆ Source update available: %s %s → %s\n",
+		info.Branch, update.ShortCommit(info.CurrentCommit), update.ShortCommit(info.LatestCommit))
+	fmt.Print("Build and update now? [Y/n]: ")
+
+	var response string
+	_, _ = fmt.Scanln(&response)
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response != "" && response != "y" && response != "yes" {
+		fmt.Println("Skipped. Run 'agent-deck update' later.")
+		return false
+	}
+
+	fmt.Println()
+	if err := update.PerformBranchUpdate(info); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+		return false
+	}
+	if err := update.UpdateBridgePy(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to update bridge.py: %v\n", err)
 	}
 
 	fmt.Println("Restart agent-deck to use the new version.")
@@ -2778,6 +2855,8 @@ func handleUpdate(args []string) {
 	checkOnly := fs.Bool("check", false, "Only check for updates, don't install")
 	targetVersion := fs.String("version", "", "Install a specific released version (e.g. 1.7.3); may be a downgrade")
 	repoOverride := fs.String("repo", "", "GitHub repo to fetch releases from for this run (owner/repo)")
+	channelOverride := fs.String("channel", "", "Update channel for this run: release or branch")
+	branchOverride := fs.String("branch", "", "Git branch to track when channel=branch")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck update [options]")
@@ -2792,13 +2871,15 @@ func handleUpdate(args []string) {
 		fmt.Println("  agent-deck update --check      # Only check, don't install")
 		fmt.Println("  agent-deck update --version 1.7.3  # Install a specific version (may downgrade)")
 		fmt.Println("  agent-deck update --repo lbr88/agent-deck  # Use a public fork for this run")
+		fmt.Println("  agent-deck update --channel branch --branch main  # Build and install from a branch")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		os.Exit(1)
 	}
 
-	repo, err := resolveUpdateRepo(session.GetUpdateSettings(), *repoOverride)
+	settings := session.GetUpdateSettings()
+	repo, err := resolveUpdateRepo(settings, *repoOverride)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -2810,6 +2891,18 @@ func handleUpdate(args []string) {
 
 	if strings.TrimSpace(*targetVersion) != "" {
 		handleUpdateToSpecificVersion(*targetVersion, *checkOnly)
+		return
+	}
+
+	channel, err := resolveUpdateChannel(settings, *channelOverride)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	branch := resolveUpdateBranch(settings, *branchOverride)
+
+	if channel == update.UpdateChannelBranch {
+		handleBranchUpdate(branch, *checkOnly)
 		return
 	}
 
@@ -2905,6 +2998,63 @@ func handleUpdate(args []string) {
 
 	// Offer to update remotes
 	updateRemotesAfterLocalUpdate(info.LatestVersion)
+}
+
+func handleBranchUpdate(branch string, checkOnly bool) {
+	fmt.Printf("Agent Deck v%s\n", Version)
+	if strings.TrimSpace(Commit) != "" {
+		fmt.Printf("Current commit: %s\n", update.ShortCommit(Commit))
+	} else {
+		fmt.Println("Current commit: unknown")
+	}
+	fmt.Printf("Tracking branch: %s (%s)\n", update.NormalizeUpdateBranch(branch), update.ConfiguredGitHubRepo())
+	fmt.Println("Checking for source updates...")
+
+	info, err := update.CheckBranchUpdate(Commit, branch, true)
+	if err != nil {
+		fmt.Printf("Error checking for source updates: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !info.Available {
+		fmt.Printf("✓ You're running the configured branch head (%s)!\n", update.ShortCommit(info.LatestCommit))
+		return
+	}
+
+	fmt.Printf("\n⬆ Source update available: %s %s → %s\n",
+		info.Branch, update.ShortCommit(info.CurrentCommit), update.ShortCommit(info.LatestCommit))
+	if strings.TrimSpace(info.CommitURL) != "" {
+		fmt.Printf("  Commit: %s\n", info.CommitURL)
+	}
+
+	if checkOnly {
+		fmt.Println("\nRun 'agent-deck update' to build and install.")
+		return
+	}
+
+	drainStdin()
+	fmt.Print("\nBuild from source and install update? [Y/n] ")
+	reader := bufio.NewReader(os.Stdin)
+	response, _ := reader.ReadString('\n')
+	response = strings.TrimSpace(response)
+	if response != "" && response != "y" && response != "Y" {
+		fmt.Println("Update cancelled.")
+		return
+	}
+
+	fmt.Println()
+	if err := update.PerformBranchUpdate(info); err != nil {
+		fmt.Printf("Error installing source update: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := update.UpdateBridgePy(); err != nil {
+		fmt.Printf("Warning: Failed to update bridge.py: %v\n", err)
+		fmt.Println("  You can manually refresh it with: agent-deck conductor setup <name>")
+	}
+
+	fmt.Printf("\n✓ Updated to %s at %s\n", update.BranchVersion(info.Branch), update.ShortCommit(info.LatestCommit))
+	fmt.Println("  Restart agent-deck to use the new version.")
 }
 
 // handleUpdateToSpecificVersion installs a user-specified release version.

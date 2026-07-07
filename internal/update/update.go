@@ -89,12 +89,17 @@ type Asset struct {
 // UpdateCache stores the last check result
 type UpdateCache struct {
 	CheckedAt      time.Time `json:"checked_at"`
+	Channel        string    `json:"channel,omitempty"`
 	Repo           string    `json:"repo,omitempty"`
+	Branch         string    `json:"branch,omitempty"`
 	LatestVersion  string    `json:"latest_version"`
 	CurrentVersion string    `json:"current_version"`
 	DownloadURL    string    `json:"download_url"`
 	ReleaseURL     string    `json:"release_url"`
 	ReleasesBehind int       `json:"releases_behind,omitempty"`
+	LatestCommit   string    `json:"latest_commit,omitempty"`
+	CurrentCommit  string    `json:"current_commit,omitempty"`
+	CommitURL      string    `json:"commit_url,omitempty"`
 }
 
 // UpdateInfo contains information about an available update
@@ -340,7 +345,7 @@ func CachedUpdateInfo(currentVersion string) (*UpdateInfo, error) {
 	if cache == nil || cache.LatestVersion == "" {
 		return nil, nil
 	}
-	if !cacheMatchesConfiguredRepo(cache) {
+	if !cacheMatchesRelease(cache) {
 		return nil, nil
 	}
 	info := &UpdateInfo{
@@ -532,7 +537,7 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 	// Try to use cache first (unless force check)
 	if !forceCheck {
 		cache, err := loadCache()
-		if err == nil && cacheMatchesConfiguredRepo(cache) && time.Since(cache.CheckedAt) < checkInterval {
+		if err == nil && cacheMatchesRelease(cache) && time.Since(cache.CheckedAt) < checkInterval {
 			// Cache is fresh, use it
 			info.LatestVersion = cache.LatestVersion
 			info.DownloadURL = cache.DownloadURL
@@ -563,6 +568,7 @@ func CheckForUpdate(currentVersion string, forceCheck bool) (*UpdateInfo, error)
 	// Update cache
 	cache := &UpdateCache{
 		CheckedAt:      time.Now(),
+		Channel:        UpdateChannelRelease,
 		Repo:           ConfiguredGitHubRepo(),
 		LatestVersion:  latestVersion,
 		CurrentVersion: currentVersion,
@@ -609,6 +615,17 @@ func cacheMatchesConfiguredRepo(cache *UpdateCache) bool {
 		repo = GitHubRepo
 	}
 	return repo == ConfiguredGitHubRepo()
+}
+
+func cacheMatchesRelease(cache *UpdateCache) bool {
+	if cache == nil {
+		return false
+	}
+	channel := strings.TrimSpace(cache.Channel)
+	if channel == "" {
+		channel = UpdateChannelRelease
+	}
+	return channel == UpdateChannelRelease && cacheMatchesConfiguredRepo(cache)
 }
 
 // PerformUpdate downloads and installs the latest version

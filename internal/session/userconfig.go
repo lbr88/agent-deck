@@ -957,6 +957,14 @@ type UpdateSettings struct {
 	// Default: asheshgoplani/agent-deck
 	Repo string `toml:"repo,omitempty"`
 
+	// Channel controls how self-updates are resolved: "release" or "branch".
+	// Default: release
+	Channel string `toml:"channel,omitempty"`
+
+	// Branch is used when Channel is "branch".
+	// Default: main
+	Branch string `toml:"branch,omitempty"`
+
 	// AutoUpdate automatically installs updates without prompting
 	// Default: false
 	AutoUpdate bool `toml:"auto_update,omitempty"`
@@ -3581,12 +3589,20 @@ func GetUpdateSettings() UpdateSettings {
 	config, err := LoadUserConfig()
 	if err != nil || config == nil {
 		return UpdateSettings{
+			Channel:            "release",
+			Branch:             "main",
 			CheckIntervalHours: 24,
 		}
 	}
 
 	settings := config.Updates
 
+	if settings.Channel == "" {
+		settings.Channel = "release"
+	}
+	if settings.Branch == "" {
+		settings.Branch = "main"
+	}
 	if settings.CheckIntervalHours <= 0 {
 		settings.CheckIntervalHours = 24
 	}
@@ -3980,6 +3996,10 @@ remove_orphans = true
 [updates]
 # Public GitHub repo to fetch Agent Deck releases from (default: "asheshgoplani/agent-deck")
 # repo = "lbr88/agent-deck"
+# Update channel: "release" uses GitHub release binaries, "branch" builds from a branch
+# channel = "release"
+# Branch to track when channel = "branch"
+# branch = "main"
 # Automatically install updates without prompting (default: false)
 # auto_update = true
 # Enable update checks on startup (default: true)

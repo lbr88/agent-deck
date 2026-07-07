@@ -2508,6 +2508,8 @@ func TestGetUpdateSettings_ReadsConfiguredRepo(t *testing.T) {
 	}
 	if err := os.WriteFile(configPath, []byte(`[updates]
 repo = "lbr88/agent-deck"
+channel = "branch"
+branch = "main"
 check_interval_hours = 6
 `), 0600); err != nil {
 		t.Fatalf("write config.toml: %v", err)
@@ -2517,6 +2519,12 @@ check_interval_hours = 6
 	settings := GetUpdateSettings()
 	if settings.Repo != "lbr88/agent-deck" {
 		t.Fatalf("Repo = %q, want lbr88/agent-deck", settings.Repo)
+	}
+	if settings.Channel != "branch" {
+		t.Fatalf("Channel = %q, want branch", settings.Channel)
+	}
+	if settings.Branch != "main" {
+		t.Fatalf("Branch = %q, want main", settings.Branch)
 	}
 	if settings.CheckIntervalHours != 6 {
 		t.Fatalf("CheckIntervalHours = %d, want 6", settings.CheckIntervalHours)
