@@ -20,6 +20,7 @@ type ActionBackend interface {
 	Restart(ctx context.Context, sessionID string) error
 	Rename(ctx context.Context, sessionID, title string) error
 	Create(ctx context.Context, req CreateSessionRequest) (string, error)
+	Delete(ctx context.Context, sessionID string) error
 	Preview(ctx context.Context, sessionID string) (string, error)
 	ImportTmux(ctx context.Context) (int, error)
 }
@@ -141,6 +142,15 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: sessionID})
+	case "delete":
+		payload, err := decodeSessionAction(cmd.Payload, "delete")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.Delete(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
 	case "preview":
 		payload, err := decodeSessionAction(cmd.Payload, "preview")
 		if err != nil {
@@ -355,6 +365,36 @@ func (b LocalActionBackend) Create(ctx context.Context, req CreateSessionRequest
 		return "", err
 	}
 	return inst.ID, nil
+}
+
+func (b LocalActionBackend) Delete(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if err := inst.Kill(); err != nil {
+		return err
+	}
+	if inst.IsWorktree() {
+		if _, err := session.RemoveSessionWorktreeUnlessShared(inst, instances); err != nil {
+			return fmt.Errorf("remove worktree: %w", err)
+		}
+	}
+	if inst.IsMultiRepo() && strings.TrimSpace(inst.MultiRepoTempDir) != "" {
+		_ = os.RemoveAll(inst.MultiRepoTempDir)
+	}
+	filtered := instances[:0]
+	for _, candidate := range instances {
+		if candidate == nil || candidate.ID == sessionID {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return storage.SaveWithGroups(filtered, session.NewGroupTreeWithGroups(filtered, groups))
 }
 
 func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (string, error) {
