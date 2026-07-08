@@ -7,6 +7,9 @@ import { apiFetch } from './api.js'
 // Session data from SSE snapshot
 export const sessionsSignal = signal([])
 
+// Connected hub nodes from GET /api/menu / SSE snapshots.
+export const hubNodesSignal = signal([])
+
 // Archived sessions from GET /api/sessions/archived
 export const archivedSessionsSignal = signal([])
 

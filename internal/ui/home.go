@@ -946,6 +946,7 @@ type statusUpdateMsg struct {
 
 type hubClientAPI interface {
 	Attach(context.Context, string, string, hub.TerminalSize) error
+	OpenAttach(context.Context, string, string, hub.TerminalSize) (hub.AttachStream, error)
 	Command(context.Context, string, string, any) (json.RawMessage, error)
 	TrustDecision(context.Context, string, bool) error
 	Close() error
@@ -1728,6 +1729,13 @@ func (c *runningHubClient) Attach(ctx context.Context, nodeID, sessionID string,
 	return c.client.Attach(ctx, nodeID, sessionID, size)
 }
 
+func (c *runningHubClient) OpenAttach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.OpenAttach(ctx, nodeID, sessionID, size)
+}
+
 func (c *runningHubClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("hub client is not connected")
@@ -2023,6 +2031,7 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 			continue
 		}
 		nodeName := hubNodeDisplayName(node)
+		appendHubWebNode(snapshot, nodeID, nodeName)
 		byGroup := make(map[string][]hub.SessionInfo)
 		for _, info := range node.Sessions {
 			isArchived := info.ArchivedAt != nil && !info.ArchivedAt.IsZero()
@@ -2115,6 +2124,26 @@ func hubWebGroupPath(nodeID, groupPath string) string {
 		groupPath = session.DefaultGroupPath
 	}
 	return "hub/" + nodeID + "/" + groupPath
+}
+
+func appendHubWebNode(snapshot *web.MenuSnapshot, nodeID, nodeName string) {
+	if snapshot == nil {
+		return
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		nodeName = nodeID
+	}
+	for _, existing := range snapshot.HubNodes {
+		if existing.ID == nodeID {
+			return
+		}
+	}
+	snapshot.HubNodes = append(snapshot.HubNodes, web.HubNode{ID: nodeID, Name: nodeName})
 }
 
 func hubSessionUpdatedAt(info hub.SessionInfo) time.Time {

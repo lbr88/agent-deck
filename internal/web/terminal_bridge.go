@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
@@ -58,6 +59,98 @@ type tmuxPTYBridge struct {
 
 	closeOnce sync.Once
 	done      chan struct{}
+}
+
+type terminalBridge interface {
+	WriteInput(data string) error
+	Resize(cols, rows int) error
+	Close()
+}
+
+type hubAttachBridge struct {
+	stream    hub.AttachStream
+	sessionID string
+	writer    *wsConnWriter
+	done      chan struct{}
+	once      sync.Once
+}
+
+func newHubAttachBridge(stream hub.AttachStream, sessionID string, writer *wsConnWriter) (*hubAttachBridge, error) {
+	if stream == nil {
+		return nil, fmt.Errorf("hub attach stream is required")
+	}
+	if writer == nil {
+		return nil, fmt.Errorf("writer is required")
+	}
+	b := &hubAttachBridge{
+		stream:    stream,
+		sessionID: sessionID,
+		writer:    writer,
+		done:      make(chan struct{}),
+	}
+	go b.streamOutput()
+	return b, nil
+}
+
+func (b *hubAttachBridge) streamOutput() {
+	defer close(b.done)
+	buf := make([]byte, 4096)
+	for {
+		n, err := b.stream.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			if writeErr := b.writer.WriteBinary(chunk); writeErr != nil {
+				b.Close()
+				return
+			}
+		}
+		if err != nil {
+			_ = b.writer.WriteJSON(wsServerMessage{
+				Type:      "status",
+				Event:     "session_closed",
+				SessionID: b.sessionID,
+				Time:      time.Now().UTC(),
+			})
+			b.Close()
+			return
+		}
+	}
+}
+
+func (b *hubAttachBridge) WriteInput(data string) error {
+	if b == nil || b.stream == nil {
+		return fmt.Errorf("bridge not initialized")
+	}
+	if data == "" {
+		return nil
+	}
+	_, err := b.stream.Write([]byte(data))
+	return err
+}
+
+func (b *hubAttachBridge) Resize(cols, rows int) error {
+	if b == nil || b.stream == nil {
+		return fmt.Errorf("bridge not initialized")
+	}
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("invalid dimensions: cols=%d rows=%d", cols, rows)
+	}
+	if cols < 10 || rows < 3 {
+		return fmt.Errorf("dimensions too small for a usable terminal: cols=%d rows=%d", cols, rows)
+	}
+	return b.stream.Resize(hub.TerminalSize{Cols: cols, Rows: rows})
+}
+
+func (b *hubAttachBridge) Close() {
+	if b == nil {
+		return
+	}
+	b.once.Do(func() {
+		if b.stream != nil {
+			_ = b.stream.Close()
+		}
+	})
 }
 
 func newTmuxPTYBridge(tmuxSession, tmuxSocketName, sessionID string, writer *wsConnWriter) (*tmuxPTYBridge, error) {

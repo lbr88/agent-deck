@@ -119,6 +119,15 @@ type requesterAttachStream struct {
 	closed   chan AttachClosePayload
 }
 
+type clientAttachStream struct {
+	client *Client
+	conn   *clientConn
+	stream *requesterAttachStream
+	closed chan struct{}
+	once   sync.Once
+	buf    []byte
+}
+
 type commandWaiter struct {
 	commandID string
 	result    chan CommandResultPayload
@@ -131,6 +140,88 @@ func newRequesterAttachStream(streamID string) *requesterAttachStream {
 		data:     make(chan []byte, 128),
 		closed:   make(chan AttachClosePayload, 1),
 	}
+}
+
+func (s *clientAttachStream) Read(p []byte) (int, error) {
+	if s == nil || s.stream == nil {
+		return 0, io.ErrClosedPipe
+	}
+	for len(s.buf) == 0 {
+		select {
+		case data := <-s.stream.data:
+			if len(data) == 0 {
+				continue
+			}
+			s.buf = append(s.buf, data...)
+		case closed := <-s.stream.closed:
+			if err := attachClosedError(closed); err != nil && !errors.Is(err, errAttachClosedByOwner) {
+				return 0, err
+			}
+			return 0, io.EOF
+		case <-s.closed:
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, s.buf)
+	s.buf = s.buf[n:]
+	return n, nil
+}
+
+func (s *clientAttachStream) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if s == nil || s.conn == nil || s.stream == nil || s.client == nil {
+		return 0, io.ErrClosedPipe
+	}
+	select {
+	case <-s.closed:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	if err := s.conn.writeEnvelope(MsgAttachData, s.client.cfg.NodeID, NewAttachData(s.stream.streamID, p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (s *clientAttachStream) Resize(size TerminalSize) error {
+	if s == nil || s.conn == nil || s.stream == nil || s.client == nil {
+		return io.ErrClosedPipe
+	}
+	if size.Cols <= 0 || size.Rows <= 0 {
+		return nil
+	}
+	select {
+	case <-s.closed:
+		return io.ErrClosedPipe
+	default:
+	}
+	return s.conn.writeEnvelope(MsgAttachResize, s.client.cfg.NodeID, AttachResizePayload{
+		StreamID: s.stream.streamID,
+		Cols:     size.Cols,
+		Rows:     size.Rows,
+	})
+}
+
+func (s *clientAttachStream) Close() error {
+	if s == nil {
+		return nil
+	}
+	var err error
+	s.once.Do(func() {
+		close(s.closed)
+		if s.client != nil && s.stream != nil {
+			s.client.unregisterRequesterStream(s.stream.streamID)
+		}
+		if s.conn != nil && s.client != nil && s.stream != nil {
+			err = s.conn.writeEnvelope(MsgAttachClose, s.client.cfg.NodeID, AttachClosePayload{
+				StreamID: s.stream.streamID,
+				Reason:   "detached",
+			})
+		}
+	})
+	return err
 }
 
 func (c *Client) setActiveConn(conn *clientConn) {
@@ -748,6 +839,65 @@ func (c *Client) TrustDecision(ctx context.Context, nodeID string, allow bool) e
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func (c *Client) OpenAttach(ctx context.Context, nodeID, sessionID string, size TerminalSize) (AttachStream, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" {
+		return nil, fmt.Errorf("hub attach node id is required")
+	}
+	if sessionID == "" {
+		return nil, fmt.Errorf("hub attach session id is required")
+	}
+	conn := c.currentConn()
+	if conn == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	if size.Cols <= 0 || size.Rows <= 0 {
+		size = TerminalSize{Cols: 80, Rows: 24}
+	}
+	streamID, err := newSecret("attach_")
+	if err != nil {
+		return nil, err
+	}
+	stream := newRequesterAttachStream(streamID)
+	c.registerRequesterStream(stream)
+
+	if err := conn.writeEnvelope(MsgAttachOpen, c.cfg.NodeID, AttachOpenPayload{
+		StreamID:  streamID,
+		NodeID:    nodeID,
+		SessionID: sessionID,
+		Cols:      size.Cols,
+		Rows:      size.Rows,
+	}); err != nil {
+		c.unregisterRequesterStream(streamID)
+		return nil, err
+	}
+
+	select {
+	case <-stream.ready:
+		return &clientAttachStream{
+			client: c,
+			conn:   conn,
+			stream: stream,
+			closed: make(chan struct{}),
+		}, nil
+	case closed := <-stream.closed:
+		c.unregisterRequesterStream(streamID)
+		err := attachClosedError(closed)
+		if errors.Is(err, errAttachClosedByOwner) || err == nil {
+			return nil, fmt.Errorf("hub attach closed before ready")
+		}
+		return nil, err
+	case <-ctx.Done():
+		c.unregisterRequesterStream(streamID)
+		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: ctx.Err().Error()})
+		return nil, ctx.Err()
 	}
 }
 

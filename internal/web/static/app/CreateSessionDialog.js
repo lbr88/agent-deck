@@ -5,7 +5,7 @@ import { html } from 'htm/preact'
 import { useState } from 'preact/hooks'
 import {
   createSessionDialogSignal, mutationsEnabledSignal,
-  toolFilterFallbackSignal, pickerToolsSignal,
+  toolFilterFallbackSignal, pickerToolsSignal, hubNodesSignal,
 } from './state.js'
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
@@ -127,6 +127,11 @@ export function CreateSessionDialog() {
   const { groups, sessions } = menuModelSignal.value
   const hubNodes = []
   const seenHubNodes = new Set()
+  for (const n of hubNodesSignal.value || []) {
+    if (!n?.id || seenHubNodes.has(n.id)) continue
+    hubNodes.push({ id: n.id, name: n.name || n.id })
+    seenHubNodes.add(n.id)
+  }
   for (const g of groups || []) {
     if (!g?.isHub || !g.hubNodeId || seenHubNodes.has(g.hubNodeId)) continue
     hubNodes.push({ id: g.hubNodeId, name: g.hubNodeName || g.hubNodeId })

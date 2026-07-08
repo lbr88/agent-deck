@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
 	"github.com/gorilla/websocket"
 )
@@ -105,8 +107,55 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 		Time:      time.Now().UTC(),
 	})
 
-	var bridge *tmuxPTYBridge
-	if menuSession.TmuxSession != "" {
+	var bridge terminalBridge
+	if hubNodeID, hubSessionID, ok := hubTerminalTarget(menuSession); ok {
+		attacher, ok := s.mutator.(HubTerminalAttacher)
+		if !ok {
+			_ = writer.WriteJSON(wsServerMessage{
+				Type:      "error",
+				Code:      "HUB_TERMINAL_UNAVAILABLE",
+				Message:   "hub terminal attach is not available",
+				SessionID: sessionID,
+				Time:      time.Now().UTC(),
+			})
+		} else {
+			attachCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			stream, err := attacher.OpenHubTerminal(attachCtx, hubNodeID, hubSessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+			cancel()
+			if err != nil {
+				logging.ForComponent(logging.CompWeb).Error("hub_terminal_attach_failed",
+					slog.String("session_id", sessionID),
+					slog.String("hub_node_id", hubNodeID),
+					slog.String("hub_session_id", hubSessionID),
+					slog.String("error", err.Error()))
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "error",
+					Code:      "HUB_TERMINAL_ATTACH_FAILED",
+					Message:   "failed to attach hub terminal bridge",
+					Hint:      "Make sure the remote hub node is online and running an agent-deck version that supports interactive hub attach.",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			} else if bridge, err = newHubAttachBridge(stream, sessionID, writer); err != nil {
+				_ = stream.Close()
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "error",
+					Code:      "HUB_TERMINAL_ATTACH_FAILED",
+					Message:   "failed to initialize hub terminal bridge",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			} else {
+				defer bridge.Close()
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "status",
+					Event:     "terminal_attached",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			}
+		}
+	} else if menuSession.TmuxSession != "" {
 		bridge, err = newTmuxPTYBridge(menuSession.TmuxSession, menuSession.TmuxSocketName, sessionID, writer)
 		if err != nil {
 			logging.ForComponent(logging.CompWeb).Error("terminal_attach_failed",
@@ -239,6 +288,21 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+}
+
+func hubTerminalTarget(menuSession *MenuSession) (nodeID, sessionID string, ok bool) {
+	if menuSession == nil {
+		return "", "", false
+	}
+	if nodeID, sessionID, ok = ParseHubSessionWebID(menuSession.ID); ok {
+		return nodeID, sessionID, true
+	}
+	nodeID = strings.TrimSpace(menuSession.HubNodeID)
+	sessionID = strings.TrimSpace(menuSession.HubSessionID)
+	if menuSession.Source == "hub" && nodeID != "" && sessionID != "" {
+		return nodeID, sessionID, true
+	}
+	return "", "", false
 }
 
 func snapshotSessionByID(snapshot *MenuSnapshot, sessionID string) (*MenuSession, bool) {

@@ -28,7 +28,13 @@ type MenuSnapshot struct {
 	GeneratedAt   time.Time  `json:"generatedAt"`
 	TotalGroups   int        `json:"totalGroups"`
 	TotalSessions int        `json:"totalSessions"`
+	HubNodes      []HubNode  `json:"hubNodes,omitempty"`
 	Items         []MenuItem `json:"items"`
+}
+
+type HubNode struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // MenuItem represents one row in the flattened navigation list.

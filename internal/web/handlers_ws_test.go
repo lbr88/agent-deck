@@ -1,12 +1,15 @@
 package web
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/gorilla/websocket"
 )
 
@@ -263,6 +266,77 @@ func TestWSEndpointConnectAndPing(t *testing.T) {
 	}
 }
 
+func TestWSEndpointHubSessionAttachesThroughHubTerminal(t *testing.T) {
+	stream := newFakeHubAttachStream()
+	mutator := &fakeHubTerminalMutator{stream: stream}
+	sessionID := HubSessionWebID("node_server", "remote_sess")
+	srv := NewServer(Config{
+		ListenAddr: "127.0.0.1:0",
+		Profile:    "work",
+	})
+	srv.mutator = mutator
+	srv.menuData = &fakeMenuDataLoader{
+		snapshot: &MenuSnapshot{
+			Profile: "work",
+			Items: []MenuItem{
+				{
+					Type: MenuItemTypeSession,
+					Session: &MenuSession{
+						ID:           sessionID,
+						Source:       "hub",
+						HubNodeID:    "node_server",
+						HubNodeName:  "server",
+						HubSessionID: "remote_sess",
+					},
+				},
+			},
+		},
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(testServer.URL, "/ws/session/"+sessionID), nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial failed with status %d: %v", resp.StatusCode, err)
+		}
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	expectWSStatusEvent(t, conn, "connected")
+	expectWSStatusEvent(t, conn, "ready")
+	expectWSStatusEvent(t, conn, "terminal_attached")
+	if mutator.nodeID != "node_server" || mutator.sessionID != "remote_sess" {
+		t.Fatalf("hub attach target = %q/%q, want node_server/remote_sess", mutator.nodeID, mutator.sessionID)
+	}
+
+	stream.emit([]byte("remote-output"))
+	msgType, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read hub terminal output: %v", err)
+	}
+	if msgType != websocket.BinaryMessage || string(data) != "remote-output" {
+		t.Fatalf("hub terminal output message type=%d data=%q", msgType, string(data))
+	}
+
+	if err := conn.WriteJSON(wsClientMessage{Type: "input", Data: "echo hi\r"}); err != nil {
+		t.Fatalf("write hub input: %v", err)
+	}
+	if got := string(stream.waitWrite(t)); got != "echo hi\r" {
+		t.Fatalf("hub stream input = %q, want echo hi", got)
+	}
+
+	if err := conn.WriteJSON(wsClientMessage{Type: "resize", Cols: 120, Rows: 40}); err != nil {
+		t.Fatalf("write hub resize: %v", err)
+	}
+	if got := stream.waitResize(t); got.Cols != 120 || got.Rows != 40 {
+		t.Fatalf("hub stream resize = %+v, want 120x40", got)
+	}
+}
+
 func TestWSEndpointInputWithoutTerminalBridge(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -419,3 +493,90 @@ func expectWSStatusEvent(t *testing.T, conn *websocket.Conn, event string) {
 		t.Fatalf("expected status=%q message, got: %+v", event, msg)
 	}
 }
+
+type fakeHubTerminalMutator struct {
+	fakeMutator
+	stream    *fakeHubAttachStream
+	nodeID    string
+	sessionID string
+	size      hub.TerminalSize
+}
+
+func (m *fakeHubTerminalMutator) OpenHubTerminal(_ context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
+	m.nodeID = nodeID
+	m.sessionID = sessionID
+	m.size = size
+	return m.stream, nil
+}
+
+type fakeHubAttachStream struct {
+	readCh   chan []byte
+	writes   chan []byte
+	resizes  chan hub.TerminalSize
+	closeReq chan struct{}
+}
+
+func newFakeHubAttachStream() *fakeHubAttachStream {
+	return &fakeHubAttachStream{
+		readCh:   make(chan []byte, 4),
+		writes:   make(chan []byte, 4),
+		resizes:  make(chan hub.TerminalSize, 4),
+		closeReq: make(chan struct{}),
+	}
+}
+
+func (s *fakeHubAttachStream) Read(p []byte) (int, error) {
+	select {
+	case data := <-s.readCh:
+		return copy(p, data), nil
+	case <-s.closeReq:
+		return 0, io.EOF
+	}
+}
+
+func (s *fakeHubAttachStream) Write(p []byte) (int, error) {
+	s.writes <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+func (s *fakeHubAttachStream) Resize(size hub.TerminalSize) error {
+	s.resizes <- size
+	return nil
+}
+
+func (s *fakeHubAttachStream) Close() error {
+	select {
+	case <-s.closeReq:
+	default:
+		close(s.closeReq)
+	}
+	return nil
+}
+
+func (s *fakeHubAttachStream) emit(data []byte) {
+	s.readCh <- append([]byte(nil), data...)
+}
+
+func (s *fakeHubAttachStream) waitWrite(t *testing.T) []byte {
+	t.Helper()
+	select {
+	case data := <-s.writes:
+		return data
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for hub stream write")
+		return nil
+	}
+}
+
+func (s *fakeHubAttachStream) waitResize(t *testing.T) hub.TerminalSize {
+	t.Helper()
+	select {
+	case size := <-s.resizes:
+		return size
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for hub stream resize")
+		return hub.TerminalSize{}
+	}
+}
+
+var _ hub.AttachStream = (*fakeHubAttachStream)(nil)

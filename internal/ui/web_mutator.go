@@ -25,6 +25,7 @@ import (
 var _ web.SessionMutator = (*WebMutator)(nil)
 var _ web.HubSessionCreator = (*WebMutator)(nil)
 var _ web.HubDashboardProxy = (*WebMutator)(nil)
+var _ web.HubTerminalAttacher = (*WebMutator)(nil)
 
 // WebMutator bridges the web HTTP handlers to the TUI session/group management
 // methods. It wraps the Home model and implements web.SessionMutator.
@@ -184,6 +185,16 @@ func (m *WebMutator) ProxyHubWeb(ctx context.Context, nodeID string, req hub.Web
 		return hub.WebProxyResponse{}, fmt.Errorf("decode hub web proxy response: %w", err)
 	}
 	return result, nil
+}
+
+func (m *WebMutator) OpenHubTerminal(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m == nil || m.h == nil || m.h.hubClient == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return m.h.hubClient.OpenAttach(ctx, strings.TrimSpace(nodeID), strings.TrimSpace(sessionID), size)
 }
 
 // StartSession starts a stopped/idle session by ID.

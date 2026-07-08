@@ -108,6 +108,9 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	if !webSnapshotHasHubGroup(active, "node_empty", session.DefaultGroupPath, 0) {
 		t.Fatalf("active web snapshot missing empty hub node group: %+v", active.Items)
 	}
+	if !webSnapshotHasHubNode(active, "node_empty", "empty") {
+		t.Fatalf("active web snapshot missing empty hub node target: %+v", active.HubNodes)
+	}
 
 	archived, err := menuData.LoadArchivedMenuSnapshot()
 	if err != nil {
@@ -1239,6 +1242,13 @@ func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID stri
 	return nil
 }
 
+func (c *fakeHubAttachClient) OpenAttach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
+	c.nodeID = nodeID
+	c.sessionID = sessionID
+	c.size = size
+	return nil, nil
+}
+
 func (c *fakeHubAttachClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
 	c.commands = append(c.commands, hubCommandCall{nodeID: nodeID, action: action, payload: payload})
 	if c.commandErr != nil {
@@ -1314,6 +1324,18 @@ func webSnapshotHasHubGroup(snapshot *web.MenuSnapshot, nodeID, groupPath string
 			continue
 		}
 		if item.Group.Source == "hub" && item.Group.HubNodeID == nodeID && item.Group.HubGroupPath == groupPath && item.Group.SessionCount == sessionCount {
+			return true
+		}
+	}
+	return false
+}
+
+func webSnapshotHasHubNode(snapshot *web.MenuSnapshot, nodeID, nodeName string) bool {
+	if snapshot == nil {
+		return false
+	}
+	for _, node := range snapshot.HubNodes {
+		if node.ID == nodeID && node.Name == nodeName {
 			return true
 		}
 	}

@@ -5,6 +5,7 @@ import { App } from './App.js'
 import { apiFetch } from './api.js'
 import {
   sessionsSignal,
+  hubNodesSignal,
   sessionsLoadedSignal,
   selectedIdSignal,
   connectionSignal,
@@ -60,6 +61,7 @@ export function startSSE() {
       const snapshot = JSON.parse(event.data)
       if (snapshot && Array.isArray(snapshot.items)) {
         sessionsSignal.value = snapshot.items
+        hubNodesSignal.value = Array.isArray(snapshot.hubNodes) ? snapshot.hubNodes : []
         // POL-1: first SSE snapshot counts as loaded. Skeleton unmounts
         // even if the snapshot is empty — the server has spoken.
         sessionsLoadedSignal.value = true
@@ -143,6 +145,7 @@ export async function loadMenu() {
   try {
     const data = await apiFetch('GET', '/api/menu')
     sessionsSignal.value = data.items || []
+    hubNodesSignal.value = Array.isArray(data.hubNodes) ? data.hubNodes : []
     // POL-1: first real data arrived — unmount the skeleton. Do NOT set
     // this in the catch branch; the skeleton is the correct state when
     // we're offline.

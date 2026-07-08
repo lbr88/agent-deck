@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/costs"
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"golang.org/x/time/rate"
@@ -138,6 +139,10 @@ type SessionMutator interface {
 
 type HubSessionCreator interface {
 	CreateHubSession(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error)
+}
+
+type HubTerminalAttacher interface {
+	OpenHubTerminal(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error)
 }
 
 // Server wraps an HTTP server for Agent Deck web mode.

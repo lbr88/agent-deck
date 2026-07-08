@@ -149,6 +149,7 @@ func cloneMenuSnapshot(snapshot *MenuSnapshot) *MenuSnapshot {
 	}
 
 	cloned := *snapshot
+	cloned.HubNodes = append([]HubNode(nil), snapshot.HubNodes...)
 	cloned.Items = make([]MenuItem, len(snapshot.Items))
 
 	for i, item := range snapshot.Items {
