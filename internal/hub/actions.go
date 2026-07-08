@@ -1,9 +1,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -30,6 +35,25 @@ type ActionBackend interface {
 	ToggleYolo(ctx context.Context, sessionID string) error
 	Preview(ctx context.Context, sessionID string) (string, error)
 	ImportTmux(ctx context.Context) (int, error)
+}
+
+const MaxWebProxyBodyBytes = 8 * 1024 * 1024
+
+type WebProxyBackend interface {
+	ProxyWeb(ctx context.Context, req WebProxyRequest) (WebProxyResponse, error)
+}
+
+type WebProxyRequest struct {
+	Method  string              `json:"method"`
+	Path    string              `json:"path"`
+	Header  map[string][]string `json:"header,omitempty"`
+	BodyB64 string              `json:"body_b64,omitempty"`
+}
+
+type WebProxyResponse struct {
+	StatusCode int                 `json:"status_code"`
+	Header     map[string][]string `json:"header,omitempty"`
+	BodyB64    string              `json:"body_b64,omitempty"`
 }
 
 type CreateSessionRequest struct {
@@ -281,6 +305,24 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		return raw, nil
+	case "web_proxy":
+		backend, ok := d.Backend.(WebProxyBackend)
+		if !ok {
+			return nil, fmt.Errorf("hub web proxy backend is not configured")
+		}
+		var payload WebProxyRequest
+		if err := decodeCommandPayload(cmd.Payload, &payload); err != nil {
+			return nil, err
+		}
+		result, err := backend.ProxyWeb(ctx, payload)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
 	default:
 		return nil, fmt.Errorf("unknown hub action %q", action)
 	}
@@ -315,8 +357,144 @@ func marshalActionResult(result actionResult) (json.RawMessage, error) {
 	return raw, nil
 }
 
+func sanitizeWebProxyPath(rawPath string) (string, error) {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return "/", nil
+	}
+	if strings.HasPrefix(rawPath, "//") {
+		return "", fmt.Errorf("web proxy path must not start with //")
+	}
+	u, err := url.ParseRequestURI(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid web proxy path: %w", err)
+	}
+	if u.IsAbs() || u.Host != "" {
+		return "", fmt.Errorf("web proxy path must be relative to the local agent-deck web server")
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return "", fmt.Errorf("web proxy path must start with /")
+	}
+	return u.RequestURI(), nil
+}
+
+func decodeWebProxyBody(bodyB64 string) ([]byte, error) {
+	bodyB64 = strings.TrimSpace(bodyB64)
+	if bodyB64 == "" {
+		return nil, nil
+	}
+	if len(bodyB64) > base64.StdEncoding.EncodedLen(MaxWebProxyBodyBytes) {
+		return nil, fmt.Errorf("web proxy request body exceeds %d bytes", MaxWebProxyBodyBytes)
+	}
+	body, err := base64.StdEncoding.DecodeString(bodyB64)
+	if err != nil {
+		return nil, fmt.Errorf("decode web proxy request body: %w", err)
+	}
+	if len(body) > MaxWebProxyBodyBytes {
+		return nil, fmt.Errorf("web proxy request body exceeds %d bytes", MaxWebProxyBodyBytes)
+	}
+	return body, nil
+}
+
+func copyAllowedWebProxyHeaders(dst http.Header, src map[string][]string) {
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		switch canonical {
+		case "Accept", "Accept-Encoding", "Accept-Language", "Content-Type", "If-Modified-Since", "If-None-Match", "User-Agent":
+		default:
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				dst.Add(canonical, value)
+			}
+		}
+	}
+}
+
+func filteredWebProxyResponseHeader(src http.Header) map[string][]string {
+	out := make(map[string][]string)
+	for key, values := range src {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		switch canonical {
+		case "Cache-Control", "Content-Type", "ETag", "Expires", "Last-Modified", "Location":
+		default:
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				out[canonical] = append(out[canonical], value)
+			}
+		}
+	}
+	return out
+}
+
+func readLimitedWebProxyBody(body io.Reader) ([]byte, error) {
+	limited := io.LimitReader(body, MaxWebProxyBodyBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read web proxy response body: %w", err)
+	}
+	if len(data) > MaxWebProxyBodyBytes {
+		return nil, fmt.Errorf("web proxy response body exceeds %d bytes", MaxWebProxyBodyBytes)
+	}
+	return data, nil
+}
+
 type LocalActionBackend struct {
 	Profile string
+}
+
+func (b LocalActionBackend) ProxyWeb(ctx context.Context, req WebProxyRequest) (WebProxyResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return WebProxyResponse{}, fmt.Errorf("web proxy method %q is not allowed", method)
+	}
+	path, err := sanitizeWebProxyPath(req.Path)
+	if err != nil {
+		return WebProxyResponse{}, err
+	}
+	body, err := decodeWebProxyBody(req.BodyB64)
+	if err != nil {
+		return WebProxyResponse{}, err
+	}
+	proxyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(proxyCtx, method, "http://127.0.0.1:8420"+path, bytes.NewReader(body))
+	if err != nil {
+		return WebProxyResponse{}, err
+	}
+	copyAllowedWebProxyHeaders(httpReq.Header, req.Header)
+	httpReq.Header.Set("X-Agent-Deck-Hub-Proxy", "1")
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return WebProxyResponse{}, fmt.Errorf("remote agent-deck web server is not reachable on 127.0.0.1:8420: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := readLimitedWebProxyBody(resp.Body)
+	if err != nil {
+		return WebProxyResponse{}, err
+	}
+	return WebProxyResponse{
+		StatusCode: resp.StatusCode,
+		Header:     filteredWebProxyResponseHeader(resp.Header),
+		BodyB64:    base64.StdEncoding.EncodeToString(data),
+	}, nil
 }
 
 func (b LocalActionBackend) Send(ctx context.Context, sessionID, message string) error {

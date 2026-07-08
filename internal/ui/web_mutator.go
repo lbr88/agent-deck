@@ -24,6 +24,7 @@ import (
 // Compile-time check: WebMutator must implement web.SessionMutator.
 var _ web.SessionMutator = (*WebMutator)(nil)
 var _ web.HubSessionCreator = (*WebMutator)(nil)
+var _ web.HubDashboardProxy = (*WebMutator)(nil)
 
 // WebMutator bridges the web HTTP handlers to the TUI session/group management
 // methods. It wraps the Home model and implements web.SessionMutator.
@@ -168,6 +169,21 @@ func (m *WebMutator) CreateHubSession(title, tool, projectPath, groupPath, model
 	}
 	m.publishHubWebSnapshot()
 	return web.HubSessionWebID(hubNodeID, result.SessionID), nil
+}
+
+func (m *WebMutator) ProxyHubWeb(ctx context.Context, nodeID string, req hub.WebProxyRequest) (hub.WebProxyResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	raw, err := m.hubCommandWithContext(ctx, strings.TrimSpace(nodeID), "web_proxy", req)
+	if err != nil {
+		return hub.WebProxyResponse{}, err
+	}
+	var result hub.WebProxyResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return hub.WebProxyResponse{}, fmt.Errorf("decode hub web proxy response: %w", err)
+	}
+	return result, nil
 }
 
 // StartSession starts a stopped/idle session by ID.
@@ -617,6 +633,14 @@ func (m *WebMutator) hubSessionAction(nodeID, sessionID, action string) error {
 }
 
 func (m *WebMutator) hubCommand(nodeID, action string, payload any) (json.RawMessage, error) {
+	ctx := m.h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return m.hubCommandWithContext(ctx, nodeID, action, payload)
+}
+
+func (m *WebMutator) hubCommandWithContext(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
 	if m == nil || m.h == nil || m.h.hubClient == nil {
 		return nil, fmt.Errorf("hub client is not connected")
 	}
@@ -625,7 +649,6 @@ func (m *WebMutator) hubCommand(nodeID, action string, payload any) (json.RawMes
 	if nodeID == "" || action == "" {
 		return nil, fmt.Errorf("hub action target is incomplete")
 	}
-	ctx := m.h.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}

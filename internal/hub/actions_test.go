@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 )
@@ -198,6 +199,50 @@ func TestCommandDispatcherImportTmuxUsesBackend(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherWebProxyUsesBackend(t *testing.T) {
+	fake := &fakeActionBackend{
+		webProxyResp: WebProxyResponse{
+			StatusCode: 200,
+			Header:     map[string][]string{"Content-Type": {"text/html"}},
+			BodyB64:    base64.StdEncoding.EncodeToString([]byte("<html>remote</html>")),
+		},
+	}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(WebProxyRequest{Method: "GET", Path: "/api/menu"})
+
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "web_proxy",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch web_proxy: %v", err)
+	}
+	if fake.webProxyReq.Path != "/api/menu" || fake.webProxyReq.Method != "GET" {
+		t.Fatalf("web proxy req = %+v", fake.webProxyReq)
+	}
+	var result WebProxyResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode web proxy result: %v", err)
+	}
+	body, err := base64.StdEncoding.DecodeString(result.BodyB64)
+	if err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if string(body) != "<html>remote</html>" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestSanitizeWebProxyPathRejectsAbsoluteURL(t *testing.T) {
+	if _, err := sanitizeWebProxyPath("http://example.com/api/menu"); err == nil {
+		t.Fatal("absolute URL accepted")
+	}
+	if _, err := sanitizeWebProxyPath("//example.com/api/menu"); err == nil {
+		t.Fatal("// URL accepted")
+	}
+}
+
 type fakeActionBackend struct {
 	sentSessionID    string
 	sentMessage      string
@@ -212,6 +257,8 @@ type fakeActionBackend struct {
 	movedSessionID   string
 	movedGroupPath   string
 	updateReq        UpdateSessionRequest
+	webProxyReq      WebProxyRequest
+	webProxyResp     WebProxyResponse
 }
 
 func (b *fakeActionBackend) Send(_ context.Context, sessionID, message string) error {
@@ -290,4 +337,9 @@ func (b *fakeActionBackend) Preview(_ context.Context, sessionID string) (string
 func (b *fakeActionBackend) ImportTmux(context.Context) (int, error) {
 	b.importTmuxCalled = true
 	return b.importTmuxCount, nil
+}
+
+func (b *fakeActionBackend) ProxyWeb(_ context.Context, req WebProxyRequest) (WebProxyResponse, error) {
+	b.webProxyReq = req
+	return b.webProxyResp, nil
 }

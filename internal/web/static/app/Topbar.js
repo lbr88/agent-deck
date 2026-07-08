@@ -32,6 +32,8 @@ export function Topbar() {
   const conn = connectionSignal.value
   const rail = railSignal.value
   const { sessions } = menuModelSignal.value
+  const dashboardNodes = dashboardHubNodes(menuModelSignal.value)
+  const currentDashboardNode = currentHubDashboardNode()
   const sessionsBadge = sessions.filter(s => s.status === 'waiting' || s.status === 'error').length
   const pendingNeeds = sessions.reduce((n, s) => n + (s.pendingNeeds || 0), 0)
   const cc = commandCenterSignal.value
@@ -68,6 +70,18 @@ export function Topbar() {
         </div>
       </div>
       <div class="top-right">
+        <select
+          class="icon-btn"
+          style=${{ width: 'auto', padding: '0 8px', fontFamily: 'var(--mono)', fontSize: '11px' }}
+          value=${currentDashboardNode || '__local__'}
+          title="Switch dashboard"
+          aria-label="Switch dashboard"
+          onChange=${(event) => switchDashboard(event.currentTarget.value)}>
+          <option value="__local__">local dashboard</option>
+          ${dashboardNodes.map(node => html`
+            <option key=${node.id} value=${node.id}>${node.name}</option>
+          `)}
+        </select>
         <div class=${`conn-pill ${connClass}`}>
           <span class="dot" style=${connDotStyle}/>ws · ${conn === 'connected' ? 'live' : conn}
         </div>
@@ -111,4 +125,41 @@ export function Topbar() {
       </div>
     </header>
   `
+}
+
+function dashboardHubNodes(model) {
+  const nodes = new Map()
+  const groups = model && Array.isArray(model.groups) ? model.groups : []
+  const sessions = model && Array.isArray(model.sessions) ? model.sessions : []
+  for (const g of groups) {
+    if (g && g.isHub && g.hubNodeId) nodes.set(g.hubNodeId, g.hubNodeName || g.hubNodeId)
+  }
+  for (const s of sessions) {
+    if (s && s.isHub && s.hubNodeId) nodes.set(s.hubNodeId, s.hubNodeName || s.hubNodeId)
+  }
+  return Array.from(nodes.entries())
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function currentHubDashboardNode() {
+  const path = window.location.pathname || '/'
+  const prefix = '/hub/dashboard/'
+  if (!path.startsWith(prefix)) return ''
+  const rest = path.slice(prefix.length)
+  const raw = rest.split('/')[0]
+  if (!raw) return ''
+  try {
+    return decodeURIComponent(raw)
+  } catch (_) {
+    return raw
+  }
+}
+
+function switchDashboard(value) {
+  if (!value || value === '__local__') {
+    window.location.href = '/'
+    return
+  }
+  window.location.href = '/hub/dashboard/' + encodeURIComponent(value) + '/'
 }

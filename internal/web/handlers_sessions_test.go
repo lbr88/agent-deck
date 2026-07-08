@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
@@ -36,6 +39,13 @@ type fakeMutator struct {
 type fakeHubCreateMutator struct {
 	fakeMutator
 	createHubSessionFn func(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error)
+}
+
+type fakeHubDashboardMutator struct {
+	fakeMutator
+	nodeID string
+	req    hub.WebProxyRequest
+	resp   hub.WebProxyResponse
 }
 
 func (f *fakeMutator) CreateSession(title, tool, projectPath, groupPath, modelID string) (string, error) {
@@ -148,6 +158,47 @@ func (f *fakeHubCreateMutator) CreateHubSession(title, tool, projectPath, groupP
 		return "", fmt.Errorf("createHubSession not configured")
 	}
 	return f.createHubSessionFn(title, tool, projectPath, groupPath, modelID, hubNodeID)
+}
+
+func (f *fakeHubDashboardMutator) ProxyHubWeb(_ context.Context, nodeID string, req hub.WebProxyRequest) (hub.WebProxyResponse, error) {
+	f.nodeID = nodeID
+	f.req = req
+	return f.resp, nil
+}
+
+func TestHubDashboardProxyRoutesThroughMutatorAndRewritesPaths(t *testing.T) {
+	body := `<script type="module" src="/static/app/main.js"></script><script>fetch('/api/menu'); new EventSource('/events/menu'); new WebSocket('/ws/session/s1')</script>`
+	mutator := &fakeHubDashboardMutator{
+		resp: hub.WebProxyResponse{
+			StatusCode: http.StatusOK,
+			Header:     map[string][]string{"Content-Type": {"text/html; charset=utf-8"}},
+			BodyB64:    base64.StdEncoding.EncodeToString([]byte(body)),
+		},
+	}
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", Profile: "test"})
+	srv.SetMutator(mutator)
+
+	req := httptest.NewRequest(http.MethodGet, "/hub/dashboard/node_server/?v=1", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if mutator.nodeID != "node_server" || mutator.req.Path != "/?v=1" || mutator.req.Method != http.MethodGet {
+		t.Fatalf("proxy call node=%q req=%+v", mutator.nodeID, mutator.req)
+	}
+	got := rr.Body.String()
+	for _, want := range []string{
+		`/hub/dashboard/node_server/static/app/main.js`,
+		`/hub/dashboard/node_server/api/menu`,
+		`/hub/dashboard/node_server/events/menu`,
+		`/hub/dashboard/node_server/ws/session/s1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("rewritten body missing %q:\n%s", want, got)
+		}
+	}
 }
 
 func TestSessionsCollectionGET(t *testing.T) {
