@@ -294,7 +294,9 @@ func (c *Client) Connect(ctx context.Context) error {
 			return nil
 		}
 		notifyClientStatus(cfg, "connecting")
-		err = c.connectOnce(ctx, cfg, wsURL, tlsConfig)
+		if err := c.connectOnce(ctx, cfg, wsURL, tlsConfig); err == nil {
+			return nil
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -1074,11 +1076,15 @@ func (c *Client) runRequesterAttachTerminal(ctx context.Context, conn *clientCon
 }
 
 func readTerminalInput(ctx context.Context, fd int, buf []byte) (int, error) {
+	pollFD, err := pollFDFromInt(fd)
+	if err != nil {
+		return 0, err
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
-		events := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		events := []unix.PollFd{{Fd: pollFD, Events: unix.POLLIN}}
 		n, err := unix.Poll(events, 100)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
@@ -1093,6 +1099,14 @@ func readTerminalInput(ctx context.Context, fd int, buf []byte) (int, error) {
 			return os.Stdin.Read(buf)
 		}
 	}
+}
+
+func pollFDFromInt(fd int) (int32, error) {
+	const maxInt32 = int(^uint32(0) >> 1)
+	if fd < 0 || fd > maxInt32 {
+		return 0, fmt.Errorf("file descriptor %d out of poll range", fd)
+	}
+	return int32(fd), nil
 }
 
 func attachClosedError(payload AttachClosePayload) error {
@@ -1320,16 +1334,24 @@ func nodeWebSocketURL(rawURL, nodeID string) (string, error) {
 func clientTLSConfig(cfg ClientConfig) (*tls.Config, error) {
 	if strings.TrimSpace(cfg.PinnedCertSHA256) != "" {
 		pinned := strings.TrimSpace(cfg.PinnedCertSHA256)
-		return &tls.Config{
-			InsecureSkipVerify: true,
-			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				return VerifyPinnedCertificate(rawCerts, pinned)
-			},
-		}, nil
+		tlsConfig := &tls.Config{}
+		// #nosec G402 -- certificate chain validation is replaced by exact SHA-256 pin validation below.
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			rawCerts := make([][]byte, 0, len(state.PeerCertificates))
+			for _, cert := range state.PeerCertificates {
+				rawCerts = append(rawCerts, cert.Raw)
+			}
+			return VerifyPinnedCertificate(rawCerts, pinned)
+		}
+		return tlsConfig, nil
 	}
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: cfg.TLSSkipVerify,
-		ServerName:         cfg.ServerName,
+		ServerName: cfg.ServerName,
+	}
+	if cfg.TLSSkipVerify {
+		// #nosec G402 -- explicit user-configured option for private/self-managed hubs.
+		tlsConfig.InsecureSkipVerify = true
 	}
 	if cfg.CAPemFile == "" {
 		return tlsConfig, nil

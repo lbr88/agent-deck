@@ -458,8 +458,7 @@ func TestHubEmptyNodeNOpensNewSessionDialog(t *testing.T) {
 	}
 
 	h.newDialog.nameInput.SetValue("worker")
-	model, cmd = h.handleNewDialogKey(tea.KeyMsg{Type: tea.KeyCtrlS})
-	h = model.(*Home)
+	_, cmd = h.handleNewDialogKey(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
 		t.Fatal("submitting hub node dialog returned no command")
 	}
@@ -495,8 +494,7 @@ func TestHubEmptyNodeShiftNQuickCreatesThroughHubCommand(t *testing.T) {
 	h.rebuildFlatItems()
 	h.cursor = indexHubNode(t, h, "node_server")
 
-	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
-	h = model.(*Home)
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
 	if cmd == nil {
 		t.Fatal("N on empty hub node returned no command")
 	}
@@ -577,8 +575,7 @@ func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	if h.confirmDialog.GetConfirmType() != ConfirmDeleteHubSession {
 		t.Fatalf("d confirm type = %v, want ConfirmDeleteHubSession", h.confirmDialog.GetConfirmType())
 	}
-	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	h = model.(*Home)
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirm hub delete returned no command")
 	}
@@ -597,8 +594,7 @@ func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	if h.confirmDialog.GetConfirmType() != ConfirmCloseHubSession {
 		t.Fatalf("D confirm type = %v, want ConfirmCloseHubSession", h.confirmDialog.GetConfirmType())
 	}
-	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	h = model.(*Home)
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirm hub close returned no command")
 	}
@@ -613,8 +609,7 @@ func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 func TestHubSessionRestartAndPromptUseHubCommand(t *testing.T) {
 	h, client := newHubActionHome(t)
 
-	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
-	h = model.(*Home)
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
 	if cmd == nil {
 		t.Fatal("R on hub session returned no command")
 	}
@@ -626,7 +621,7 @@ func TestHubSessionRestartAndPromptUseHubCommand(t *testing.T) {
 	})
 
 	key := defaultHotkeyBindings[hotkeyPromptSession]
-	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 	h = model.(*Home)
 	if cmd != nil {
 		t.Fatal("prompt hotkey should open the dialog without returning a command")
@@ -637,8 +632,7 @@ func TestHubSessionRestartAndPromptUseHubCommand(t *testing.T) {
 	if got := h.promptInputDialog.instanceID; got != hubPromptTarget("node_server", "r1") {
 		t.Fatalf("prompt target = %q, want hub target", got)
 	}
-	model, cmd = h.updateInner(promptSubmitMsg{instanceID: h.promptInputDialog.instanceID, text: "run tests"})
-	h = model.(*Home)
+	_, cmd = h.updateInner(promptSubmitMsg{instanceID: h.promptInputDialog.instanceID, text: "run tests"})
 	if cmd == nil {
 		t.Fatal("hub prompt submit returned no command")
 	}
@@ -698,8 +692,7 @@ func TestHubSessionParityActionsUseHubCommands(t *testing.T) {
 	assertHubCommand(t, client.commands[0], "node_server", "restart_fresh", map[string]string{"session_id": "r1"})
 
 	key := defaultHotkeyBindings[hotkeyQuickApprove]
-	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-	h = model.(*Home)
+	_, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 	if cmd == nil {
 		t.Fatal("quick approve on hub session returned no command")
 	}

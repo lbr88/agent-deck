@@ -24,10 +24,6 @@ type geminiHookMatcher struct {
 	Hooks   []geminiHookEntry `json:"hooks"`
 }
 
-func geminiAgentDeckHook() geminiHookEntry {
-	return geminiHook(agentDeckGeminiHookCommand)
-}
-
 func geminiHook(command string) geminiHookEntry {
 	return geminiHookEntry{
 		Type:    "command",

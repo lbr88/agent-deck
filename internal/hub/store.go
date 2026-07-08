@@ -467,7 +467,7 @@ func (s *Store) CreatePendingTrustRequestsForNewNode(requesterNodeID string) ([]
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit trust requests: %w", err)
 	}
-	return s.trustRequests(`e.requester_node_id = ? AND e.status = ?`, requesterNodeID, string(TrustStatusPending))
+	return s.trustRequestsByRequester(requesterNodeID, string(TrustStatusPending))
 }
 
 func (s *Store) PendingTrustRequests(ownerNodeID string) ([]TrustRequest, error) {
@@ -475,7 +475,7 @@ func (s *Store) PendingTrustRequests(ownerNodeID string) ([]TrustRequest, error)
 	if ownerNodeID == "" {
 		return nil, nil
 	}
-	return s.trustRequests(`e.owner_node_id = ? AND e.status = ?`, ownerNodeID, string(TrustStatusPending))
+	return s.trustRequestsByOwner(ownerNodeID, string(TrustStatusPending))
 }
 
 func (s *Store) AllowTrust(ownerNodeID, requesterNodeID string) error {
@@ -786,15 +786,37 @@ func (s *Store) markTrustBackfillComplete() error {
 	return nil
 }
 
-func (s *Store) trustRequests(where string, args ...any) ([]TrustRequest, error) {
-	query := `SELECT owner.id, owner.name, owner.token_hash, owner.version, owner.os, owner.arch, owner.status, owner.last_seen_at, owner.admin,
+func (s *Store) trustRequestsByRequester(requesterNodeID, status string) ([]TrustRequest, error) {
+	return s.trustRequests(
+		`SELECT owner.id, owner.name, owner.token_hash, owner.version, owner.os, owner.arch, owner.status, owner.last_seen_at, owner.admin,
 	                requester.id, requester.name, requester.token_hash, requester.version, requester.os, requester.arch, requester.status, requester.last_seen_at, requester.admin,
 	                e.status, e.created_at, e.updated_at
 	         FROM node_trust_edges e
 	         JOIN nodes owner ON owner.id = e.owner_node_id
 	         JOIN nodes requester ON requester.id = e.requester_node_id
-	         WHERE ` + where + `
-	         ORDER BY requester.name, requester.id`
+	         WHERE e.requester_node_id = ? AND e.status = ?
+	         ORDER BY requester.name, requester.id`,
+		requesterNodeID,
+		status,
+	)
+}
+
+func (s *Store) trustRequestsByOwner(ownerNodeID, status string) ([]TrustRequest, error) {
+	return s.trustRequests(
+		`SELECT owner.id, owner.name, owner.token_hash, owner.version, owner.os, owner.arch, owner.status, owner.last_seen_at, owner.admin,
+	                requester.id, requester.name, requester.token_hash, requester.version, requester.os, requester.arch, requester.status, requester.last_seen_at, requester.admin,
+	                e.status, e.created_at, e.updated_at
+	         FROM node_trust_edges e
+	         JOIN nodes owner ON owner.id = e.owner_node_id
+	         JOIN nodes requester ON requester.id = e.requester_node_id
+	         WHERE e.owner_node_id = ? AND e.status = ?
+	         ORDER BY requester.name, requester.id`,
+		ownerNodeID,
+		status,
+	)
+}
+
+func (s *Store) trustRequests(query string, args ...any) ([]TrustRequest, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query trust requests: %w", err)

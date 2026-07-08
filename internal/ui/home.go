@@ -973,10 +973,9 @@ type hubAttachResultMsg struct {
 }
 
 type hubActionResultMsg struct {
-	action    string
-	nodeName  string
-	sessionID string
-	err       error
+	action   string
+	nodeName string
+	err      error
 }
 
 // openSwitcherMsg is emitted when the user pressed the session-switch key while
@@ -3006,11 +3005,6 @@ func (h *Home) projectRemoteItems() []session.Item {
 		}
 	}
 	return items
-}
-
-func (h *Home) rejectHubSessionCreation() {
-	h.setHubStatus("hub session creation unavailable")
-	h.setError(fmt.Errorf("hub session creation is not available yet"))
 }
 
 // syncViewport ensures the cursor is visible within the viewport

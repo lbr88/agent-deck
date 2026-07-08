@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -1093,11 +1095,19 @@ func TestClientTLSConfigRejectsChangedPinnedCertificate(t *testing.T) {
 	if !tlsConfig.InsecureSkipVerify {
 		t.Fatal("pinned certificate mode should use custom verification")
 	}
-	if err := tlsConfig.VerifyPeerCertificate([][]byte{goodDER}, nil); err != nil {
-		t.Fatalf("VerifyPeerCertificate good cert: %v", err)
+	goodCert, err := x509.ParseCertificate(goodDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate good cert: %v", err)
 	}
-	if err := tlsConfig.VerifyPeerCertificate([][]byte{badDER}, nil); err == nil {
-		t.Fatal("VerifyPeerCertificate accepted changed certificate")
+	badCert, err := x509.ParseCertificate(badDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate bad cert: %v", err)
+	}
+	if err := tlsConfig.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{goodCert}}); err != nil {
+		t.Fatalf("VerifyConnection good cert: %v", err)
+	}
+	if err := tlsConfig.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{badCert}}); err == nil {
+		t.Fatal("VerifyConnection accepted changed certificate")
 	}
 }
 

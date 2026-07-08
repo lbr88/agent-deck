@@ -134,7 +134,11 @@ func (s *tmuxAttachStream) Resize(size TerminalSize) error {
 	if size.Cols <= 0 || size.Rows <= 0 {
 		return nil
 	}
-	return pty.Setsize(s.ptmx, &pty.Winsize{Cols: uint16(size.Cols), Rows: uint16(size.Rows)})
+	winsize, err := ptyWinsize(size)
+	if err != nil {
+		return err
+	}
+	return pty.Setsize(s.ptmx, winsize)
 }
 
 func (s *tmuxAttachStream) Close() error {
@@ -155,9 +159,24 @@ func (s *tmuxAttachStream) Close() error {
 
 func startPTYWithSize(cmd *exec.Cmd, size TerminalSize) (*os.File, error) {
 	if size.Cols > 0 && size.Rows > 0 {
-		return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(size.Cols), Rows: uint16(size.Rows)})
+		winsize, err := ptyWinsize(size)
+		if err != nil {
+			return nil, err
+		}
+		return pty.StartWithSize(cmd, winsize)
 	}
 	return pty.Start(cmd)
+}
+
+func ptyWinsize(size TerminalSize) (*pty.Winsize, error) {
+	const maxPTYDimension = int(^uint16(0))
+	if size.Cols <= 0 || size.Rows <= 0 {
+		return nil, fmt.Errorf("terminal size must be positive")
+	}
+	if size.Cols > maxPTYDimension || size.Rows > maxPTYDimension {
+		return nil, fmt.Errorf("terminal size %dx%d exceeds pty limit", size.Cols, size.Rows)
+	}
+	return &pty.Winsize{Cols: uint16(size.Cols), Rows: uint16(size.Rows)}, nil
 }
 
 type Peer interface {

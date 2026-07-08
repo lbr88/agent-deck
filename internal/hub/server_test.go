@@ -1066,18 +1066,6 @@ func readTestEnvelopeMatching(t *testing.T, conn *websocket.Conn, desc string, m
 	}
 }
 
-func expectNoTestEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) {
-	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	var env Envelope
-	if err := conn.ReadJSON(&env); err == nil {
-		t.Fatalf("unexpected envelope = %+v", env)
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-}
-
 func allowTestTrust(t *testing.T, server *Server, ownerNodeID, requesterNodeID string) {
 	t.Helper()
 	if err := server.store.AllowTrust(ownerNodeID, requesterNodeID); err != nil {

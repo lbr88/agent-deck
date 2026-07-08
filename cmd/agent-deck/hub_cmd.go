@@ -1983,13 +1983,21 @@ func hubJoinEndpoint(rawHubURL string) (string, error) {
 func hubJoinHTTPClient(opts hubJoinTLSOptions) (*http.Client, *string, error) {
 	acceptedFingerprint := ""
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: opts.TLSSkipVerify,
-		ServerName:         opts.ServerName,
+		ServerName: opts.ServerName,
+	}
+	if opts.TLSSkipVerify {
+		// #nosec G402 -- explicit user-requested join flag for self-managed hubs.
+		tlsConfig.InsecureSkipVerify = true
 	}
 	if strings.TrimSpace(opts.PinnedCertSHA256) != "" {
 		pinned := strings.TrimSpace(opts.PinnedCertSHA256)
+		// #nosec G402 -- certificate chain validation is replaced by exact SHA-256 pin validation below.
 		tlsConfig.InsecureSkipVerify = true
-		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			rawCerts := make([][]byte, 0, len(state.PeerCertificates))
+			for _, cert := range state.PeerCertificates {
+				rawCerts = append(rawCerts, cert.Raw)
+			}
 			return hub.VerifyPinnedCertificate(rawCerts, pinned)
 		}
 		return &http.Client{
@@ -1998,17 +2006,15 @@ func hubJoinHTTPClient(opts hubJoinTLSOptions) (*http.Client, *string, error) {
 		}, &acceptedFingerprint, nil
 	}
 	if !opts.TLSSkipVerify && opts.CAPemFile == "" && opts.TrustServerCert != nil {
+		// #nosec G402 -- first-connect trust prompt performs explicit certificate approval in VerifyConnection.
 		tlsConfig.InsecureSkipVerify = true
-		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if len(state.PeerCertificates) == 0 {
 				return fmt.Errorf("hub server did not present a certificate")
 			}
-			cert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("parse hub server certificate: %w", err)
-			}
+			cert := state.PeerCertificates[0]
 			info := hubServerCertInfo{
-				SHA256:   hub.CertificateFingerprintSHA256(rawCerts[0]),
+				SHA256:   hub.CertificateFingerprintSHA256(cert.Raw),
 				Subject:  cert.Subject.String(),
 				NotAfter: cert.NotAfter,
 			}

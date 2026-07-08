@@ -28,11 +28,6 @@ type claudeHookMatcher struct {
 	Hooks   []claudeHookEntry `json:"hooks"`
 }
 
-// agentDeckHook returns the standard agent-deck hook entry.
-func agentDeckHook(async bool) claudeHookEntry {
-	return claudeHook(agentDeckHookCommand, async)
-}
-
 func claudeHook(command string, async bool) claudeHookEntry {
 	return claudeHookEntry{
 		Type:    "command",

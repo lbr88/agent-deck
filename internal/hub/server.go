@@ -145,8 +145,9 @@ func (s *Server) Serve() error {
 		return fmt.Errorf("agent-deck hub serve requires --tls-cert and --tls-key")
 	}
 	httpServer := &http.Server{
-		Addr:    s.cfg.ListenAddr,
-		Handler: s.Handler(),
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	s.mu.Lock()
 	s.httpServer = httpServer
