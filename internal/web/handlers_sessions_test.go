@@ -23,7 +23,10 @@ type fakeMutator struct {
 	startSessionFn     func(id string) error
 	stopSessionFn      func(id string) error
 	restartSessionFn   func(id string) error
+	restartFreshFn     func(id string) error
 	deleteSessionFn    func(id string) error
+	removeSessionFn    func(id string) error
+	toggleYoloFn       func(id string) error
 	closeSessionFn     func(id string) error
 	archiveSessionFn   func(id string) error
 	unarchiveSessionFn func(id string) error
@@ -76,11 +79,32 @@ func (f *fakeMutator) RestartSession(id string) error {
 	return f.restartSessionFn(id)
 }
 
+func (f *fakeMutator) RestartFreshSession(id string) error {
+	if f.restartFreshFn == nil {
+		return fmt.Errorf("restartFreshSession not configured")
+	}
+	return f.restartFreshFn(id)
+}
+
 func (f *fakeMutator) DeleteSession(id string) error {
 	if f.deleteSessionFn == nil {
 		return fmt.Errorf("deleteSession not configured")
 	}
 	return f.deleteSessionFn(id)
+}
+
+func (f *fakeMutator) RemoveSession(id string) error {
+	if f.removeSessionFn == nil {
+		return fmt.Errorf("removeSession not configured")
+	}
+	return f.removeSessionFn(id)
+}
+
+func (f *fakeMutator) ToggleYoloSession(id string) error {
+	if f.toggleYoloFn == nil {
+		return fmt.Errorf("toggleYoloSession not configured")
+	}
+	return f.toggleYoloFn(id)
 }
 
 func (f *fakeMutator) CloseSession(id string) error {
@@ -497,6 +521,64 @@ func TestSessionRestartOK(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionAdditionalNativeActionsOK(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		wireFn func(*fakeMutator, *string)
+	}{
+		{
+			name: "restart fresh",
+			path: "/api/sessions/test-id/restart-fresh",
+			wireFn: func(m *fakeMutator, got *string) {
+				m.restartFreshFn = func(id string) error { *got = id; return nil }
+			},
+		},
+		{
+			name: "remove metadata",
+			path: "/api/sessions/test-id/remove",
+			wireFn: func(m *fakeMutator, got *string) {
+				m.removeSessionFn = func(id string) error { *got = id; return nil }
+			},
+		},
+		{
+			name: "toggle yolo",
+			path: "/api/sessions/test-id/toggle-yolo",
+			wireFn: func(m *fakeMutator, got *string) {
+				m.toggleYoloFn = func(id string) error { *got = id; return nil }
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := NewServer(Config{
+				ListenAddr:   "127.0.0.1:0",
+				WebMutations: true,
+			})
+			srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+			var gotID string
+			mutator := &fakeMutator{}
+			tt.wireFn(mutator, &gotID)
+			srv.mutator = mutator
+
+			req := httptest.NewRequest(http.MethodPost, tt.path, nil)
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+			}
+			if gotID != "test-id" {
+				t.Fatalf("mutator saw id=%q, want test-id", gotID)
+			}
+			if !strings.Contains(rr.Body.String(), `"sessionId":"test-id"`) {
+				t.Fatalf("response missing sessionId: %s", rr.Body.String())
+			}
+		})
 	}
 }
 

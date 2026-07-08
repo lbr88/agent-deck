@@ -41,8 +41,26 @@ function doAction(action, s) {
   const id = s.id
   if (action === 'start')   return apiFetch('POST', `/api/sessions/${id}/start`).catch(() => {})
   if (action === 'stop')    return apiFetch('POST', `/api/sessions/${id}/stop`).catch(() => {})
+  if (action === 'close')   return apiFetch('POST', `/api/sessions/${id}/close`).catch(() => {})
   if (action === 'restart') return apiFetch('POST', `/api/sessions/${id}/restart`).catch(() => {})
+  if (action === 'restartFresh') return apiFetch('POST', `/api/sessions/${id}/restart-fresh`).catch(() => {})
+  if (action === 'toggleYolo') return apiFetch('POST', `/api/sessions/${id}/toggle-yolo`).catch(() => {})
   if (action === 'fork')    return apiFetch('POST', `/api/sessions/${id}/fork`, { title: s.title + '-fork' }).catch(() => {})
+  if (action === 'remove') {
+    confirmDialogSignal.value = {
+      message: `Remove session "${s.title}" from the registry? This only works for stopped/error sessions and does not kill active work.`,
+      onConfirm: () => apiFetch('POST', `/api/sessions/${id}/remove`)
+        .then(() => {
+          if (selectedIdSignal.value === id) {
+            selectedIdSignal.value = null
+            if (window.location.pathname.startsWith('/s/')) {
+              history.replaceState(null, '', '/')
+            }
+          }
+        })
+        .catch(() => {}),
+    }
+  }
   if (action === 'archive') {
     confirmDialogSignal.value = {
       message: `Archive session "${s.title}"? The process will be stopped and hidden from the active list.`,
@@ -126,10 +144,16 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           ? html`<button class="mini" title="Stop" data-testid="session-stop-btn" onClick=${() => doAction('stop', s)}><${Icon} d=${ICONS.stop} size=${12}/></button>`
           : html`<button class="mini good" title="Start" data-testid="session-start-btn" onClick=${() => doAction('start', s)}><${Icon} d=${ICONS.play} size=${12}/></button>`}
         <button class="mini good" title="Restart" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}><${Icon} d=${ICONS.restart} size=${12}/></button>
+        <button class="mini good" title="Restart fresh" data-testid="session-restart-fresh-btn" onClick=${() => doAction('restartFresh', s)}>T</button>
+        ${(s.tool === 'gemini' || s.tool === 'codex' || s.tool === 'hermes') && html`
+          <button class="mini" title="Toggle YOLO / auto-approve" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>YOLO</button>
+        `}
+        <button class="mini" title="Close process; keep metadata" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>D</button>
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>
         ${s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
         ${!s.isHub && s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}
         <button class="mini" title="Archive" onClick=${() => doAction('archive', s)}>⌂</button>
+        <button class="mini danger" title="Remove metadata only" data-testid="session-remove-btn" onClick=${() => doAction('remove', s)}>X</button>
         <button class="mini danger" title="Delete" data-testid="session-delete-btn" onClick=${() => doAction('delete', s)}><${Icon} d=${ICONS.trash} size=${12}/></button>
       </div>
     </div>

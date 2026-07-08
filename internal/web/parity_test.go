@@ -504,7 +504,10 @@ func (s *parityStore) CreateSession(title, tool, projectPath, groupPath, modelID
 func (s *parityStore) StartSession(id string) error   { return s.transition(id, session.StatusRunning) }
 func (s *parityStore) StopSession(id string) error    { return s.transition(id, session.StatusStopped) }
 func (s *parityStore) RestartSession(id string) error { return s.transition(id, session.StatusRunning) }
-func (s *parityStore) CloseSession(id string) error   { return s.transition(id, session.StatusStopped) }
+func (s *parityStore) RestartFreshSession(id string) error {
+	return s.transition(id, session.StatusRunning)
+}
+func (s *parityStore) CloseSession(id string) error { return s.transition(id, session.StatusStopped) }
 
 func (s *parityStore) ArchiveSession(id string) error {
 	s.mu.Lock()
@@ -548,6 +551,39 @@ func (s *parityStore) DeleteSession(id string) error {
 			s.order = append(s.order[:i], s.order[i+1:]...)
 			break
 		}
+	}
+	return nil
+}
+
+func (s *parityStore) RemoveSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	if sess.Status != session.StatusStopped && sess.Status != session.StatusError {
+		return parityErr("session must be stopped or errored to remove; got " + string(sess.Status))
+	}
+	delete(s.sessions, id)
+	for i, x := range s.order {
+		if x == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (s *parityStore) ToggleYoloSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	if sess.Tool != "gemini" && sess.Tool != "codex" && sess.Tool != "hermes" {
+		return parityErr("session tool " + sess.Tool + " does not support yolo toggle")
 	}
 	return nil
 }

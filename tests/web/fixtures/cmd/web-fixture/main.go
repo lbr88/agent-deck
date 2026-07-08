@@ -338,6 +338,10 @@ func (s *fixtureStore) RestartSession(id string) error {
 	return s.transition(id, session.StatusRunning)
 }
 
+func (s *fixtureStore) RestartFreshSession(id string) error {
+	return s.transition(id, session.StatusRunning)
+}
+
 func (s *fixtureStore) DeleteSession(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -359,6 +363,47 @@ func (s *fixtureStore) DeleteSession(id string) error {
 			s.order = append(s.order[:i], s.order[i+1:]...)
 			break
 		}
+	}
+	return nil
+}
+
+func (s *fixtureStore) RemoveSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q not found", id)
+	}
+	if sess.Status != session.StatusStopped && sess.Status != session.StatusError {
+		return fmt.Errorf("session must be stopped or errored to remove; got %s", sess.Status)
+	}
+	delete(s.sessions, id)
+	for i, oid := range s.order {
+		if oid == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (s *fixtureStore) ToggleYoloSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session %q not found", id)
+	}
+	if sess.Tool != "gemini" && sess.Tool != "codex" && sess.Tool != "hermes" {
+		return fmt.Errorf("session tool %q does not support yolo toggle", sess.Tool)
+	}
+	if sess.Tool == "gemini" {
+		current := false
+		if sess.GeminiYoloMode != nil {
+			current = *sess.GeminiYoloMode
+		}
+		next := !current
+		sess.GeminiYoloMode = &next
 	}
 	return nil
 }

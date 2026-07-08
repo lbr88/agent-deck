@@ -924,12 +924,36 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 		}
 	}
 
+	if err := mutator.RestartFreshSession(webID); err != nil {
+		t.Fatalf("RestartFreshSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[2], "node_server", "restart_fresh", map[string]string{"session_id": "r1"})
+
+	if err := mutator.ToggleYoloSession(webID); err != nil {
+		t.Fatalf("ToggleYoloSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[3], "node_server", "toggle_yolo", map[string]string{"session_id": "r1"})
+
 	if err := mutator.DeleteSession(webID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	assertHubCommand(t, client.commands[2], "node_server", "delete", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[4], "node_server", "delete", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
+	}
+}
+
+func TestWebMutatorRemovesHubSessionThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	if err := mutator.RemoveSession(webID); err != nil {
+		t.Fatalf("RemoveSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "remove", map[string]string{"session_id": "r1"})
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
+		t.Fatal("RemoveSession did not remove hub session from cache")
 	}
 }
 

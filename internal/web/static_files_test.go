@@ -138,6 +138,38 @@ func TestWebRenameShortcutOpensEditDialog(t *testing.T) {
 	}
 }
 
+func TestWebUIExposesNativeSessionActions(t *testing.T) {
+	sidebar, err := embeddedStaticFiles.ReadFile("static/app/Sidebar.js")
+	if err != nil {
+		t.Fatalf("ReadFile(Sidebar.js): %v", err)
+	}
+	sidebarBody := string(sidebar)
+	for _, want := range []string{
+		"/restart-fresh",
+		"/toggle-yolo",
+		"/remove",
+		"session-restart-fresh-btn",
+		"session-toggle-yolo-btn",
+		"session-remove-btn",
+		"session-close-btn",
+	} {
+		if !strings.Contains(sidebarBody, want) {
+			t.Fatalf("Sidebar.js missing %q; web session rows must expose native action parity", want)
+		}
+	}
+
+	appShell, err := embeddedStaticFiles.ReadFile("static/app/AppShell.js")
+	if err != nil {
+		t.Fatalf("ReadFile(AppShell.js): %v", err)
+	}
+	appShellBody := string(appShell)
+	for _, want := range []string{"restart-fresh", "toggle-yolo"} {
+		if !strings.Contains(appShellBody, want) {
+			t.Fatalf("AppShell.js missing %q; focused session header must expose native action parity", want)
+		}
+	}
+}
+
 func TestVendorFilesServed(t *testing.T) {
 	s := NewServer(Config{})
 	mux := http.NewServeMux()

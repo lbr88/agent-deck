@@ -254,6 +254,26 @@ func (m *WebMutator) RestartSession(id string) error {
 	return inst.Restart()
 }
 
+// RestartFreshSession restarts without resuming the current tool session
+// binding. Mirrors TUI T and hub action restart_fresh.
+func (m *WebMutator) RestartFreshSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "restart_fresh")
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	return inst.RestartFresh()
+}
+
 // DeleteSession kills a session and removes it from persistent storage.
 // Before removal, the instance is pushed onto the web undo stack so a
 // subsequent UndoDelete (POST /api/sessions/undelete) can restore it.
@@ -291,6 +311,136 @@ func (m *WebMutator) DeleteSession(id string) error {
 		return err
 	}
 	m.pushUndo(inst)
+	return nil
+}
+
+// RemoveSession removes stopped/error session metadata without killing the
+// process or pruning worktrees. Mirrors TUI X / CLI `session remove`.
+func (m *WebMutator) RemoveSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if err := m.hubSessionAction(nodeID, sessionID, "remove"); err != nil {
+			return err
+		}
+		m.h.removeHubSessionFromCache(nodeID, sessionID)
+		m.publishHubWebSnapshot()
+		return nil
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	status := session.Status("")
+	if inst != nil {
+		status = inst.GetStatusThreadSafe()
+	}
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if status != session.StatusStopped && status != session.StatusError {
+		return fmt.Errorf("session must be stopped or errored to remove; got %s", status)
+	}
+
+	storage, err := session.NewStorageWithProfile(m.h.profile)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer storage.Close()
+
+	m.h.instancesMu.RLock()
+	remaining := make([]*session.Instance, 0, len(m.h.instances))
+	for _, candidate := range m.h.instances {
+		if candidate != nil && candidate.ID != id {
+			remaining = append(remaining, candidate)
+		}
+	}
+	m.h.instancesMu.RUnlock()
+	if err := storage.RemoveSessionAndVerify(id, remaining, m.h.groupTree); err != nil {
+		return fmt.Errorf("remove session: %w", err)
+	}
+	return nil
+}
+
+// ToggleYoloSession toggles tool-specific YOLO/auto-approve state. For running
+// sessions it restarts the session so the setting takes effect immediately,
+// matching the TUI action.
+func (m *WebMutator) ToggleYoloSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "toggle_yolo")
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+
+	toggled := false
+	m.h.instancesMu.Lock()
+	switch inst.Tool {
+	case "gemini":
+		currentYolo := false
+		if inst.GeminiYoloMode != nil {
+			currentYolo = *inst.GeminiYoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Gemini.YoloMode
+		}
+		newYolo := !currentYolo
+		inst.GeminiYoloMode = &newYolo
+		toggled = true
+	case "codex":
+		currentYolo := false
+		opts := inst.GetCodexOptions()
+		if opts != nil && opts.YoloMode != nil {
+			currentYolo = *opts.YoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Codex.YoloMode
+		}
+		newYolo := !currentYolo
+		if opts == nil {
+			opts = &session.CodexOptions{}
+		}
+		opts.YoloMode = &newYolo
+		_ = inst.SetCodexOptions(opts)
+		toggled = true
+	case "hermes":
+		currentYolo := false
+		opts := inst.GetHermesOptions()
+		if opts != nil && opts.YoloMode != nil {
+			currentYolo = *opts.YoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Hermes.YoloMode
+		}
+		newYolo := !currentYolo
+		if opts == nil {
+			opts = &session.HermesOptions{}
+		}
+		opts.YoloMode = &newYolo
+		_ = inst.SetHermesOptions(opts)
+		toggled = true
+	}
+	m.h.instancesMu.Unlock()
+	if !toggled {
+		return fmt.Errorf("session tool %q does not support yolo toggle", inst.Tool)
+	}
+	if err := m.persistAllInstances(); err != nil {
+		return err
+	}
+	status := inst.GetStatusThreadSafe()
+	if status == session.StatusRunning || status == session.StatusWaiting {
+		if err := inst.Restart(); err != nil {
+			return err
+		}
+		return m.persistAllInstances()
+	}
 	return nil
 }
 

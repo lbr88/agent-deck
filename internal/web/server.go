@@ -104,7 +104,12 @@ type SessionMutator interface {
 	StartSession(sessionID string) error
 	StopSession(sessionID string) error
 	RestartSession(sessionID string) error
+	RestartFreshSession(sessionID string) error
 	DeleteSession(sessionID string) error
+	// RemoveSession removes stopped/error session metadata without killing
+	// active work. It mirrors TUI X / CLI `session remove`.
+	RemoveSession(sessionID string) error
+	ToggleYoloSession(sessionID string) error
 	// CloseSession stops the session process while keeping its metadata
 	// in storage (TUI Shift+D — non-destructive close).
 	CloseSession(sessionID string) error

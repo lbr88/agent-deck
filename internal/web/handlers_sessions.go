@@ -242,6 +242,51 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				s.notifyMenuChanged()
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "restart-fresh":
+			if err := s.mutator.RestartFreshSession(sessionID); err != nil {
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "remove":
+			if err := s.mutator.RemoveSession(sessionID); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				if strings.Contains(err.Error(), "must be stopped or errored") {
+					writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "toggle-yolo":
+			if err := s.mutator.ToggleYoloSession(sessionID); err != nil {
+				if strings.Contains(err.Error(), "does not support yolo") {
+					writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "fork":
 			newID, err := s.mutator.ForkSession(sessionID)
 			if err != nil {
