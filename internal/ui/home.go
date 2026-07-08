@@ -9557,21 +9557,19 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case defaultHotkeyBindings[hotkeyPromptSession]:
 		// #1410: open a one-line prompt input for the highlighted session and
-		// send it via the prompt-state-aware send path WITHOUT attaching. Gated
-		// to Claude-compatible tools — the composer-draft guard (#1409) and the
-		// delivery verify are Claude-shaped — and to running sessions, since the
-		// prompt goes into the live tmux pane. The guarded send targets the
-		// session's default pane, so a window sub-row routes to its parent
-		// session (gated on that window's detected tool, like quickApprove).
+		// send it via the prompt-state-aware send path WITHOUT attaching. The
+		// submit path handles delivery for the selected session's live tmux pane;
+		// opening the box here is intentionally tool-agnostic so the shortcut
+		// works for Codex, shell, OpenCode, and other native Agent Deck sessions.
+		// Window sub-rows route to their parent session because the guarded send
+		// targets the session's default pane, not a per-window pane.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			switch item.Type {
 			case session.ItemTypeWindow:
-				if session.IsClaudeCompatible(item.WindowTool) {
-					h.openPromptInput(h.getInstanceByID(item.WindowSessionID))
-				}
+				h.openPromptInput(h.getInstanceByID(item.WindowSessionID))
 			case session.ItemTypeSession:
-				if item.Session != nil && session.IsClaudeCompatible(item.Session.Tool) {
+				if item.Session != nil {
 					h.openPromptInput(item.Session)
 				}
 			case session.ItemTypeHubSession:

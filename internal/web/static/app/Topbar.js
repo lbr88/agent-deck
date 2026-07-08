@@ -7,7 +7,7 @@
 import { html } from 'htm/preact'
 import { Logo, Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
-import { connectionSignal, profilesSignal, commandCenterSignal } from './state.js'
+import { connectionSignal, profilesSignal, commandCenterSignal, hubNodesSignal } from './state.js'
 import {
   activeTabSignal, paletteOpenSignal, tweaksOpenSignal,
   railSignal, profileSignal,
@@ -32,7 +32,7 @@ export function Topbar() {
   const conn = connectionSignal.value
   const rail = railSignal.value
   const { sessions } = menuModelSignal.value
-  const dashboardNodes = dashboardHubNodes(menuModelSignal.value)
+  const dashboardNodes = dashboardHubNodes(menuModelSignal.value, hubNodesSignal.value)
   const currentDashboardNode = currentHubDashboardNode()
   const sessionsBadge = sessions.filter(s => s.status === 'waiting' || s.status === 'error').length
   const pendingNeeds = sessions.reduce((n, s) => n + (s.pendingNeeds || 0), 0)
@@ -127,10 +127,13 @@ export function Topbar() {
   `
 }
 
-function dashboardHubNodes(model) {
+function dashboardHubNodes(model, hubNodes) {
   const nodes = new Map()
   const groups = model && Array.isArray(model.groups) ? model.groups : []
   const sessions = model && Array.isArray(model.sessions) ? model.sessions : []
+  for (const n of hubNodes || []) {
+    if (n && n.id) nodes.set(n.id, n.name || n.id)
+  }
   for (const g of groups) {
     if (g && g.isHub && g.hubNodeId) nodes.set(g.hubNodeId, g.hubNodeName || g.hubNodeId)
   }

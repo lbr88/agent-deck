@@ -108,10 +108,10 @@ func TestPromptInputDialog_ReopenRebinds(t *testing.T) {
 	}
 }
 
-// armHomeWithRunningClaudeSession builds a Home whose cursor sits on a running
-// claude session row (non-nil tmux session) so the `o` hotkey can open the
-// prompt input.
-func armHomeWithRunningClaudeSession(t *testing.T, tool string) (*Home, *session.Instance) {
+// armHomeWithRunningSession builds a Home whose cursor sits on a running
+// session row (non-nil tmux session) so the `o` hotkey can open the prompt
+// input.
+func armHomeWithRunningSession(t *testing.T, tool string) (*Home, *session.Instance) {
 	t.Helper()
 	home := NewHome()
 	home.width = 120
@@ -138,7 +138,7 @@ func armHomeWithRunningClaudeSession(t *testing.T, tool string) (*Home, *session
 // hotkey on a running claude session row opens the inline prompt input bound to
 // that session.
 func TestPromptHotkey_OpensInputForClaudeSession(t *testing.T) {
-	home, inst := armHomeWithRunningClaudeSession(t, "claude")
+	home, inst := armHomeWithRunningSession(t, "claude")
 
 	key := defaultHotkeyBindings[hotkeyPromptSession]
 	home.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
@@ -151,16 +151,21 @@ func TestPromptHotkey_OpensInputForClaudeSession(t *testing.T) {
 	}
 }
 
-// TestPromptHotkey_NonClaudeSessionNoOp: the hotkey is inert on a non-claude
-// session (the composer-draft guard + delivery verify are claude-shaped).
-func TestPromptHotkey_NonClaudeSessionNoOp(t *testing.T) {
-	home, _ := armHomeWithRunningClaudeSession(t, "shell")
+// TestPromptHotkey_OpensInputForNonClaudeSession: the hotkey opens the same
+// one-line prompt box for non-Claude sessions too. The submit path is already
+// generic; the prior Claude-only gate made the shortcut appear broken on Codex,
+// shell, OpenCode, and other native Agent Deck sessions.
+func TestPromptHotkey_OpensInputForNonClaudeSession(t *testing.T) {
+	home, inst := armHomeWithRunningSession(t, "shell")
 
 	key := defaultHotkeyBindings[hotkeyPromptSession]
 	home.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 
-	if home.promptInputDialog.IsVisible() {
-		t.Error("prompt input must not open for a non-claude session")
+	if !home.promptInputDialog.IsVisible() {
+		t.Fatalf("prompt input should be visible after pressing %q on a non-Claude session", key)
+	}
+	if home.promptInputDialog.instanceID != inst.ID {
+		t.Errorf("prompt input bound to %q, want %q", home.promptInputDialog.instanceID, inst.ID)
 	}
 }
 
@@ -169,7 +174,7 @@ func TestPromptHotkey_NonClaudeSessionNoOp(t *testing.T) {
 // (Actual tmux delivery is exercised by the deliverToConductorPane guard tests;
 // here we assert the routing/lookup half does not surface an error.)
 func TestPromptSubmitMsg_RoutesToTargetSession(t *testing.T) {
-	home, inst := armHomeWithRunningClaudeSession(t, "claude")
+	home, inst := armHomeWithRunningSession(t, "claude")
 	home.err = nil
 
 	model, _ := home.updateInner(promptSubmitMsg{instanceID: inst.ID, text: "hello"})
@@ -182,7 +187,7 @@ func TestPromptSubmitMsg_RoutesToTargetSession(t *testing.T) {
 // TestPromptSubmitMsg_MissingSessionErrors: a prompt for an unknown session id
 // surfaces a clear error rather than silently dropping.
 func TestPromptSubmitMsg_MissingSessionErrors(t *testing.T) {
-	home, _ := armHomeWithRunningClaudeSession(t, "claude")
+	home, _ := armHomeWithRunningSession(t, "claude")
 	home.err = nil
 
 	model, _ := home.updateInner(promptSubmitMsg{instanceID: "does-not-exist", text: "hello"})

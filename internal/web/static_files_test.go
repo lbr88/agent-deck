@@ -90,6 +90,23 @@ func TestWebUIAllowsForkButtonForForkableHubSessions(t *testing.T) {
 	}
 }
 
+func TestWebDashboardSwitcherUsesExplicitHubNodes(t *testing.T) {
+	data, err := embeddedStaticFiles.ReadFile("static/app/Topbar.js")
+	if err != nil {
+		t.Fatalf("ReadFile(Topbar.js): %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"hubNodesSignal",
+		"dashboardHubNodes(menuModelSignal.value, hubNodesSignal.value)",
+		"for (const n of hubNodes || [])",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Topbar.js missing %q; empty connected hub nodes must be dashboard switch targets", want)
+		}
+	}
+}
+
 func TestVendorFilesServed(t *testing.T) {
 	s := NewServer(Config{})
 	mux := http.NewServeMux()
