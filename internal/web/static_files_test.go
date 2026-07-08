@@ -107,6 +107,37 @@ func TestWebDashboardSwitcherUsesExplicitHubNodes(t *testing.T) {
 	}
 }
 
+func TestWebRenameShortcutOpensEditDialog(t *testing.T) {
+	appShell, err := embeddedStaticFiles.ReadFile("static/app/AppShell.js")
+	if err != nil {
+		t.Fatalf("ReadFile(AppShell.js): %v", err)
+	}
+	body := string(appShell)
+	if strings.Contains(body, "web rename API not implemented") ||
+		strings.Contains(body, "use the TUI (web rename API not implemented yet)") {
+		t.Fatalf("AppShell.js still treats web rename as unavailable:\n%s", body)
+	}
+	for _, want := range []string{
+		"editSessionDialogSignal",
+		"editSessionDialogSignal.value = { sessionId: s.id }",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("AppShell.js missing %q; r shortcut must open EditSessionDialog", want)
+		}
+	}
+
+	shortcuts, err := embeddedStaticFiles.ReadFile("static/app/KeyboardShortcuts.js")
+	if err != nil {
+		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
+	}
+	if strings.Contains(string(shortcuts), "TUI-only") {
+		t.Fatalf("KeyboardShortcuts.js still documents rename as TUI-only:\n%s", shortcuts)
+	}
+	if !strings.Contains(string(shortcuts), "Rename focused session") {
+		t.Fatal("KeyboardShortcuts.js missing rename shortcut label")
+	}
+}
+
 func TestVendorFilesServed(t *testing.T) {
 	s := NewServer(Config{})
 	mux := http.NewServeMux()

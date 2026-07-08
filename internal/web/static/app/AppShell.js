@@ -28,6 +28,7 @@ import { Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
+  editSessionDialogSignal,
   groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
   profilesSignal, systemStatsSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
@@ -280,10 +281,12 @@ export function AppShell() {
       } else if (e.key === 'n' && mutationsEnabledSignal.value) {
         createSessionDialogSignal.value = true
       } else if (e.key === 'r') {
-        // Web has no session-rename API yet (matrix gap); surface the gap
-        // honestly instead of silently no-op'ing.
+        if (!mutationsEnabledSignal.value) return
         const s = focusedSession()
-        if (s) addToast(`Rename "${s.title}": use the TUI (web rename API not implemented yet)`, 'info')
+        if (s) {
+          e.preventDefault()
+          editSessionDialogSignal.value = { sessionId: s.id }
+        }
       } else if (e.key === 'D') {
         // Shift+D — non-destructive close of focused session. Mirrors
         // TUI's `D` (closeSession): kills the tmux process but keeps the
