@@ -148,12 +148,14 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		"/restart-fresh",
 		"/toggle-yolo",
 		"/unread",
+		"/approve",
 		"/remove",
 		"session-restart-fresh-btn",
 		"session-toggle-yolo-btn",
 		"session-remove-btn",
 		"session-close-btn",
 		"session-unread-btn",
+		"session-approve-btn",
 		"session-notes-btn",
 		"session-move-btn",
 		"session-prompt-btn",
@@ -198,9 +200,14 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
 	}
-	for _, want := range []string{"Edit focused session notes", "Mark focused session unread", "Prompt focused session", "Move focused session to group"} {
+	for _, want := range []string{"Edit focused session notes", "Mark focused session unread", "Quick approve focused Claude session", "Prompt focused session", "Move focused session to group"} {
 		if !strings.Contains(string(shortcuts), want) {
 			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
+		}
+	}
+	for _, want := range []string{"/approve", "Approve"} {
+		if !strings.Contains(appShellBody, want) {
+			t.Fatalf("AppShell.js missing %q; focused session header must expose quick approve parity", want)
 		}
 	}
 	for file, want := range map[string]string{

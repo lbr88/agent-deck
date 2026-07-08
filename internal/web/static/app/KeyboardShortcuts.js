@@ -18,6 +18,7 @@ const BINDINGS = [
   { keys: ['r'],               label: 'Rename focused session' },
   { keys: ['e'],               label: 'Edit focused session notes' },
   { keys: ['u'],               label: 'Mark focused session unread' },
+  { keys: ['a'],               label: 'Quick approve focused Claude session' },
   { keys: ['o'],               label: 'Prompt focused session' },
   { keys: ['Shift', 'M'],      label: 'Move focused session to group' },
   { keys: ['Shift', 'D'],      label: 'Close focused session (stop process, keep metadata)' },

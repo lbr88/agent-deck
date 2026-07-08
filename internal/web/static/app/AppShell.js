@@ -94,6 +94,7 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => action('restart-fresh')}>Fresh</button>
           ${supportsYolo && html`<button class="btn ghost" onClick=${() => action('toggle-yolo')}>YOLO</button>`}
           <button class="btn ghost" onClick=${() => action('unread')}>Unread</button>
+          <button class="btn ghost" onClick=${() => action('approve')}>Approve</button>
           <button class="btn ghost" onClick=${() => (notesSessionDialogSignal.value = { sessionId: session.id })}>Notes</button>
           <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
           <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
@@ -334,6 +335,13 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           apiFetch('POST', `/api/sessions/${s.id}/unread`).catch(() => {})
+        }
+      } else if (e.key === 'a') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          apiFetch('POST', `/api/sessions/${s.id}/approve`).catch(() => {})
         }
       } else if (e.key === 'M') {
         if (!mutationsEnabledSignal.value) return

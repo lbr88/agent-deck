@@ -1008,10 +1008,15 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	}
 	assertHubCommand(t, client.commands[5], "node_server", "send", map[string]string{"session_id": "r1", "message": "run tests"})
 
+	if err := mutator.QuickApproveSession(webID); err != nil {
+		t.Fatalf("QuickApproveSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[6], "node_server", "send", map[string]string{"session_id": "r1", "message": "1"})
+
 	if err := mutator.UpdateSessionNotes(webID, "web notes"); err != nil {
 		t.Fatalf("UpdateSessionNotes: %v", err)
 	}
-	if got := client.commands[6]; got.nodeID != "node_server" || got.action != "update" {
+	if got := client.commands[7]; got.nodeID != "node_server" || got.action != "update" {
 		t.Fatalf("notes command = %+v", got)
 	} else {
 		req, ok := got.payload.(hub.UpdateSessionRequest)
@@ -1029,7 +1034,7 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	if err := mutator.MarkSessionUnread(webID); err != nil {
 		t.Fatalf("MarkSessionUnread: %v", err)
 	}
-	assertHubCommand(t, client.commands[7], "node_server", "mark_unread", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[8], "node_server", "mark_unread", map[string]string{"session_id": "r1"})
 	if got := h.hubSessions["node_server"].Sessions[0].Status; got != string(session.StatusWaiting) {
 		t.Fatalf("hub status after MarkSessionUnread = %q, want waiting", got)
 	}
@@ -1037,7 +1042,7 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	if err := mutator.DeleteSession(webID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	assertHubCommand(t, client.commands[8], "node_server", "delete", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[9], "node_server", "delete", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}

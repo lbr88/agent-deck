@@ -153,6 +153,13 @@ test.describe('parity: session lifecycle', () => {
     expect(findSession(after, (s) => s.id === 'sess-001').latestPrompt).toBe('run tests')
   })
 
+  test('quick approve — POST records approval prompt', async ({ request }) => {
+    const res = await request.post('/api/sessions/sess-001/approve')
+    expect(res.ok()).toBe(true)
+    const after = await snapshot(request)
+    expect(findSession(after, (s) => s.id === 'sess-001').latestPrompt).toBe('1')
+  })
+
   test('edit notes inline — POST updates notes', async ({ request }) => {
     const res = await request.post('/api/sessions/sess-001/notes', {
       data: { notes: 'line one\nline two' },

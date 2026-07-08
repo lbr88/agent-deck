@@ -60,6 +60,7 @@ func TestHubSessionsUsageDocumentsAllNativeActions(t *testing.T) {
 		"create",
 		"attach",
 		"send",
+		"approve",
 		"notes",
 		"close",
 		"restart",
@@ -112,6 +113,39 @@ func TestRunHubSessionNotesUsesHubUpdateNotesAction(t *testing.T) {
 	}
 	if payload.SessionID != "sess_api" || len(payload.Changes) != 1 || payload.Changes[0].Field != "notes" || payload.Changes[0].Value != "line one\nline two" {
 		t.Fatalf("notes payload = %+v", payload)
+	}
+}
+
+func TestRunHubSessionApproveUsesHubSendOneAction(t *testing.T) {
+	client := &fakeHubSessionsClient{}
+	snapshots := []hub.NodeSessions{{
+		Node: hub.Node{ID: "node_work", Name: "work"},
+		Sessions: []hub.SessionInfo{{
+			ID:    "sess_api",
+			Title: "api",
+		}},
+	}}
+
+	result, err := runHubSessionWithClient(context.Background(), client, snapshots, hubSessionOptions{
+		Action:    "approve",
+		NodeID:    "work",
+		SessionID: "api",
+	})
+	if err != nil {
+		t.Fatalf("runHubSessionWithClient approve: %v", err)
+	}
+	if result.SessionID != "sess_api" || result.Action != "approve" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_work" || client.commands[0].action != "send" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(map[string]string)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]string", client.commands[0].payload)
+	}
+	if payload["session_id"] != "sess_api" || payload["message"] != "1" {
+		t.Fatalf("approve payload = %+v", payload)
 	}
 }
 

@@ -542,6 +542,20 @@ func (s *fixtureStore) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+func (s *fixtureStore) QuickApproveSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if sess.Tool != "claude" && !strings.Contains(sess.Tool, "claude") {
+		return nil
+	}
+	sess.LatestPrompt = "1"
+	return nil
+}
+
 func (s *fixtureStore) UpdateSessionNotes(id, notes string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

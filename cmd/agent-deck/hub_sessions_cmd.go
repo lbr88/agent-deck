@@ -72,6 +72,8 @@ func handleHubSessions(profile string, args []string) error {
 		return handleHubSessionsSimple(profile, "attach", args[1:])
 	case "send":
 		return handleHubSessionsSend(profile, args[1:])
+	case "approve":
+		return handleHubSessionsSimple(profile, "approve", args[1:])
 	case "notes":
 		return handleHubSessionsNotes(profile, args[1:])
 	case "close", "stop":
@@ -446,6 +448,8 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, fmt.Errorf("hub sessions send message is required")
 		}
 		_, err = client.Command(ctx, resolved.NodeID, "send", map[string]string{"session_id": resolved.SessionID, "message": message})
+	case "approve":
+		_, err = client.Command(ctx, resolved.NodeID, "send", map[string]string{"session_id": resolved.SessionID, "message": "1"})
 	case "notes":
 		_, err = client.Command(ctx, resolved.NodeID, "update", hub.UpdateSessionRequest{
 			SessionID: resolved.SessionID,
@@ -684,6 +688,7 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  create <node>               Create a session on a hub node")
 	fmt.Fprintln(w, "  attach <node> <session>     Attach to a hub session")
 	fmt.Fprintln(w, "  send <node> <session> <msg> Send a prompt/message")
+	fmt.Fprintln(w, "  approve <node> <session>    Quick approve by sending 1+Enter")
 	fmt.Fprintln(w, "  notes <node> <session> <notes> Update hub session notes")
 	fmt.Fprintln(w, "  close <node> <session>      Stop a hub session")
 	fmt.Fprintln(w, "  restart <node> <session>    Restart a hub session")

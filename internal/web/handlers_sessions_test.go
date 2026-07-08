@@ -35,6 +35,7 @@ type fakeMutator struct {
 	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, []string, error)
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
+	quickApproveFn     func(id string) error
 	updateNotesFn      func(id, notes string) error
 	markUnreadFn       func(id string) error
 	createGroupFn      func(name, parentPath string) (string, error)
@@ -165,6 +166,13 @@ func (f *fakeMutator) SendSessionPrompt(id, message string) error {
 		return fmt.Errorf("sendSessionPrompt not configured")
 	}
 	return f.sendSessionFn(id, message)
+}
+
+func (f *fakeMutator) QuickApproveSession(id string) error {
+	if f.quickApproveFn == nil {
+		return fmt.Errorf("quickApproveSession not configured")
+	}
+	return f.quickApproveFn(id)
 }
 
 func (f *fakeMutator) UpdateSessionNotes(id, notes string) error {
@@ -717,6 +725,32 @@ func TestSessionSendPromptRejectsEmptyMessage(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionQuickApproveOK(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotID string
+	srv.mutator = &fakeMutator{
+		quickApproveFn: func(id string) error {
+			gotID = id
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/approve", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != "test-id" {
+		t.Fatalf("quick approve id = %q, want test-id", gotID)
 	}
 }
 

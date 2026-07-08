@@ -171,6 +171,16 @@ test.describe('keyboard parity (#780)', () => {
     }).toBe('waiting')
   })
 
+  test('a quick-approves the focused session', async ({ page, request }) => {
+    await page.keyboard.press('a')
+    await expect.poll(async () => {
+      const res = await request.get('/api/sessions')
+      expect(res.status()).toBe(200)
+      const body = await res.json()
+      return body.sessions.find(s => s.id === 'sess-001')?.latestPrompt
+    }).toBe('1')
+  })
+
   test('Shift+M opens the move session dialog', async ({ page }) => {
     await page.keyboard.down('Shift')
     await page.keyboard.press('M')

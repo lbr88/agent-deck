@@ -168,6 +168,25 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "quick_approve",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/approve", nil)
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web approve: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.QuickApproveSession(id); err != nil {
+					t.Fatalf("direct QuickApproveSession: %v", err)
+				}
+				return id
+			},
+		},
+		{
 			name: "edit_notes_inline",
 			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
 				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
@@ -701,6 +720,20 @@ func (s *parityStore) SendSessionPrompt(id, message string) error {
 		return parityErr("message is required")
 	}
 	sess.LatestPrompt = message
+	return nil
+}
+
+func (s *parityStore) QuickApproveSession(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	if sess.Tool != "claude" && !strings.Contains(sess.Tool, "claude") {
+		return nil
+	}
+	sess.LatestPrompt = "1"
 	return nil
 }
 

@@ -880,6 +880,45 @@ func (m *WebMutator) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+// QuickApproveSession mirrors the TUI `a` quick-approve shortcut: send
+// "1"+Enter to Claude-compatible sessions without opening an attach. Non-Claude
+// sessions intentionally no-op, matching Home.handleMainKey's guard.
+func (m *WebMutator) QuickApproveSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if !m.hubSessionClaudeCompatible(nodeID, sessionID) {
+			return nil
+		}
+		_, err := m.hubCommand(nodeID, "send", map[string]string{"session_id": sessionID, "message": "1"})
+		return err
+	}
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if !session.IsClaudeCompatible(inst.Tool) {
+		return nil
+	}
+	m.h.quickApprove(inst, -1)
+	return nil
+}
+
+func (m *WebMutator) hubSessionClaudeCompatible(nodeID, sessionID string) bool {
+	m.h.hubSessionsMu.RLock()
+	defer m.h.hubSessionsMu.RUnlock()
+	snapshot, ok := m.h.hubSessions[nodeID]
+	if !ok {
+		return false
+	}
+	for _, info := range snapshot.Sessions {
+		if info.ID == sessionID {
+			return session.IsClaudeCompatible(info.Tool)
+		}
+	}
+	return false
+}
+
 // UpdateSessionNotes saves inline notes for a local or hub session. This is the
 // web equivalent of the TUI `e` notes editor and intentionally uses the same
 // session.FieldNotes update path as the full settings dialog.
