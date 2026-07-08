@@ -12,6 +12,7 @@ import (
 )
 
 const agentDeckGeminiHookCommand = "agent-deck hook-handler"
+const agentDeckGeminiContextHookCommand = agentDeckPlainContextHookCommand
 
 type geminiHookEntry struct {
 	Type    string `json:"type"`
@@ -24,9 +25,13 @@ type geminiHookMatcher struct {
 }
 
 func geminiAgentDeckHook() geminiHookEntry {
+	return geminiHook(agentDeckGeminiHookCommand)
+}
+
+func geminiHook(command string) geminiHookEntry {
 	return geminiHookEntry{
 		Type:    "command",
-		Command: agentDeckGeminiHookCommand,
+		Command: command,
 	}
 }
 
@@ -41,6 +46,10 @@ var geminiHookEventConfigs = []struct {
 	{Event: "BeforeAgent"},
 	{Event: "AfterAgent"},
 	{Event: "SessionEnd"},
+}
+
+var geminiContextHookEventNames = []string{
+	"SessionStart",
 }
 
 // InjectGeminiHooks injects agent-deck hook entries into Gemini CLI settings.json.
@@ -74,12 +83,17 @@ func InjectGeminiHooks(configDir string) (bool, error) {
 		existingHooks = make(map[string]json.RawMessage)
 	}
 
-	if geminiHooksAlreadyInstalled(existingHooks) {
+	removedStaleContext := removeGeminiContextHooksFromEvents(existingHooks, []string{"BeforeAgent"})
+
+	if geminiHooksAlreadyInstalled(existingHooks) && !removedStaleContext {
 		return false, nil
 	}
 
 	for _, cfg := range geminiHookEventConfigs {
 		existingHooks[cfg.Event] = mergeGeminiHookEvent(existingHooks[cfg.Event], cfg.Matcher)
+	}
+	for _, event := range geminiContextHookEventNames {
+		existingHooks[event] = mergeGeminiHookEventWithCommand(existingHooks[event], "", agentDeckGeminiContextHookCommand)
 	}
 
 	hooksRaw, err := json.Marshal(existingHooks)
@@ -207,17 +221,30 @@ func geminiHooksAlreadyInstalled(hooks map[string]json.RawMessage) bool {
 			return false
 		}
 	}
+	for _, event := range geminiContextHookEventNames {
+		raw, ok := hooks[event]
+		if !ok {
+			return false
+		}
+		if !geminiEventHasCommand(raw, agentDeckGeminiContextHookCommand) {
+			return false
+		}
+	}
 	return true
 }
 
 func geminiEventHasAgentDeckHook(raw json.RawMessage) bool {
+	return geminiEventHasCommand(raw, agentDeckGeminiHookCommand)
+}
+
+func geminiEventHasCommand(raw json.RawMessage, command string) bool {
 	var matchers []geminiHookMatcher
 	if err := json.Unmarshal(raw, &matchers); err != nil {
 		return false
 	}
 	for _, m := range matchers {
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, agentDeckGeminiHookCommand) {
+			if geminiCommandMatches(h.Command, command) {
 				return true
 			}
 		}
@@ -225,7 +252,72 @@ func geminiEventHasAgentDeckHook(raw json.RawMessage) bool {
 	return false
 }
 
+func removeGeminiContextHooksFromEvents(hooks map[string]json.RawMessage, events []string) bool {
+	removed := false
+	for _, event := range events {
+		raw, ok := hooks[event]
+		if !ok {
+			continue
+		}
+		cleaned, didRemove := removeGeminiCommandFromEvent(raw, agentDeckGeminiContextHookCommand)
+		if !didRemove {
+			continue
+		}
+		removed = true
+		if cleaned == nil {
+			delete(hooks, event)
+		} else {
+			hooks[event] = cleaned
+		}
+	}
+	return removed
+}
+
+func removeGeminiCommandFromEvent(raw json.RawMessage, command string) (json.RawMessage, bool) {
+	var matchers []geminiHookMatcher
+	if err := json.Unmarshal(raw, &matchers); err != nil {
+		return raw, false
+	}
+	removed := false
+	var cleaned []geminiHookMatcher
+	for _, m := range matchers {
+		var hooks []geminiHookEntry
+		for _, h := range m.Hooks {
+			if geminiCommandMatches(h.Command, command) {
+				removed = true
+				continue
+			}
+			hooks = append(hooks, h)
+		}
+		if len(hooks) > 0 {
+			m.Hooks = hooks
+			cleaned = append(cleaned, m)
+		}
+	}
+	if !removed {
+		return raw, false
+	}
+	if len(cleaned) == 0 {
+		return nil, true
+	}
+	result, _ := json.Marshal(cleaned)
+	return result, true
+}
+
+func geminiCommandMatches(got, want string) bool {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if got == want {
+		return true
+	}
+	return want == agentDeckGeminiHookCommand && strings.Contains(got, agentDeckGeminiHookCommand)
+}
+
 func mergeGeminiHookEvent(existing json.RawMessage, matcher string) json.RawMessage {
+	return mergeGeminiHookEventWithCommand(existing, matcher, agentDeckGeminiHookCommand)
+}
+
+func mergeGeminiHookEventWithCommand(existing json.RawMessage, matcher, command string) json.RawMessage {
 	var matchers []geminiHookMatcher
 	if existing != nil {
 		if err := json.Unmarshal(existing, &matchers); err != nil {
@@ -238,18 +330,18 @@ func mergeGeminiHookEvent(existing json.RawMessage, matcher string) json.RawMess
 			continue
 		}
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, agentDeckGeminiHookCommand) {
+			if geminiCommandMatches(h.Command, command) {
 				return existing
 			}
 		}
-		matchers[i].Hooks = append(matchers[i].Hooks, geminiAgentDeckHook())
+		matchers[i].Hooks = append(matchers[i].Hooks, geminiHook(command))
 		result, _ := json.Marshal(matchers)
 		return result
 	}
 
 	matchers = append(matchers, geminiHookMatcher{
 		Matcher: matcher,
-		Hooks:   []geminiHookEntry{geminiAgentDeckHook()},
+		Hooks:   []geminiHookEntry{geminiHook(command)},
 	})
 	result, _ := json.Marshal(matchers)
 	return result
@@ -267,7 +359,7 @@ func removeAgentDeckFromGeminiEvent(raw json.RawMessage) (json.RawMessage, bool)
 	for _, m := range matchers {
 		var hooks []geminiHookEntry
 		for _, h := range m.Hooks {
-			if strings.Contains(h.Command, agentDeckGeminiHookCommand) {
+			if isGeminiAgentDeckOwnedHook(h.Command) {
 				removed = true
 				continue
 			}
@@ -287,4 +379,9 @@ func removeAgentDeckFromGeminiEvent(raw json.RawMessage) (json.RawMessage, bool)
 	}
 	result, _ := json.Marshal(cleaned)
 	return result, true
+}
+
+func isGeminiAgentDeckOwnedHook(command string) bool {
+	return geminiCommandMatches(command, agentDeckGeminiHookCommand) ||
+		geminiCommandMatches(command, agentDeckGeminiContextHookCommand)
 }

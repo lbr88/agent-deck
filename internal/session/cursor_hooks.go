@@ -12,6 +12,7 @@ import (
 )
 
 const agentDeckCursorHookCommand = "agent-deck hook-handler"
+const agentDeckCursorContextHookCommand = agentDeckPlainContextHookCommand
 
 type cursorHookDef struct {
 	Command string `json:"command"`
@@ -30,6 +31,10 @@ var cursorHookEventNames = []string{
 	"preToolUse",
 	"postToolUse",
 	"stop",
+}
+
+var cursorContextHookEventNames = []string{
+	"sessionStart",
 }
 
 // InjectCursorHooks injects agent-deck hook entries into ~/.cursor/hooks.json.
@@ -60,12 +65,17 @@ func InjectCursorHooks(configDir string) (bool, error) {
 		}
 	}
 
-	if cursorHooksAlreadyInstalled(cfg.Hooks) {
+	removedStaleContext := removeCursorContextHooksFromEvents(cfg.Hooks, []string{"beforeSubmitPrompt"})
+
+	if cursorHooksAlreadyInstalled(cfg.Hooks) && !removedStaleContext {
 		return false, nil
 	}
 
 	for _, event := range cursorHookEventNames {
 		cfg.Hooks[event] = mergeCursorHookEvent(cfg.Hooks[event])
+	}
+	for _, event := range cursorContextHookEventNames {
+		cfg.Hooks[event] = mergeCursorHookEventWithCommand(cfg.Hooks[event], agentDeckCursorContextHookCommand)
 	}
 
 	finalData, err := json.MarshalIndent(cfg, "", "  ")
@@ -154,36 +164,93 @@ func cursorHooksAlreadyInstalled(hooks map[string][]cursorHookDef) bool {
 			return false
 		}
 	}
+	for _, event := range cursorContextHookEventNames {
+		if !cursorEventHasCommand(hooks[event], agentDeckCursorContextHookCommand) {
+			return false
+		}
+	}
 	return true
 }
 
 func cursorEventHasAgentDeckHook(defs []cursorHookDef) bool {
+	return cursorEventHasCommand(defs, agentDeckCursorHookCommand)
+}
+
+func cursorEventHasCommand(defs []cursorHookDef, command string) bool {
 	for _, d := range defs {
-		if strings.Contains(d.Command, agentDeckCursorHookCommand) {
+		if cursorCommandMatches(d.Command, command) {
 			return true
 		}
 	}
 	return false
 }
 
-func mergeCursorHookEvent(existing []cursorHookDef) []cursorHookDef {
-	for _, d := range existing {
-		if strings.Contains(d.Command, agentDeckCursorHookCommand) {
-			return existing
+func removeCursorContextHooksFromEvents(hooks map[string][]cursorHookDef, events []string) bool {
+	removed := false
+	for _, event := range events {
+		cleaned, didRemove := removeCursorCommandFromEvent(hooks[event], agentDeckCursorContextHookCommand)
+		if !didRemove {
+			continue
+		}
+		removed = true
+		if len(cleaned) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = cleaned
 		}
 	}
-	return append(existing, cursorHookDef{Command: agentDeckCursorHookCommand})
+	return removed
 }
 
-func removeAgentDeckFromCursorEvent(defs []cursorHookDef) ([]cursorHookDef, bool) {
+func removeCursorCommandFromEvent(defs []cursorHookDef, command string) ([]cursorHookDef, bool) {
 	removed := false
-	var cleaned []cursorHookDef
+	cleaned := make([]cursorHookDef, 0, len(defs))
 	for _, d := range defs {
-		if strings.Contains(d.Command, agentDeckCursorHookCommand) {
+		if cursorCommandMatches(d.Command, command) {
 			removed = true
 			continue
 		}
 		cleaned = append(cleaned, d)
 	}
 	return cleaned, removed
+}
+
+func cursorCommandMatches(got, want string) bool {
+	got = strings.TrimSpace(got)
+	want = strings.TrimSpace(want)
+	if got == want {
+		return true
+	}
+	return want == agentDeckCursorHookCommand && strings.Contains(got, agentDeckCursorHookCommand)
+}
+
+func mergeCursorHookEvent(existing []cursorHookDef) []cursorHookDef {
+	return mergeCursorHookEventWithCommand(existing, agentDeckCursorHookCommand)
+}
+
+func mergeCursorHookEventWithCommand(existing []cursorHookDef, command string) []cursorHookDef {
+	for _, d := range existing {
+		if cursorCommandMatches(d.Command, command) {
+			return existing
+		}
+	}
+	return append(existing, cursorHookDef{Command: command})
+}
+
+func removeAgentDeckFromCursorEvent(defs []cursorHookDef) ([]cursorHookDef, bool) {
+	removed := false
+	var cleaned []cursorHookDef
+	for _, d := range defs {
+		if isCursorAgentDeckOwnedHook(d.Command) {
+			removed = true
+			continue
+		}
+		cleaned = append(cleaned, d)
+	}
+	return cleaned, removed
+}
+
+func isCursorAgentDeckOwnedHook(command string) bool {
+	return cursorCommandMatches(command, agentDeckCursorHookCommand) ||
+		cursorCommandMatches(command, agentDeckCursorContextHookCommand)
 }

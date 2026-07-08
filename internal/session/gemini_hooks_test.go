@@ -44,6 +44,18 @@ func TestInjectGeminiHooks_Fresh(t *testing.T) {
 			t.Fatalf("event %s missing agent-deck hook", cfg.Event)
 		}
 	}
+	for _, event := range geminiContextHookEventNames {
+		raw, ok := hooks[event]
+		if !ok {
+			t.Fatalf("missing context event hook: %s", event)
+		}
+		if !geminiEventHasCommand(raw, agentDeckGeminiContextHookCommand) {
+			t.Fatalf("event %s missing agent-deck hub context hook", event)
+		}
+	}
+	if geminiEventHasCommand(hooks["BeforeAgent"], agentDeckGeminiContextHookCommand) {
+		t.Fatal("BeforeAgent must not include hub context hook")
+	}
 }
 
 func TestInjectGeminiHooks_PreservesExistingSettings(t *testing.T) {
@@ -159,6 +171,9 @@ func TestRemoveGeminiHooks_PreservesUserHooks(t *testing.T) {
 	}
 	if strings.Contains(text, `"agent-deck hook-handler"`) {
 		t.Fatal("expected agent-deck hook removed")
+	}
+	if strings.Contains(text, `"agent-deck agent-context --format plain"`) {
+		t.Fatal("expected agent-deck hub context hook removed")
 	}
 }
 

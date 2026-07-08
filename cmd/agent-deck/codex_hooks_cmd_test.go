@@ -173,6 +173,7 @@ func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *test
 func TestCodexHooksInstallUninstall(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", filepath.Join(tmpHome, ".codex"))
 
 	handleCodexHooksInstall()
 
@@ -188,6 +189,18 @@ func TestCodexHooksInstallUninstall(t *testing.T) {
 	if !strings.Contains(text, codexNotifyLine) {
 		t.Fatalf("config missing notify line")
 	}
+	if !strings.Contains(text, "# BEGIN AGENTDECK CODEX HUB CONTEXT") {
+		t.Fatalf("config missing context hook marker")
+	}
+	if !strings.Contains(text, `[[hooks.SessionStart]]`) ||
+		!strings.Contains(text, `matcher = "startup|resume|clear|compact"`) ||
+		!strings.Contains(text, `command = "agent-deck agent-context --format hook-json"`) ||
+		!strings.Contains(text, `statusMessage = "Loading Agent Deck hub context"`) {
+		t.Fatalf("config missing native Codex context hooks:\n%s", text)
+	}
+	if strings.Contains(text, `hooks.UserPromptSubmit`) {
+		t.Fatalf("context hook must not run on every user prompt:\n%s", text)
+	}
 
 	handleCodexHooksUninstall()
 
@@ -199,11 +212,72 @@ func TestCodexHooksInstallUninstall(t *testing.T) {
 	if strings.Contains(text, codexNotifyMarkerBegin) {
 		t.Fatalf("expected codex notify block removed, got: %q", text)
 	}
+	if strings.Contains(text, "AGENTDECK CODEX HUB CONTEXT") || strings.Contains(text, "agent-context") {
+		t.Fatalf("expected codex context hook block removed, got: %q", text)
+	}
+}
+
+func TestCodexHooksStatusPartialWhenContextMissing(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", filepath.Join(tmpHome, ".codex"))
+
+	configPath := getCodexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := codexNotifyMarkerBegin + "\n" + codexNotifyLine + "\n" + codexNotifyMarkerEnd + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	out := captureStdout(t, handleCodexHooksStatus)
+	if !strings.Contains(out, "Status: PARTIAL") || !strings.Contains(out, "Run 'agent-deck codex-hooks install'") {
+		t.Fatalf("status output = %q, want PARTIAL with install guidance", out)
+	}
+}
+
+func TestCodexHooksInstall_UpgradesPromptSubmitContextBlock(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", filepath.Join(tmpHome, ".codex"))
+
+	configPath := getCodexConfigPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := codexNotifyBlock() + "\n" +
+		codexContextMarkerBegin + "\n" +
+		`[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "agent-deck agent-context --format hook-json"
+timeout = 5` + "\n" +
+		codexContextMarkerEnd + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	handleCodexHooksInstall()
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "hooks.UserPromptSubmit") {
+		t.Fatalf("stale prompt-submit context hook was not removed:\n%s", text)
+	}
+	if !strings.Contains(text, "[[hooks.SessionStart]]") || !strings.Contains(text, codexContextHookCommand) {
+		t.Fatalf("session-start context hook missing after upgrade:\n%s", text)
+	}
 }
 
 func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", filepath.Join(tmpHome, ".codex"))
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
@@ -232,6 +306,7 @@ func TestCodexHooksInstall_UpgradesLegacyTableWithoutMarkers(t *testing.T) {
 func TestCodexHooksInstall_UpgradesLegacyMarkerBlock(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", filepath.Join(tmpHome, ".codex"))
 
 	configPath := getCodexConfigPath()
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {

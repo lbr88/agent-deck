@@ -718,6 +718,65 @@ Lists and manages registered hub nodes. Joined admin nodes manage nodes through 
 | `--local` | Use the local hub data directory instead of the configured hub |
 | `--data <dir>` | Local hub data directory |
 
+### agent-context
+
+```bash
+agent-deck agent-context [--format plain|hook-json] [--event HookEventName]
+```
+
+Prints short, model-visible guidance for agent CLIs when this node has joined a hub. If the hub is not configured, it prints nothing and exits successfully. The output intentionally avoids node credentials, invite values, TLS fingerprints, and token file paths.
+
+Formats:
+
+| Format | Description |
+|--------|-------------|
+| `plain` | Human-readable guidance that can be used by generic hook systems |
+| `hook-json` | Hook JSON with `hookSpecificOutput.additionalContext` |
+| `codex-json` | Compatibility alias for `hook-json` |
+
+The generated guidance points agents at `agent-deck hub nodes` and `agent-deck hub shell <node-name-or-id>` for remote work. Supported hook installers run this command by default; it is silent when the hub is not configured.
+
+### codex-hooks
+
+```bash
+agent-deck codex-hooks install
+agent-deck codex-hooks uninstall
+agent-deck codex-hooks status
+```
+
+Installs Agent Deck's Codex integration into `CODEX_HOME/config.toml` or `~/.codex/config.toml`. The install writes two owned blocks:
+
+- Codex `notify = ["agent-deck", "codex-notify"]` for status updates.
+- Codex `SessionStart` hook that runs `agent-deck agent-context --format hook-json`. Installs remove older Agent Deck `UserPromptSubmit` hub-context hooks.
+
+`uninstall` removes only Agent Deck's owned blocks and leaves unrelated user hooks in place. `status` reports `INSTALLED`, `PARTIAL`, legacy notify formats, custom notify conflicts, or `NOT INSTALLED`.
+
+Codex may require reviewing and trusting the installed command hooks through its `/hooks` UI before they run.
+
+### Agent CLI hook installers
+
+```bash
+agent-deck hooks install
+agent-deck gemini-hooks install
+agent-deck cursor-hooks install
+agent-deck hermes-hooks install
+agent-deck kiro-hooks install
+agent-deck opencode-hooks install
+```
+
+The normal hook installers add hub context hooks by default where the tool has a verified model-visible hook contract:
+
+| Tool | Context hook events |
+|------|---------------------|
+| Claude | `SessionStart` |
+| Gemini | `SessionStart` |
+| Cursor | `sessionStart` |
+| Hermes | `on_session_start` |
+| Kiro | `agentSpawn` on the generated global `agent-deck` custom agent |
+| OpenCode | No prompt-context hook is installed; `opencode-hooks install` removes the legacy Agent Deck context plugin if present |
+
+Kiro hooks live on a custom agent. When Kiro hooks are installed, Agent Deck launches Kiro with the generated `agent-deck` agent unless another Kiro agent is explicitly configured.
+
 ### hub invites
 
 ```bash

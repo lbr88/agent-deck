@@ -13,6 +13,9 @@ import (
 const codexNotifyMarkerBegin = "# BEGIN AGENTDECK CODEX NOTIFY"
 const codexNotifyMarkerEnd = "# END AGENTDECK CODEX NOTIFY"
 const codexNotifyLine = `notify = ["agent-deck", "codex-notify"]`
+const codexContextMarkerBegin = "# BEGIN AGENTDECK CODEX HUB CONTEXT"
+const codexContextMarkerEnd = "# END AGENTDECK CODEX HUB CONTEXT"
+const codexContextHookCommand = "agent-deck agent-context --format hook-json"
 
 var codexNotifyTableRe = regexp.MustCompile(`(?m)^\s*\[notify\]\s*$`)
 var codexNotifyKeyRe = regexp.MustCompile(`(?m)^\s*notify\s*=`)
@@ -213,11 +216,11 @@ func handleCodexHooks(args []string) {
 func printCodexHooksUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: agent-deck codex-hooks <command>")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Manage Codex notify hook integration.")
+	fmt.Fprintln(w, "Manage Codex notify and Agent Deck hub context hook integration.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  install      Install or upgrade agent-deck Codex notify hook")
-	fmt.Fprintln(w, "  uninstall    Remove agent-deck Codex notify hook")
+	fmt.Fprintln(w, "  install      Install or upgrade agent-deck Codex hooks")
+	fmt.Fprintln(w, "  uninstall    Remove agent-deck Codex hooks")
 	fmt.Fprintln(w, "  status       Show current hook install status")
 }
 
@@ -225,71 +228,34 @@ func handleCodexHooksInstall() {
 	configPath := getCodexConfigPath()
 	content, _ := readFileOrEmpty(configPath)
 
-	block := codexNotifyMarkerBegin + "\n" +
-		codexNotifyLine + "\n" +
-		codexNotifyMarkerEnd + "\n"
-
-	if strings.Contains(content, codexNotifyMarkerBegin) {
-		begin := strings.Index(content, codexNotifyMarkerBegin)
-		endRel := strings.Index(content[begin:], codexNotifyMarkerEnd)
-		if endRel != -1 {
-			end := begin + endRel + len(codexNotifyMarkerEnd)
-			updated := strings.TrimSpace(content[:begin] + content[end:])
-			updated = prependCodexNotifyBlock(block, updated)
-			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
-				os.Exit(1)
-			}
-			if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println("Codex notify hook upgraded successfully.")
-			fmt.Printf("Config: %s\n", configPath)
-			return
-		}
-	}
-
-	if updated, removed := removeLegacyCodexNotifyTable(content); removed {
-		updated = prependCodexNotifyBlock(block, strings.TrimSpace(updated))
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
-			os.Exit(1)
-		}
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Codex notify hook upgraded successfully.")
-		fmt.Printf("Config: %s\n", configPath)
-		return
-	}
-
-	if codexNotifyExactRe.MatchString(content) {
-		fmt.Println("Codex notify hook is already installed.")
-		fmt.Printf("Config: %s\n", configPath)
-		return
-	}
-
-	if codexNotifyKeyRe.MatchString(content) || codexNotifyTableRe.MatchString(content) {
+	updated, notifyChanged, err := ensureCodexNotifyBlock(content)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: existing notify setting found in %s\n", configPath)
 		fmt.Fprintln(os.Stderr, "Please merge manually by setting:")
 		fmt.Fprintln(os.Stderr, `  notify = ["agent-deck", "codex-notify"]`)
 		os.Exit(1)
 	}
-
-	newContent := prependCodexNotifyBlock(block, content)
+	updated, contextChanged, err := ensureCodexContextBlock(updated)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: malformed agent-deck Codex context hook block in %s\n", configPath)
+		os.Exit(1)
+	}
+	if !notifyChanged && !contextChanged {
+		fmt.Println("Codex hooks are already installed.")
+		fmt.Printf("Config: %s\n", configPath)
+		return
+	}
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating codex config dir: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(configPath, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("Codex notify hook installed successfully.")
+	fmt.Println("Codex hooks installed successfully.")
 	fmt.Printf("Config: %s\n", configPath)
 }
 
@@ -301,55 +267,51 @@ func handleCodexHooksUninstall() {
 		os.Exit(1)
 	}
 
-	begin := strings.Index(content, codexNotifyMarkerBegin)
-	if begin != -1 {
-		endRel := strings.Index(content[begin:], codexNotifyMarkerEnd)
-		if endRel == -1 {
-			fmt.Fprintln(os.Stderr, "Error: malformed agent-deck Codex hook block in config.")
-			os.Exit(1)
-		}
-		end := begin + endRel + len(codexNotifyMarkerEnd)
-		updated := content[:begin] + content[end:]
-		updated = strings.TrimSpace(updated)
-		if updated != "" {
-			updated += "\n"
-		}
+	updated := content
+	removed := false
 
+	updated, removed, err = removeMarkedBlock(updated, codexNotifyMarkerBegin, codexNotifyMarkerEnd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: malformed agent-deck Codex hook block in config.")
+		os.Exit(1)
+	}
+
+	var legacyRemoved bool
+	updated, legacyRemoved = removeLegacyCodexNotifyTable(updated)
+	removed = removed || legacyRemoved
+
+	var exactRemoved bool
+	updated, exactRemoved = removeExactCodexNotifyLine(updated)
+	removed = removed || exactRemoved
+
+	var contextRemoved bool
+	updated, contextRemoved, err = removeMarkedBlock(updated, codexContextMarkerBegin, codexContextMarkerEnd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error: malformed agent-deck Codex context hook block in config.")
+		os.Exit(1)
+	}
+	removed = removed || contextRemoved
+
+	if removed {
 		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Codex notify hook removed successfully.")
+		fmt.Println("Codex hooks removed successfully.")
 		return
 	}
 
-	if updated, removed := removeLegacyCodexNotifyTable(content); removed {
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Codex notify hook removed successfully.")
-		return
-	}
-
-	if updated, removed := removeExactCodexNotifyLine(content); removed {
-		if err := os.WriteFile(configPath, []byte(updated), 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing codex config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("Codex notify hook removed successfully.")
-		return
-	}
-
-	fmt.Println("No agent-deck Codex hook found to remove.")
+	fmt.Println("No agent-deck Codex hooks found to remove.")
 }
 
 func handleCodexHooksStatus() {
 	configPath := getCodexConfigPath()
 	content, _ := readFileOrEmpty(configPath)
 
+	notifyInstalled := codexNotifyInstalled(content)
+	contextInstalled := codexContextHookInstalled(content)
 	switch {
-	case strings.Contains(content, codexNotifyMarkerBegin), codexNotifyExactRe.MatchString(content):
+	case notifyInstalled && contextInstalled:
 		fmt.Println("Status: INSTALLED")
 	case hasLegacyCodexNotifyTable(content):
 		fmt.Println("Status: LEGACY_NOTIFY_TABLE")
@@ -357,8 +319,11 @@ func handleCodexHooksStatus() {
 	case codexNotifyTableRe.MatchString(content):
 		fmt.Println("Status: LEGACY_NOTIFY_TABLE")
 		fmt.Println("Run 'agent-deck codex-hooks install' to migrate to current Codex format.")
-	case codexNotifyKeyRe.MatchString(content):
+	case codexNotifyKeyRe.MatchString(content) && !notifyInstalled:
 		fmt.Println("Status: CUSTOM_NOTIFY")
+	case notifyInstalled || contextInstalled:
+		fmt.Println("Status: PARTIAL")
+		fmt.Println("Run 'agent-deck codex-hooks install' to install missing agent-deck Codex hooks.")
 	default:
 		fmt.Println("Status: NOT INSTALLED")
 		fmt.Println("Run 'agent-deck codex-hooks install' to install.")
@@ -394,6 +359,100 @@ func prependCodexNotifyBlock(block, content string) string {
 		return block
 	}
 	return strings.TrimRight(block, "\n") + "\n\n" + trimmed + "\n"
+}
+
+func codexNotifyBlock() string {
+	return codexNotifyMarkerBegin + "\n" +
+		codexNotifyLine + "\n" +
+		codexNotifyMarkerEnd + "\n"
+}
+
+func codexContextHookBlock() string {
+	return codexContextMarkerBegin + "\n" +
+		`[[hooks.SessionStart]]
+matcher = "startup|resume|clear|compact"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "agent-deck agent-context --format hook-json"
+timeout = 5
+statusMessage = "Loading Agent Deck hub context"` + "\n" +
+		codexContextMarkerEnd + "\n"
+}
+
+func ensureCodexNotifyBlock(content string) (string, bool, error) {
+	if strings.Contains(content, codexNotifyMarkerBegin) {
+		if codexNotifyInstalled(content) {
+			return content, false, nil
+		}
+		updated, removed, err := removeMarkedBlock(content, codexNotifyMarkerBegin, codexNotifyMarkerEnd)
+		if err != nil {
+			return content, false, err
+		}
+		if removed {
+			return prependCodexNotifyBlock(codexNotifyBlock(), updated), true, nil
+		}
+	}
+
+	if updated, removed := removeLegacyCodexNotifyTable(content); removed {
+		return prependCodexNotifyBlock(codexNotifyBlock(), updated), true, nil
+	}
+
+	if codexNotifyExactRe.MatchString(content) {
+		return content, false, nil
+	}
+
+	if codexNotifyKeyRe.MatchString(content) || codexNotifyTableRe.MatchString(content) {
+		return content, false, fmt.Errorf("custom notify setting")
+	}
+
+	return prependCodexNotifyBlock(codexNotifyBlock(), content), true, nil
+}
+
+func ensureCodexContextBlock(content string) (string, bool, error) {
+	if codexContextHookInstalled(content) {
+		return content, false, nil
+	}
+	updated, _, err := removeMarkedBlock(content, codexContextMarkerBegin, codexContextMarkerEnd)
+	if err != nil {
+		return content, false, err
+	}
+	return prependCodexNotifyBlock(codexContextHookBlock(), updated), true, nil
+}
+
+func codexNotifyInstalled(content string) bool {
+	return codexNotifyExactRe.MatchString(content)
+}
+
+func codexContextHookInstalled(content string) bool {
+	begin := strings.Index(content, codexContextMarkerBegin)
+	if begin == -1 {
+		return false
+	}
+	endRel := strings.Index(content[begin:], codexContextMarkerEnd)
+	if endRel == -1 {
+		return false
+	}
+	end := begin + endRel + len(codexContextMarkerEnd)
+	block := strings.TrimSpace(content[begin:end])
+	return block == strings.TrimSpace(codexContextHookBlock())
+}
+
+func removeMarkedBlock(content, beginMarker, endMarker string) (string, bool, error) {
+	begin := strings.Index(content, beginMarker)
+	if begin == -1 {
+		return content, false, nil
+	}
+	endRel := strings.Index(content[begin:], endMarker)
+	if endRel == -1 {
+		return content, false, fmt.Errorf("missing end marker %q", endMarker)
+	}
+	end := begin + endRel + len(endMarker)
+	updated := strings.TrimSpace(content[:begin] + content[end:])
+	if updated != "" {
+		updated += "\n"
+	}
+	return updated, true, nil
 }
 
 func removeLegacyCodexNotifyTable(content string) (string, bool) {

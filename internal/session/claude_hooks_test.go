@@ -64,6 +64,62 @@ func TestInjectClaudeHooks_Fresh(t *testing.T) {
 	if !matchers[0].Hooks[0].Async {
 		t.Error("Hook should be async")
 	}
+	if !eventHasClaudeCommand(hooks["SessionStart"], agentDeckContextHookCommand) {
+		t.Fatalf("SessionStart missing agent-deck hub context hook")
+	}
+	if eventHasClaudeCommand(hooks["UserPromptSubmit"], agentDeckContextHookCommand) {
+		t.Fatalf("UserPromptSubmit must not include hub context hook")
+	}
+}
+
+func TestInjectClaudeHooks_UpgradesStatusOnlyInstallWithHubContext(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	statusOnly := map[string]json.RawMessage{
+		"hooks": json.RawMessage(`{
+			"SessionStart": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler", "async": true}]}],
+			"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler", "async": true}]}],
+			"Stop": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler"}]}],
+			"PermissionRequest": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler"}]}],
+			"Notification": [{"matcher": "permission_prompt|elicitation_dialog", "hooks": [{"type": "command", "command": "agent-deck hook-handler", "async": true}]}],
+			"SessionEnd": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler", "async": true}]}],
+			"PreCompact": [{"hooks": [{"type": "command", "command": "agent-deck hook-handler"}]}]
+		}`),
+	}
+	data, _ := json.MarshalIndent(statusOnly, "", "  ")
+	if err := os.WriteFile(filepath.Join(tmpDir, "settings.json"), data, 0644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	installed, err := InjectClaudeHooks(tmpDir)
+	if err != nil {
+		t.Fatalf("InjectClaudeHooks failed: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected status-only install to be upgraded with hub context hooks")
+	}
+
+	readData, err := os.ReadFile(filepath.Join(tmpDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if err := json.Unmarshal(readData, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(settings["hooks"], &hooks); err != nil {
+		t.Fatalf("parse hooks: %v", err)
+	}
+	if !eventHasClaudeCommand(hooks["SessionStart"], agentDeckContextHookCommand) {
+		t.Fatalf("missing hub context hooks after upgrade: %s", readData)
+	}
+	if eventHasClaudeCommand(hooks["UserPromptSubmit"], agentDeckContextHookCommand) {
+		t.Fatalf("UserPromptSubmit hub context hook must be removed on upgrade: %s", readData)
+	}
+	if !eventHasClaudeCommand(hooks["UserPromptSubmit"], agentDeckHookCommand) {
+		t.Fatalf("UserPromptSubmit status hook must remain after context cleanup: %s", readData)
+	}
 }
 
 // TestStopHookIsSynchronousForActivation guards the issue #1225/#1226 ACTIVATION:

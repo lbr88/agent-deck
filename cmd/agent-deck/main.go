@@ -424,6 +424,9 @@ func main() {
 		case "codex-notify":
 			handleCodexNotify()
 			return
+		case "agent-context":
+			handleAgentContext(args[1:])
+			return
 		case "hooks":
 			handleHooks(args[1:])
 			return
@@ -438,6 +441,12 @@ func main() {
 			return
 		case "cursor-hooks":
 			handleCursorHooks(args[1:])
+			return
+		case "kiro-hooks":
+			handleKiroHooks(args[1:])
+			return
+		case "opencode-hooks":
+			handleOpenCodeHooks(args[1:])
 			return
 		case "notify-daemon":
 			handleNotifyDaemon(args[1:])
@@ -963,8 +972,8 @@ var globalFlagSubcommands = map[string]bool{
 	"telegram-doctor": true, "watcher": true, "openclaw": true, "oc": true,
 	"remote": true, "worktree": true, "wt": true, "costs": true, "web": true,
 	"uninstall": true, "migrate-paths": true, "hook-handler": true,
-	"codex-notify": true, "hooks": true, "codex-hooks": true, "gemini-hooks": true,
-	"hermes-hooks": true, "cursor-hooks": true, "notify-daemon": true,
+	"codex-notify": true, "agent-context": true, "hooks": true, "codex-hooks": true, "gemini-hooks": true,
+	"hermes-hooks": true, "cursor-hooks": true, "kiro-hooks": true, "opencode-hooks": true, "notify-daemon": true,
 	"run-task": true, "inbox": true, "feedback": true, "creds-refresh": true,
 	"debug-dump": true, "version": true, "help": true,
 }
@@ -3288,6 +3297,8 @@ func printHelp() {
 	fmt.Println("  gemini-hooks     Manage Gemini hook integration")
 	fmt.Println("  hermes-hooks     Manage Hermes Agent hook integration")
 	fmt.Println("  cursor-hooks     Manage Cursor Agent CLI hook integration")
+	fmt.Println("  kiro-hooks       Manage Kiro CLI hook integration")
+	fmt.Println("  opencode-hooks   Manage OpenCode plugin hook integration")
 	fmt.Println("  group            Manage groups")
 	fmt.Println("  worktree, wt     Manage git worktrees")
 	fmt.Println("  web              Start TUI with web UI server running alongside")
@@ -3336,6 +3347,12 @@ func printHelp() {
 	fmt.Println("  cursor-hooks install      Install Cursor hooks")
 	fmt.Println("  cursor-hooks uninstall    Remove Cursor hooks")
 	fmt.Println("  cursor-hooks status       Show Cursor hooks install status")
+	fmt.Println("  kiro-hooks install        Install Kiro hooks")
+	fmt.Println("  kiro-hooks uninstall      Remove Kiro hooks")
+	fmt.Println("  kiro-hooks status         Show Kiro hooks install status")
+	fmt.Println("  opencode-hooks install    Install OpenCode hooks")
+	fmt.Println("  opencode-hooks uninstall  Remove OpenCode hooks")
+	fmt.Println("  opencode-hooks status     Show OpenCode hooks install status")
 	fmt.Println()
 	fmt.Println("Group Commands:")
 	fmt.Println("  group list                List all groups")

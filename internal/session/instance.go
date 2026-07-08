@@ -1558,6 +1558,16 @@ func (i *Instance) buildKiroCommand(baseCommand string) string {
 			opts = NewKiroOptions(config)
 		}
 	}
+	if CheckKiroHooksInstalled(GetKiroConfigDir()) && !strings.Contains(command, "--agent") {
+		if opts == nil {
+			opts = &KiroOptions{}
+		}
+		if strings.TrimSpace(opts.Agent) == "" {
+			optsCopy := *opts
+			optsCopy.Agent = AgentDeckKiroAgentName
+			opts = &optsCopy
+		}
+	}
 	if opts != nil {
 		for _, arg := range opts.ToArgs() {
 			command += " " + shellescape.Quote(arg)

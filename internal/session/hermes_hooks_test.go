@@ -62,14 +62,21 @@ func TestInjectHermesHooks_AllEventsPresent(t *testing.T) {
 	for _, event := range []string{"pre_tool_call", "post_tool_call", "on_session_start", "on_session_end"} {
 		entries, _ := hooksSection[event].([]interface{})
 		found := false
+		contextFound := false
 		for _, e := range entries {
 			em, _ := e.(map[string]interface{})
 			if cmd, _ := em["command"].(string); strings.Contains(cmd, "agent-deck hook-handler") {
 				found = true
 			}
+			if cmd, _ := em["command"].(string); cmd == "agent-deck agent-context --format plain" {
+				contextFound = true
+			}
 		}
 		if !found {
 			t.Errorf("event %q missing agent-deck hook-handler entry", event)
+		}
+		if event == "on_session_start" && !contextFound {
+			t.Errorf("event %q missing agent-deck hub context entry", event)
 		}
 	}
 }
@@ -95,6 +102,9 @@ func TestInjectHermesHooks_PreservesExistingConfig(t *testing.T) {
 	}
 	if !strings.Contains(content, "agent-deck hook-handler") {
 		t.Error("hook command not found after injection")
+	}
+	if !strings.Contains(content, "agent-deck agent-context --format plain") {
+		t.Error("hub context hook command not found after injection")
 	}
 }
 

@@ -101,6 +101,51 @@ On first join with the default self-signed certificate, `agent-deck` shows the h
 agent-deck hub connect
 ```
 
+## Agent CLI Context
+
+Agents launched inside `agent-deck` can be told about the hub without hardcoding hub details into prompts or repository docs:
+
+```bash
+agent-deck agent-context --format plain
+agent-deck agent-context --format hook-json
+```
+
+When this node has not joined a hub, the command prints nothing and exits successfully. When the hub is configured, it emits short guidance that tells the agent to use:
+
+```bash
+agent-deck hub nodes
+agent-deck hub shell <node-name-or-id> --cwd <path> --title <title>
+```
+
+The output intentionally omits node credentials, invite values, TLS fingerprints, and token file paths. `--format plain` is for hook systems that add stdout to model context. `--format hook-json` emits hook JSON using `hookSpecificOutput.additionalContext`; `codex-json` remains accepted as a compatibility alias.
+
+Install integrations through the normal hook installers:
+
+```bash
+agent-deck hooks install
+agent-deck codex-hooks install
+agent-deck gemini-hooks install
+agent-deck cursor-hooks install
+agent-deck hermes-hooks install
+agent-deck kiro-hooks install
+agent-deck opencode-hooks install
+```
+
+These installers add Agent Deck's existing status hooks where supported and also install hub context hooks by default. The context hook command is silent when the hub is not configured, so it is safe to install before a node joins a hub.
+
+Current model-visible context support:
+
+- Claude: `SessionStart`.
+- Codex: `SessionStart`.
+- Gemini: `SessionStart`.
+- Cursor: `sessionStart`.
+- Hermes: `on_session_start`.
+- Kiro: `agentSpawn` on a generated global `agent-deck` custom agent. Agent Deck launches Kiro with that agent when Kiro hooks are installed and no other Kiro agent is configured.
+- OpenCode: no prompt-context hook is installed; `opencode-hooks install` removes the legacy Agent Deck context plugin if present.
+- OpenCode: global plugin using the system prompt transform hook.
+
+Codex may require reviewing and trusting the installed command hooks through its `/hooks` UI before they run. Tools without a verified model-visible hook contract are not wired to `agent-context`.
+
 ## TUI Layout
 
 When hub is configured, groups are shown with their owner:

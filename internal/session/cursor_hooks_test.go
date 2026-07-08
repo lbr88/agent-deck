@@ -35,6 +35,14 @@ func TestInjectCursorHooks_Fresh(t *testing.T) {
 			t.Fatalf("event %s missing agent-deck hook", event)
 		}
 	}
+	for _, event := range cursorContextHookEventNames {
+		if !cursorEventHasCommand(cfg.Hooks[event], agentDeckCursorContextHookCommand) {
+			t.Fatalf("event %s missing agent-deck hub context hook", event)
+		}
+	}
+	if cursorEventHasCommand(cfg.Hooks["beforeSubmitPrompt"], agentDeckCursorContextHookCommand) {
+		t.Fatal("beforeSubmitPrompt must not include hub context hook")
+	}
 }
 
 func TestInjectCursorHooks_PreservesExistingHooks(t *testing.T) {
@@ -67,6 +75,9 @@ func TestInjectCursorHooks_PreservesExistingHooks(t *testing.T) {
 	}
 	if !strings.Contains(text, agentDeckCursorHookCommand) {
 		t.Fatal("expected agent-deck hook appended")
+	}
+	if !strings.Contains(text, agentDeckCursorContextHookCommand) {
+		t.Fatal("expected agent-deck hub context hook appended")
 	}
 }
 

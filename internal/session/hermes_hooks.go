@@ -73,12 +73,14 @@ func acquireHermesConfigLock(configPath string) (*hermesConfigLock, error) {
 // user hook that happens to mention "agent-deck hook-handler" in passing isn't
 // misidentified as ours and clobbered by RemoveHermesHooks.
 const agentDeckHermesHookCommand = "agent-deck hook-handler"
+const agentDeckHermesContextHookCommand = agentDeckPlainContextHookCommand
 
 // isAgentDeckOwnedHook returns true iff the given hook command was written by
 // us. Matches the exact injected string (with surrounding whitespace tolerated)
 // rather than using substring containment.
 func isAgentDeckOwnedHook(cmd string) bool {
-	return strings.TrimSpace(cmd) == agentDeckHermesHookCommand
+	trimmed := strings.TrimSpace(cmd)
+	return trimmed == agentDeckHermesHookCommand || trimmed == agentDeckHermesContextHookCommand
 }
 
 // hermesHookEvents are the Hermes lifecycle events we subscribe to.
@@ -90,6 +92,10 @@ var hermesHookEvents = []string{
 	"post_tool_call",
 	"on_session_start",
 	"on_session_end",
+}
+
+var hermesContextHookEvents = []string{
+	"on_session_start",
 }
 
 // GetHermesConfigDir returns the Hermes config directory (~/.hermes).
@@ -281,19 +287,13 @@ func hermesHooksAlreadyInstalled(raw map[string]interface{}) bool {
 	}
 	for _, event := range hermesHookEvents {
 		eventHooks, _ := hooksSection[event].([]interface{})
-		found := false
-		for _, h := range eventHooks {
-			hm, ok := h.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			cmd, _ := hm["command"].(string)
-			if isAgentDeckOwnedHook(cmd) {
-				found = true
-				break
-			}
+		if !hermesEventHasCommand(eventHooks, agentDeckHermesHookCommand) {
+			return false
 		}
-		if !found {
+	}
+	for _, event := range hermesContextHookEvents {
+		eventHooks, _ := hooksSection[event].([]interface{})
+		if !hermesEventHasCommand(eventHooks, agentDeckHermesContextHookCommand) {
 			return false
 		}
 	}
@@ -309,25 +309,36 @@ func mergeHermesHookEntries(raw map[string]interface{}) {
 
 	for _, event := range hermesHookEvents {
 		eventHooks, _ := hooksSection[event].([]interface{})
-		alreadyPresent := false
-		for _, h := range eventHooks {
-			hm, ok := h.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			cmd, _ := hm["command"].(string)
-			if isAgentDeckOwnedHook(cmd) {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			eventHooks = append(eventHooks, map[string]interface{}{
-				"command": agentDeckHermesHookCommand,
-			})
-			hooksSection[event] = eventHooks
-		}
+		hooksSection[event] = mergeHermesHookEvent(eventHooks, agentDeckHermesHookCommand)
+	}
+	for _, event := range hermesContextHookEvents {
+		eventHooks, _ := hooksSection[event].([]interface{})
+		hooksSection[event] = mergeHermesHookEvent(eventHooks, agentDeckHermesContextHookCommand)
 	}
 
 	raw["hooks"] = hooksSection
+}
+
+func hermesEventHasCommand(eventHooks []interface{}, command string) bool {
+	command = strings.TrimSpace(command)
+	for _, h := range eventHooks {
+		hm, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmd, _ := hm["command"].(string)
+		if strings.TrimSpace(cmd) == command {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeHermesHookEvent(eventHooks []interface{}, command string) []interface{} {
+	if hermesEventHasCommand(eventHooks, command) {
+		return eventHooks
+	}
+	return append(eventHooks, map[string]interface{}{
+		"command": command,
+	})
 }
