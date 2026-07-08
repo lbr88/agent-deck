@@ -147,6 +147,27 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "edit_multi_repo_paths",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				body, _ := json.Marshal(map[string][]string{"paths": {"/srv/app", "/srv/lib"}})
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/paths", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web paths: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.UpdateSessionPaths(id, []string{"/srv/app", "/srv/lib"}); err != nil {
+					t.Fatalf("direct UpdateSessionPaths: %v", err)
+				}
+				return id
+			},
+		},
+		{
 			name: "send_session_prompt",
 			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
 				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
@@ -414,6 +435,14 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			}
 			if webSess.GroupPath != directSess.GroupPath {
 				t.Fatalf("group drift: web=%q direct=%q", webSess.GroupPath, directSess.GroupPath)
+			}
+			if tc.name == "edit_multi_repo_paths" {
+				if !webSess.MultiRepoEnabled || !directSess.MultiRepoEnabled {
+					t.Fatalf("multi-repo flag drift: web=%v direct=%v", webSess.MultiRepoEnabled, directSess.MultiRepoEnabled)
+				}
+				if strings.Join(webSess.AdditionalPaths, "\x00") != strings.Join(directSess.AdditionalPaths, "\x00") {
+					t.Fatalf("additional paths drift: web=%v direct=%v", webSess.AdditionalPaths, directSess.AdditionalPaths)
+				}
 			}
 			if webSess.Tool != directSess.Tool {
 				t.Fatalf("tool drift: web=%q direct=%q", webSess.Tool, directSess.Tool)
@@ -801,6 +830,33 @@ func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]str
 		}
 	}
 	return changed, restartRequired, nil, nil
+}
+
+func (s *parityStore) UpdateSessionPaths(id string, paths []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]bool)
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		cleaned = append(cleaned, p)
+	}
+	if len(cleaned) < 2 {
+		return parityErr("multi-repo requires at least two paths")
+	}
+	sess.MultiRepoEnabled = true
+	sess.ProjectPath = cleaned[0]
+	sess.AdditionalPaths = cleaned[1:]
+	sess.Status = session.StatusRunning
+	return nil
 }
 
 func (s *parityStore) ForkSession(parentID string) (string, error) {

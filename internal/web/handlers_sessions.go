@@ -151,6 +151,12 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Multi-repo paths sub-route: POST /api/sessions/{id}/paths.
+	if action == "paths" {
+		s.handleSessionPaths(w, r, sessionID)
+		return
+	}
+
 	// PATCH /api/sessions/{id} — partial field edit (matches TUI EditSessionDialog).
 	if r.Method == http.MethodPatch && action == "" {
 		s.handleSessionPatch(w, r, sessionID)
@@ -443,6 +449,53 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, "route not found")
+}
+
+func (s *Server) handleSessionPaths(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.checkMutationsAllowed(w) {
+		return
+	}
+	if !s.checkMutationRateLimit(w) {
+		return
+	}
+	if s.mutator == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
+		return
+	}
+	var req UpdateSessionPathsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+		return
+	}
+	if len(req.Paths) < 2 {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "at least two paths are required")
+		return
+	}
+	if err := s.mutator.UpdateSessionPaths(sessionID, req.Paths); err != nil {
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+		case strings.Contains(err.Error(), "multi-repo") || strings.Contains(err.Error(), "path"):
+			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+		}
+		return
+	}
+	if _, _, ok := ParseHubSessionWebID(sessionID); ok {
+		s.notifyMenuChangedWithoutInvalidation()
+	} else {
+		s.notifyMenuChanged()
+	}
+	writeJSON(w, http.StatusOK, UpdateSessionResponse{
+		SessionID:       sessionID,
+		UpdatedFields:   []string{"paths"},
+		RestartRequired: true,
+	})
 }
 
 // undeleteResponse is the JSON body returned from POST /api/sessions/undelete.

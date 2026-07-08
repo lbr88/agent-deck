@@ -176,6 +176,29 @@ func TestCommandDispatcherMoveAndUpdateUseBackend(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherUpdatePathsUsesBackend(t *testing.T) {
+	fake := &fakeActionBackend{}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(UpdateSessionPathsRequest{
+		SessionID: "s1",
+		Paths:     []string{"/repo/a", "/repo/b"},
+	})
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{CommandID: "cmd_1", Action: "update_paths", Payload: payload})
+	if err != nil {
+		t.Fatalf("Dispatch update_paths: %v", err)
+	}
+	if fake.updatePathsReq.SessionID != "s1" || len(fake.updatePathsReq.Paths) != 2 || fake.updatePathsReq.Paths[1] != "/repo/b" {
+		t.Fatalf("update paths req = %+v", fake.updatePathsReq)
+	}
+	var result UpdateSessionPathsResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode update_paths result: %v", err)
+	}
+	if !result.Restarted {
+		t.Fatal("update_paths result Restarted = false, want true")
+	}
+}
+
 func TestCommandDispatcherPreviewReturnsContent(t *testing.T) {
 	fake := &fakeActionBackend{previewContent: "remote pane content"}
 	dispatcher := CommandDispatcher{Backend: fake}
@@ -284,6 +307,7 @@ type fakeActionBackend struct {
 	movedSessionID      string
 	movedGroupPath      string
 	updateReq           UpdateSessionRequest
+	updatePathsReq      UpdateSessionPathsRequest
 	webProxyReq         WebProxyRequest
 	webProxyResp        WebProxyResponse
 }
@@ -354,6 +378,11 @@ func (b *fakeActionBackend) Move(_ context.Context, sessionID, groupPath string)
 func (b *fakeActionBackend) Update(_ context.Context, req UpdateSessionRequest) (UpdateSessionResponse, error) {
 	b.updateReq = req
 	return UpdateSessionResponse{Restarted: true}, nil
+}
+
+func (b *fakeActionBackend) UpdatePaths(_ context.Context, req UpdateSessionPathsRequest) (UpdateSessionPathsResponse, error) {
+	b.updatePathsReq = req
+	return UpdateSessionPathsResponse{Restarted: true}, nil
 }
 
 func (b *fakeActionBackend) ToggleYolo(_ context.Context, sessionID string) error {

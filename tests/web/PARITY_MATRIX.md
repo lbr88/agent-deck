@@ -49,7 +49,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | List skills (attached) | `internal/ui/home.go:6015` (`s` key → SkillDialog) | GET `/api/sessions/{id}/skills` | `SkillsPane.js` attached column | `tests/web/e2e/skills.spec.js` | Mirrors `session.GetAttachedProjectSkills(projectPath)` |
 | **SETTINGS & DISPLAY** |
 | Edit session settings | `internal/ui/home.go:5953` (`P`/`shift+p` → EditSessionDialog) | PATCH `/api/sessions/{id}` | `UpdateSession` (delegates to `session.SetField`) | `handlers_sessions_test.go` + `tests/web/e2e/edit-session.spec.js` | Title, color, notes, tool, extra-args, plugins, channels, skip-permissions, auto-mode. Returns `restartRequired` for restart-policy fields. Web UI: `EditSessionDialog.js` + Sidebar Edit button. |
-| Edit multi-repo paths | `internal/ui/home.go:5942` (`p` → EditPathsDialog) | MISSING | N/A | N/A | Multi-repo session paths |
+| Edit multi-repo paths | `internal/ui/home.go:5942` (`p` → EditPathsDialog) | POST `/api/sessions/{id}/paths` | `UpdateSessionPaths` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Multi-repo session paths; web `p` opens a paths dialog and routes hub sessions through hub `update_paths` |
 | Edit notes inline | `internal/ui/home.go:6548` (`e` key) | POST `/api/sessions/{id}/notes` | `UpdateSessionNotes` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Web `e` opens inline notes dialog; routes hub sessions through hub update `notes` |
 | Toggle YOLO mode | `internal/ui/home.go:6418` (`y` key) | POST `/api/sessions/{id}/toggle-yolo` | `ToggleYoloSession` | `handlers_sessions_test.go`, `static_files_test.go` | Gemini/Codex/Hermes; requires restart for some tools; web row/header YOLO action |
 | Open settings panel | `internal/ui/home.go:6148` (`S` key) | GET `/api/settings` | N/A | `handlers_settings_test.go` | Read-only; displays profile, version |
@@ -167,19 +167,18 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  5 MISSING actions have plausible URL patterns probed by
+  4 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  5 are TUI-UX-only (exec shell, preview cycling, …) where no plausible web
+  4 are TUI-UX-only (exec shell, preview cycling, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web/API/UI surfaces implemented:** 47
-- **MISSING web actions:** 5 (~10% gap)
+- **Web/API/UI surfaces implemented:** 48
+- **MISSING web actions:** 4 (~8% gap)
 - **Key gaps:**
-  - Multi-repo path editor
   - Content workflow operations (send output to session)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
@@ -198,7 +197,7 @@ tiers:
 
 ### Sync Gaps (Actions)
 
-1. **Remaining Session Metadata Gap**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
+1. **Session Metadata Parity**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, POST `/api/sessions/{id}/group` for group moves, and POST `/api/sessions/{id}/paths` for multi-repo path editing.
 
 2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: send output to another session, fork-with-options, exec-shell, and preview-mode cycling.
 
@@ -222,7 +221,6 @@ tiers:
 
 ## Recommendations
 
-1. Implement the multi-repo path editor in web and route hub sessions through hub update commands.
-2. Add web UX for remaining content workflows: send output to session and fork-with-options.
-3. Decide whether preview-mode cycling and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
-4. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.
+1. Add web UX for remaining content workflows: send output to session and fork-with-options.
+2. Decide whether preview-mode cycling and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
+3. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.

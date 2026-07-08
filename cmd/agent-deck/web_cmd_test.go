@@ -32,6 +32,9 @@ func (noopMutator) ForkSession(string) (string, error) { return "", nil }
 func (noopMutator) UpdateSession(string, map[string]string) ([]string, bool, []string, error) {
 	return nil, false, nil, nil
 }
+func (noopMutator) UpdateSessionPaths(string, []string) error {
+	return nil
+}
 func (noopMutator) MoveSessionToGroup(string, string) error {
 	return nil
 }

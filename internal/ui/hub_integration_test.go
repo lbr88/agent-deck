@@ -1062,6 +1062,30 @@ func TestWebMutatorRemovesHubSessionThroughHubClient(t *testing.T) {
 	}
 }
 
+func TestWebMutatorUpdatesHubSessionPathsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	if err := mutator.UpdateSessionPaths(webID, []string{"/srv/app", "/srv/shared"}); err != nil {
+		t.Fatalf("UpdateSessionPaths: %v", err)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("commands length = %d, want 1", len(client.commands))
+	}
+	got := client.commands[0]
+	if got.nodeID != "node_server" || got.action != "update_paths" {
+		t.Fatalf("update paths command = %+v", got)
+	}
+	req, ok := got.payload.(hub.UpdateSessionPathsRequest)
+	if !ok {
+		t.Fatalf("update paths payload type = %T, want hub.UpdateSessionPathsRequest", got.payload)
+	}
+	if req.SessionID != "r1" || len(req.Paths) != 2 || req.Paths[1] != "/srv/shared" {
+		t.Fatalf("update paths request = %+v", req)
+	}
+}
+
 func TestWebMutatorForksHubSessionThroughHubClient(t *testing.T) {
 	h, client := newHubActionHome(t)
 	client.commandResult = mustJSON(t, map[string]string{"session_id": "forked_remote"})

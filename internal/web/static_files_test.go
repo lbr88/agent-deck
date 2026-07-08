@@ -159,6 +159,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		"session-notes-btn",
 		"session-move-btn",
 		"session-prompt-btn",
+		"session-paths-btn",
 	} {
 		if !strings.Contains(sidebarBody, want) {
 			t.Fatalf("Sidebar.js missing %q; web session rows must expose native action parity", want)
@@ -168,6 +169,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		"static/app/MoveSessionDialog.js":   "/group",
 		"static/app/NotesSessionDialog.js":  "/notes",
 		"static/app/PromptSessionDialog.js": "/send",
+		"static/app/EditPathsDialog.js":     "/paths",
 	} {
 		data, err := embeddedStaticFiles.ReadFile(file)
 		if err != nil {
@@ -190,7 +192,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		t.Fatalf("ReadFile(AppShell.js): %v", err)
 	}
 	appShellBody := string(appShell)
-	for _, want := range []string{"restart-fresh", "toggle-yolo", "unread", "NotesSessionDialog", "MoveSessionDialog", "PromptSessionDialog"} {
+	for _, want := range []string{"restart-fresh", "toggle-yolo", "unread", "NotesSessionDialog", "MoveSessionDialog", "PromptSessionDialog", "EditPathsDialog", "pathsSessionDialogSignal"} {
 		if !strings.Contains(appShellBody, want) {
 			t.Fatalf("AppShell.js missing %q; focused session header must expose native action parity", want)
 		}
@@ -200,7 +202,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
 	}
-	for _, want := range []string{"Jump to a session by hint", "Edit focused session notes", "Mark focused session unread", "Quick approve focused Claude session", "Copy focused terminal output", "Copy focused session info", "Prompt focused session", "Move focused session to group"} {
+	for _, want := range []string{"Jump to a session by hint", "Edit focused session notes", "Edit focused multi-repo paths", "Mark focused session unread", "Quick approve focused Claude session", "Copy focused terminal output", "Copy focused session info", "Prompt focused session", "Move focused session to group"} {
 		if !strings.Contains(string(shortcuts), want) {
 			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
 		}

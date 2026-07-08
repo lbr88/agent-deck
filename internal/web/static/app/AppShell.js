@@ -29,7 +29,7 @@ import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
   editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
-  notesSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
+  notesSessionDialogSignal, pathsSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
   profilesSignal, systemStatsSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
@@ -43,6 +43,7 @@ import { EditSessionDialog } from './EditSessionDialog.js'
 import { MoveSessionDialog } from './MoveSessionDialog.js'
 import { PromptSessionDialog } from './PromptSessionDialog.js'
 import { NotesSessionDialog } from './NotesSessionDialog.js'
+import { EditPathsDialog } from './EditPathsDialog.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
 import { GroupNameDialog } from './GroupNameDialog.js'
 import { ToastContainer, addToast } from './Toast.js'
@@ -98,6 +99,7 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => (notesSessionDialogSignal.value = { sessionId: session.id })}>Notes</button>
           <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
           <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
+          ${session.multiRepoEnabled && html`<button class="btn ghost" onClick=${() => (pathsSessionDialogSignal.value = { sessionId: session.id })}>Paths</button>`}
           ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
           <button class="btn primary" onClick=${() => (createSessionDialogSignal.value = true)}>
             <${Icon} d=${ICONS.plus} size=${12}/>New <span class="kbd">n</span>
@@ -260,6 +262,7 @@ export function AppShell() {
   const showMoveSession = moveSessionDialogSignal.value
   const showPromptSession = promptSessionDialogSignal.value
   const showNotesSession = notesSessionDialogSignal.value
+  const showPathsSession = pathsSessionDialogSignal.value
   const confirmData = confirmDialogSignal.value
   const groupNameData = groupNameDialogSignal.value
   const drawerOpen = infoDrawerOpenSignal.value
@@ -374,6 +377,7 @@ export function AppShell() {
       moveSessionDialogSignal.value = null
       promptSessionDialogSignal.value = null
       notesSessionDialogSignal.value = null
+      pathsSessionDialogSignal.value = null
       infoDrawerOpenSignal.value = false
     }
     const onKey = (e) => {
@@ -486,6 +490,13 @@ export function AppShell() {
           e.preventDefault()
           notesSessionDialogSignal.value = { sessionId: s.id }
         }
+      } else if (e.key === 'p') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s && s.multiRepoEnabled) {
+          e.preventDefault()
+          pathsSessionDialogSignal.value = { sessionId: s.id }
+        }
       } else if (e.key === 'u') {
         if (!mutationsEnabledSignal.value) return
         const s = focusedSession()
@@ -582,6 +593,7 @@ export function AppShell() {
       ${showMoveSession && html`<${MoveSessionDialog} ...${showMoveSession}/>`}
       ${showPromptSession && html`<${PromptSessionDialog} ...${showPromptSession}/>`}
       ${showNotesSession && html`<${NotesSessionDialog} ...${showNotesSession}/>`}
+      ${showPathsSession && html`<${EditPathsDialog} ...${showPathsSession}/>`}
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}
       ${groupNameData && html`<${GroupNameDialog} ...${groupNameData}/>`}
 

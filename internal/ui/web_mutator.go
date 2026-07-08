@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -799,6 +800,138 @@ func (m *WebMutator) updateHubSession(nodeID, sessionID string, updates map[stri
 	m.h.applyHubSessionFieldChanges(nodeID, sessionID, changes)
 	m.publishHubWebSnapshot()
 	return changed, false, nil, nil
+}
+
+// UpdateSessionPaths mirrors the TUI EditPathsDialog for existing multi-repo
+// sessions. Hub session IDs route to the owner node; local IDs rewrite the
+// session's multi-repo symlink directory, persist state, and restart.
+func (m *WebMutator) UpdateSessionPaths(id string, rawPaths []string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		_, err := m.hubCommand(nodeID, "update_paths", hub.UpdateSessionPathsRequest{
+			SessionID: sessionID,
+			Paths:     rawPaths,
+		})
+		if err != nil {
+			return err
+		}
+		m.publishHubWebSnapshot()
+		return nil
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	paths, err := normalizeWebMultiRepoPaths(rawPaths)
+	if err != nil {
+		return err
+	}
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if !inst.IsMultiRepo() {
+		return fmt.Errorf("session %q is not a multi-repo session", inst.Title)
+	}
+	tempDir := strings.TrimSpace(inst.MultiRepoTempDir)
+	if tempDir == "" {
+		return fmt.Errorf("multi-repo session %q has no temp dir", inst.Title)
+	}
+	projectPath, additionalPaths, err := rewriteWebMultiRepoSymlinkTree(tempDir, paths)
+	if err != nil {
+		return err
+	}
+	m.h.instancesMu.Lock()
+	inst.MultiRepoEnabled = true
+	inst.ProjectPath = projectPath
+	inst.AdditionalPaths = additionalPaths
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
+		tmuxSess.WorkDir = tempDir
+	}
+	m.h.instancesMu.Unlock()
+	if err := m.persistAllInstances(); err != nil {
+		return err
+	}
+	if err := inst.Restart(); err != nil {
+		return err
+	}
+	return m.persistAllInstances()
+}
+
+func normalizeWebMultiRepoPaths(raw []string) ([]string, error) {
+	paths := make([]string, 0, len(raw))
+	seen := make(map[string]bool)
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		p = filepath.Clean(session.ExpandPath(p))
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("path not found: %s", p)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("path is not a directory: %s", p)
+		}
+		paths = append(paths, p)
+	}
+	if len(paths) < 2 {
+		return nil, fmt.Errorf("multi-repo requires at least two paths")
+	}
+	return paths, nil
+}
+
+func rewriteWebMultiRepoSymlinkTree(tempDir string, paths []string) (string, []string, error) {
+	if err := validateWebMultiRepoTempDir(tempDir); err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("prepare multi-repo temp dir: %w", err)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("read multi-repo temp dir: %w", err)
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(tempDir, entry.Name())); err != nil {
+			return "", nil, fmt.Errorf("remove old multi-repo entry %q: %w", entry.Name(), err)
+		}
+	}
+	dirnames := session.DeduplicateDirnames(paths)
+	additional := make([]string, 0, len(paths)-1)
+	projectPath := ""
+	for i, p := range paths {
+		linkPath := filepath.Join(tempDir, dirnames[i])
+		if err := os.Symlink(p, linkPath); err != nil {
+			return "", nil, fmt.Errorf("link multi-repo path %q: %w", p, err)
+		}
+		if i == 0 {
+			projectPath = linkPath
+		} else {
+			additional = append(additional, linkPath)
+		}
+	}
+	return projectPath, additional, nil
+}
+
+func validateWebMultiRepoTempDir(tempDir string) error {
+	clean := filepath.Clean(strings.TrimSpace(tempDir))
+	if clean == "." || clean == string(filepath.Separator) {
+		return fmt.Errorf("unsafe multi-repo temp dir: %s", tempDir)
+	}
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		if part == "multi-repo-worktrees" {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsafe multi-repo temp dir %q: expected path under multi-repo-worktrees", tempDir)
 }
 
 // MoveSessionToGroup moves a session between groups. Hub session IDs route to

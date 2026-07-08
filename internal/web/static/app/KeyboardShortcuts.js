@@ -18,6 +18,7 @@ const BINDINGS = [
   { keys: ['n'],               label: 'New session dialog' },
   { keys: ['r'],               label: 'Rename focused session' },
   { keys: ['e'],               label: 'Edit focused session notes' },
+  { keys: ['p'],               label: 'Edit focused multi-repo paths' },
   { keys: ['u'],               label: 'Mark focused session unread' },
   { keys: ['a'],               label: 'Quick approve focused Claude session' },
   { keys: ['c'],               label: 'Copy focused terminal output' },

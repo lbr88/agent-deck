@@ -13,6 +13,7 @@ import {
   selectedIdSignal, mutationsEnabledSignal, confirmDialogSignal,
   createSessionDialogSignal, editSessionDialogSignal,
   moveSessionDialogSignal, promptSessionDialogSignal, notesSessionDialogSignal,
+  pathsSessionDialogSignal,
 } from './state.js'
 import { statusFiltersSignal, showColsSignal, activeTabSignal } from './uiState.js'
 import { apiFetch } from './api.js'
@@ -107,6 +108,9 @@ function doAction(action, s) {
   if (action === 'notes') {
     notesSessionDialogSignal.value = { sessionId: id }
   }
+  if (action === 'paths') {
+    pathsSessionDialogSignal.value = { sessionId: id }
+  }
 }
 
 function SessionItem({ s, sel, onSelect, showCols }) {
@@ -166,6 +170,7 @@ function SessionItem({ s, sel, onSelect, showCols }) {
         <button class="mini" title="Edit notes" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>e</button>
         <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
         <button class="mini" title="Move to group" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>M</button>
+        ${s.multiRepoEnabled && html`<button class="mini" title="Edit multi-repo paths" data-testid="session-paths-btn" onClick=${() => doAction('paths', s)}>p</button>`}
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>
         ${s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
         ${!s.isHub && s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}

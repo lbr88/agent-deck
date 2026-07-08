@@ -78,6 +78,12 @@ type UpdateSessionNotesRequest struct {
 	Notes string `json:"notes"`
 }
 
+// UpdateSessionPathsRequest is the body for POST /api/sessions/{id}/paths.
+// It mirrors the TUI EditPathsDialog for existing multi-repo sessions.
+type UpdateSessionPathsRequest struct {
+	Paths []string `json:"paths"`
+}
+
 // UpdateSessionResponse confirms a PATCH succeeded. RestartRequired is true
 // when any updated field only takes effect on next launch (tool, extra-args,
 // plugins, skip-permissions, auto-mode). Clients use it to prompt before/after

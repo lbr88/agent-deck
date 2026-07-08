@@ -33,6 +33,7 @@ type fakeMutator struct {
 	undoDeleteFn       func() (string, error)
 	forkSessionFn      func(id string) (string, error)
 	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, []string, error)
+	updatePathsFn      func(id string, paths []string) error
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
 	quickApproveFn     func(id string) error
@@ -152,6 +153,13 @@ func (f *fakeMutator) UpdateSession(id string, updates map[string]string) ([]str
 		return nil, false, nil, fmt.Errorf("updateSession not configured")
 	}
 	return f.updateSessionFn(id, updates)
+}
+
+func (f *fakeMutator) UpdateSessionPaths(id string, paths []string) error {
+	if f.updatePathsFn == nil {
+		return fmt.Errorf("updateSessionPaths not configured")
+	}
+	return f.updatePathsFn(id, paths)
 }
 
 func (f *fakeMutator) MoveSessionToGroup(id, groupPath string) error {
@@ -782,6 +790,58 @@ func TestSessionUpdateNotesOK(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"updatedFields":["notes"]`) {
 		t.Fatalf("response missing notes updatedFields: %s", rr.Body.String())
+	}
+}
+
+func TestSessionUpdatePathsOK(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotID string
+	var gotPaths []string
+	srv.mutator = &fakeMutator{
+		updatePathsFn: func(id string, paths []string) error {
+			gotID = id
+			gotPaths = append([]string(nil), paths...)
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/paths", strings.NewReader(`{"paths":["/repo/a","/repo/b"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != "test-id" || len(gotPaths) != 2 || gotPaths[0] != "/repo/a" || gotPaths[1] != "/repo/b" {
+		t.Fatalf("paths update call = id %q paths %v, want test-id [/repo/a /repo/b]", gotID, gotPaths)
+	}
+	if !strings.Contains(rr.Body.String(), `"updatedFields":["paths"]`) || !strings.Contains(rr.Body.String(), `"restartRequired":true`) {
+		t.Fatalf("response missing paths updatedFields/restartRequired: %s", rr.Body.String())
+	}
+}
+
+func TestSessionUpdatePathsRejectsSinglePath(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeMutator{
+		updatePathsFn: func(id string, paths []string) error { return nil },
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/paths", strings.NewReader(`{"paths":["/repo/a"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rr.Code, rr.Body.String())
 	}
 }
 

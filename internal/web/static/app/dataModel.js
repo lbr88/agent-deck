@@ -44,6 +44,8 @@ function projectSession(item) {
     status: s.status || 'idle',
     branch: s.branch || '—',
     path: s.projectPath || '',
+    multiRepoEnabled: !!s.multiRepoEnabled,
+    additionalPaths: Array.isArray(s.additionalPaths) ? s.additionalPaths : [],
     cost: 0,            // hydrated separately via sessionCostsSignal
     tokens: 0,          // not exposed by API
     mcps: [],           // not exposed by API (TUI-only feature; pane shows stub)

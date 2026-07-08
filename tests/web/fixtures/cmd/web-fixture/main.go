@@ -508,6 +508,33 @@ func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]st
 	return changed, restartRequired, nil, nil
 }
 
+func (s *fixtureStore) UpdateSessionPaths(id string, paths []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		cleaned = append(cleaned, path)
+	}
+	if len(cleaned) < 2 {
+		return fmt.Errorf("multi-repo requires at least two paths")
+	}
+	sess.MultiRepoEnabled = true
+	sess.ProjectPath = cleaned[0]
+	sess.AdditionalPaths = append([]string(nil), cleaned[1:]...)
+	sess.Status = session.StatusRunning
+	return nil
+}
+
 func (s *fixtureStore) MoveSessionToGroup(id, groupPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

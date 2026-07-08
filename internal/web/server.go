@@ -130,6 +130,7 @@ type SessionMutator interface {
 	// whether any updated field requires a restart to take effect. Validation
 	// errors (unknown field, invalid value) leave the session unchanged.
 	UpdateSession(sessionID string, updates map[string]string) (updatedFields []string, restartRequired bool, warnings []string, err error)
+	UpdateSessionPaths(sessionID string, paths []string) error
 	MoveSessionToGroup(sessionID, groupPath string) error
 	SendSessionPrompt(sessionID, message string) error
 	QuickApproveSession(sessionID string) error
