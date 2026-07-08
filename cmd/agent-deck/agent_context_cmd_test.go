@@ -27,6 +27,8 @@ func TestBuildAgentContextPlainOmitsSecrets(t *testing.T) {
 	text := buildAgentHubContext(cfg)
 	if !strings.Contains(text, "Agent Deck hub is configured") ||
 		!strings.Contains(text, "agent-deck hub nodes") ||
+		!strings.Contains(text, "agent-deck hub sessions [node-name-or-id]") ||
+		!strings.Contains(text, "agent-deck hub sessions create <node-name-or-id>") ||
 		!strings.Contains(text, "agent-deck hub shell <node-name-or-id>") {
 		t.Fatalf("context missing expected hub guidance:\n%s", text)
 	}

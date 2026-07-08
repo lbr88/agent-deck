@@ -99,8 +99,11 @@ func buildAgentHubContext(config *session.UserConfig) string {
 	b.WriteString("Remote Agent Deck access is available when the user's request clearly requires work on another connected node.\n")
 	b.WriteString("Useful commands:\n")
 	b.WriteString("- agent-deck hub nodes\n")
+	b.WriteString("- agent-deck hub sessions [node-name-or-id]\n")
+	b.WriteString("- agent-deck hub sessions create <node-name-or-id> --cwd <path> --title <title> --tool <tool>\n")
+	b.WriteString("- agent-deck hub sessions attach|send|close|restart|rename <node-name-or-id> <session-id-or-title> [...]\n")
 	b.WriteString("- agent-deck hub shell <node-name-or-id> --cwd <path> --title <title>\n")
-	b.WriteString("Prefer node names from `agent-deck hub nodes`; use node ids only when names are ambiguous.\n")
+	b.WriteString("Prefer node names from `agent-deck hub nodes`; use node ids only when names are ambiguous. Prefer session ids when titles are ambiguous.\n")
 	b.WriteString("Do not expose hub secrets, invite codes, TLS fingerprints, or host-specific configuration unless the user explicitly asks to inspect local configuration.")
 	return b.String()
 }

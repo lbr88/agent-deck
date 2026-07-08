@@ -718,6 +718,27 @@ Lists and manages registered hub nodes. Joined admin nodes manage nodes through 
 | `--local` | Use the local hub data directory instead of the configured hub |
 | `--data <dir>` | Local hub data directory |
 
+### hub sessions
+
+```bash
+agent-deck hub sessions [list] [node-id-or-name] [--json]
+agent-deck hub sessions create <node-id-or-name> [--title name] [--tool tool] [--cwd path] [--group group] [--model model] [--attach]
+agent-deck hub sessions attach <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions send <node-id-or-name> <session-id-or-title> <message>
+agent-deck hub sessions close <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions restart <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions restart-fresh <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions rename <node-id-or-name> <session-id-or-title> <new-title>
+agent-deck hub sessions move <node-id-or-name> <session-id-or-title> <group-path>
+agent-deck hub sessions archive <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions unarchive <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions delete <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions remove <node-id-or-name> <session-id-or-title>
+agent-deck hub sessions preview <node-id-or-name> <session-id-or-title>
+```
+
+Provides CLI-native control of trusted hub nodes using the same command relay as the TUI and web UI. `create` works for connected nodes even when they currently have no sessions. Node names resolve from hub snapshots; use node ids when names are ambiguous. Session titles resolve within a node; use session ids when titles are ambiguous.
+
 ### agent-context
 
 ```bash
@@ -734,7 +755,7 @@ Formats:
 | `hook-json` | Hook JSON with `hookSpecificOutput.additionalContext` |
 | `codex-json` | Compatibility alias for `hook-json` |
 
-The generated guidance points agents at `agent-deck hub nodes` and `agent-deck hub shell <node-name-or-id>` for remote work. Supported hook installers run this command by default; it is silent when the hub is not configured.
+The generated guidance points agents at `agent-deck hub nodes`, `agent-deck hub sessions ...`, and `agent-deck hub shell <node-name-or-id>` for remote work. Supported hook installers run this command by default; it is silent when the hub is not configured.
 
 ### codex-hooks
 

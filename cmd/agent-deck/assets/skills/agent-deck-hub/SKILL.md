@@ -27,6 +27,37 @@ agent-deck hub nodes
 
 If a node is missing, it may be offline or not trusted yet.
 
+## Inspect and control remote sessions
+
+List visible hub sessions:
+
+```sh
+agent-deck hub sessions
+agent-deck hub sessions <node-name-or-id>
+agent-deck hub sessions --json
+```
+
+Create a normal Agent Deck session on a hub node, including nodes that currently have zero sessions:
+
+```sh
+agent-deck hub sessions create <node-name-or-id> --title "task" --tool codex --cwd /path/to/project --group default
+```
+
+Common native actions route to the owning node:
+
+```sh
+agent-deck hub sessions attach <node> <session-id-or-title>
+agent-deck hub sessions send <node> <session> "message"
+agent-deck hub sessions close <node> <session>
+agent-deck hub sessions restart <node> <session>
+agent-deck hub sessions rename <node> <session> "new title"
+agent-deck hub sessions move <node> <session> group/path
+agent-deck hub sessions archive <node> <session>
+agent-deck hub sessions delete <node> <session>
+```
+
+Prefer node names from `agent-deck hub nodes`; use node ids when names are ambiguous. Prefer session ids when titles are ambiguous.
+
 ## Open a remote shell
 
 Open and attach to a shell session on a trusted node:

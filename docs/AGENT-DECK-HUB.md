@@ -114,8 +114,14 @@ When this node has not joined a hub, the command prints nothing and exits succes
 
 ```bash
 agent-deck hub nodes
+agent-deck hub sessions [node-name-or-id]
+agent-deck hub sessions create <node-name-or-id> --cwd <path> --title <title> --tool <tool>
+agent-deck hub sessions attach <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions send <node-name-or-id> <session-id-or-title> "message"
 agent-deck hub shell <node-name-or-id> --cwd <path> --title <title>
 ```
+
+Prefer node names from `agent-deck hub nodes`; use node IDs only when names are ambiguous. Prefer session IDs when session titles are ambiguous.
 
 The output intentionally omits node credentials, invite values, TLS fingerprints, and token file paths. `--format plain` is for hook systems that add stdout to model context. `--format hook-json` emits hook JSON using `hookSpecificOutput.additionalContext`; `codex-json` remains accepted as a compatibility alias.
 

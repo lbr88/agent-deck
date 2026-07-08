@@ -169,6 +169,8 @@ func handleHub(profile string, args []string) {
 		err = handleHubTrust(args[1:])
 	case "shell":
 		err = handleHubShell(profile, args[1:])
+	case "sessions":
+		err = handleHubSessions(profile, args[1:])
 	case "install-skill":
 		err = handleHubInstallSkill(args[1:])
 	case "connect":
@@ -2098,6 +2100,7 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  invites List hub invites")
 	fmt.Fprintln(w, "  trust   List or answer pending node trust requests")
 	fmt.Fprintln(w, "  shell   Open a shell session on a trusted hub node")
+	fmt.Fprintln(w, "  sessions List/create/control sessions on trusted hub nodes")
 	fmt.Fprintln(w, "  install-skill Install a bundled hub skill into the skill pool")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }
