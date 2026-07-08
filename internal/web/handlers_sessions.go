@@ -337,6 +337,29 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				s.notifyMenuChanged()
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "notes":
+			var req UpdateSessionNotesRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+				return
+			}
+			if err := s.mutator.UpdateSessionNotes(sessionID, req.Notes); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, UpdateSessionResponse{
+				SessionID:     sessionID,
+				UpdatedFields: []string{session.FieldNotes},
+			})
 		case "unread":
 			if err := s.mutator.MarkSessionUnread(sessionID); err != nil {
 				if strings.Contains(err.Error(), "not found") {

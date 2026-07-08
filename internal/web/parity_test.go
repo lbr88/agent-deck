@@ -168,6 +168,27 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "edit_notes_inline",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				body, _ := json.Marshal(map[string]string{"notes": "line one\nline two"})
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/notes", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web notes: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.UpdateSessionNotes(id, "line one\nline two"); err != nil {
+					t.Fatalf("direct UpdateSessionNotes: %v", err)
+				}
+				return id
+			},
+		},
+		{
 			name: "mark_session_unread",
 			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
 				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
@@ -683,6 +704,17 @@ func (s *parityStore) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+func (s *parityStore) UpdateSessionNotes(id, notes string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	sess.Notes = notes
+	return nil
+}
+
 func (s *parityStore) MarkSessionUnread(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -712,10 +744,18 @@ func (s *parityStore) UpdateSession(id string, updates map[string]string) ([]str
 		case session.FieldTool:
 			oldValue = sess.Tool
 			sess.Tool = value
-		case session.FieldNotes, session.FieldColor, session.FieldExtraArgs,
-			session.FieldPlugins, session.FieldChannels,
+		case session.FieldNotes:
+			oldValue = sess.Notes
+			sess.Notes = value
+		case session.FieldColor:
+			oldValue = sess.Color
+			sess.Color = value
+		case session.FieldExtraArgs, session.FieldPlugins, session.FieldChannels,
 			session.FieldSkipPermissions, session.FieldAutoMode:
-			oldValue = value
+			oldValue = ""
+			if value == "" {
+				oldValue = value
+			}
 		default:
 			return nil, false, nil, parityErr("invalid field: " + field)
 		}

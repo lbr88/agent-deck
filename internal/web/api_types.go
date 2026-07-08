@@ -67,6 +67,13 @@ type SendSessionRequest struct {
 	Message string `json:"message"`
 }
 
+// UpdateSessionNotesRequest is the body for POST /api/sessions/{id}/notes.
+// It backs the web `e` inline notes editor, distinct from the full PATCH
+// settings dialog.
+type UpdateSessionNotesRequest struct {
+	Notes string `json:"notes"`
+}
+
 // UpdateSessionResponse confirms a PATCH succeeded. RestartRequired is true
 // when any updated field only takes effect on next launch (tool, extra-args,
 // plugins, skip-permissions, auto-mode). Clients use it to prompt before/after

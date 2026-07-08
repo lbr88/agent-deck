@@ -50,7 +50,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | **SETTINGS & DISPLAY** |
 | Edit session settings | `internal/ui/home.go:5953` (`P`/`shift+p` → EditSessionDialog) | PATCH `/api/sessions/{id}` | `UpdateSession` (delegates to `session.SetField`) | `handlers_sessions_test.go` + `tests/web/e2e/edit-session.spec.js` | Title, color, notes, tool, extra-args, plugins, channels, skip-permissions, auto-mode. Returns `restartRequired` for restart-policy fields. Web UI: `EditSessionDialog.js` + Sidebar Edit button. |
 | Edit multi-repo paths | `internal/ui/home.go:5942` (`p` → EditPathsDialog) | MISSING | N/A | N/A | Multi-repo session paths |
-| Edit notes inline | `internal/ui/home.go:6548` (`e` key) | MISSING | N/A | N/A | TUI-only textarea editor |
+| Edit notes inline | `internal/ui/home.go:6548` (`e` key) | POST `/api/sessions/{id}/notes` | `UpdateSessionNotes` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Web `e` opens inline notes dialog; routes hub sessions through hub update `notes` |
 | Toggle YOLO mode | `internal/ui/home.go:6418` (`y` key) | POST `/api/sessions/{id}/toggle-yolo` | `ToggleYoloSession` | `handlers_sessions_test.go`, `static_files_test.go` | Gemini/Codex/Hermes; requires restart for some tools; web row/header YOLO action |
 | Open settings panel | `internal/ui/home.go:6148` (`S` key) | GET `/api/settings` | N/A | `handlers_settings_test.go` | Read-only; displays profile, version |
 | **WORKFLOW & NAVIGATION** |
@@ -166,8 +166,8 @@ tiers:
   (`/api/push/{subscribe,unsubscribe,presence}`). The fixture binary
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
-- **MISSING-stays-missing** (regression guard, 404/405 expected): 1 of the
-  15 MISSING actions have plausible URL patterns probed by
+- **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
+  14 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
   14 are TUI-UX-only (search, copy, jump, help, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
@@ -176,11 +176,10 @@ tiers:
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web endpoints implemented:** 37
-- **MISSING web actions:** 15 (~29% gap)
+- **Web endpoints implemented:** 38
+- **MISSING web actions:** 14 (~27% gap)
 - **Key gaps:**
   - Multi-repo path editor
-  - Inline notes editor
   - Content operations (copy/search/jump/navigation-only flows)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
@@ -199,7 +198,7 @@ tiers:
 
 ### Sync Gaps (Actions)
 
-1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path and POST `/api/sessions/{id}/group` for group moves. Remaining gaps are narrower: inline notes (`e` textarea) and multi-repo path editing.
+1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
 
 2. **MCP & Skill Management** (6 actions): MCPDialog and SkillDialog are TUI-only. They:
    - Write `.mcp.json` and project config

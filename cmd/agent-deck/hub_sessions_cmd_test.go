@@ -60,6 +60,7 @@ func TestHubSessionsUsageDocumentsAllNativeActions(t *testing.T) {
 		"create",
 		"attach",
 		"send",
+		"notes",
 		"close",
 		"restart",
 		"restart-fresh",
@@ -77,6 +78,40 @@ func TestHubSessionsUsageDocumentsAllNativeActions(t *testing.T) {
 		if !strings.Contains(text, action) {
 			t.Fatalf("hub sessions usage missing %q:\n%s", action, text)
 		}
+	}
+}
+
+func TestRunHubSessionNotesUsesHubUpdateNotesAction(t *testing.T) {
+	client := &fakeHubSessionsClient{}
+	snapshots := []hub.NodeSessions{{
+		Node: hub.Node{ID: "node_work", Name: "work"},
+		Sessions: []hub.SessionInfo{{
+			ID:    "sess_api",
+			Title: "api",
+		}},
+	}}
+
+	result, err := runHubSessionWithClient(context.Background(), client, snapshots, hubSessionOptions{
+		Action:    "notes",
+		NodeID:    "work",
+		SessionID: "api",
+		Notes:     "line one\nline two",
+	})
+	if err != nil {
+		t.Fatalf("runHubSessionWithClient notes: %v", err)
+	}
+	if result.SessionID != "sess_api" || result.Action != "notes" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_work" || client.commands[0].action != "update" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(hub.UpdateSessionRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want hub.UpdateSessionRequest", client.commands[0].payload)
+	}
+	if payload.SessionID != "sess_api" || len(payload.Changes) != 1 || payload.Changes[0].Field != "notes" || payload.Changes[0].Value != "line one\nline two" {
+		t.Fatalf("notes payload = %+v", payload)
 	}
 }
 

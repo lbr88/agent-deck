@@ -86,6 +86,7 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 				Status:      "waiting",
 				GroupPath:   "ops",
 				ProjectPath: "/srv/app",
+				Notes:       "remote runbook",
 				CanFork:     true,
 			}, {
 				ID:         "archived",
@@ -109,6 +110,9 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	}
 	if !webSnapshotHubSessionCanFork(active, "node_server", "r1") {
 		t.Fatalf("active web snapshot did not mark forkable hub session: %+v", active.Items)
+	}
+	if got := webSnapshotHubSessionNotes(active, "node_server", "r1"); got != "remote runbook" {
+		t.Fatalf("active web snapshot hub notes = %q, want remote runbook", got)
 	}
 	if webSnapshotHasHubSession(active, "node_server", "archived") {
 		t.Fatalf("active web snapshot included archived hub session: %+v", active.Items)
@@ -905,6 +909,49 @@ func TestHubSessionMoveAndEditUseHubCommands(t *testing.T) {
 	if got := h.hubSessions["node_server"].Sessions[0].Title; got != "deploy edited" {
 		t.Fatalf("cached hub title = %q, want deploy edited", got)
 	}
+
+	cfg, err := session.LoadUserConfig()
+	if err != nil {
+		t.Fatalf("LoadUserConfig: %v", err)
+	}
+	showNotes := true
+	cfg.Preview.ShowNotes = &showNotes
+	if err := session.SaveUserConfig(cfg); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+
+	h.cursor = indexHubSession(t, h, "r1")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("e should enter hub notes edit mode without command")
+	}
+	if !h.notesEditing || h.notesEditingHubNodeID != "node_server" || h.notesEditingSessionID != "r1" {
+		t.Fatalf("hub notes edit state = editing:%v node:%q session:%q", h.notesEditing, h.notesEditingHubNodeID, h.notesEditingSessionID)
+	}
+	h.notesEditor.SetValue("remember remote deploy")
+	model, cmd = h.handleNotesEditorKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub notes save returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("notes hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if got := client.commands[2]; got.nodeID != "node_server" || got.action != "update" {
+		t.Fatalf("notes hub command = %+v", got)
+	} else {
+		req, ok := got.payload.(hub.UpdateSessionRequest)
+		if !ok {
+			t.Fatalf("notes payload type = %T, want hub.UpdateSessionRequest", got.payload)
+		}
+		if req.SessionID != "r1" || len(req.Changes) != 1 || req.Changes[0].Field != session.FieldNotes || req.Changes[0].Value != "remember remote deploy" {
+			t.Fatalf("notes request = %+v", req)
+		}
+	}
+	if got := h.hubSessions["node_server"].Sessions[0].Notes; got != "remember remote deploy" {
+		t.Fatalf("cached hub notes = %q, want remember remote deploy", got)
+	}
 }
 
 func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
@@ -961,10 +1008,28 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	}
 	assertHubCommand(t, client.commands[5], "node_server", "send", map[string]string{"session_id": "r1", "message": "run tests"})
 
+	if err := mutator.UpdateSessionNotes(webID, "web notes"); err != nil {
+		t.Fatalf("UpdateSessionNotes: %v", err)
+	}
+	if got := client.commands[6]; got.nodeID != "node_server" || got.action != "update" {
+		t.Fatalf("notes command = %+v", got)
+	} else {
+		req, ok := got.payload.(hub.UpdateSessionRequest)
+		if !ok {
+			t.Fatalf("notes payload type = %T, want hub.UpdateSessionRequest", got.payload)
+		}
+		if req.SessionID != "r1" || len(req.Changes) != 1 || req.Changes[0].Field != session.FieldNotes || req.Changes[0].Value != "web notes" {
+			t.Fatalf("notes request = %+v", req)
+		}
+	}
+	if got := h.hubSessions["node_server"].Sessions[0].Notes; got != "web notes" {
+		t.Fatalf("hub notes after UpdateSessionNotes = %q, want web notes", got)
+	}
+
 	if err := mutator.MarkSessionUnread(webID); err != nil {
 		t.Fatalf("MarkSessionUnread: %v", err)
 	}
-	assertHubCommand(t, client.commands[6], "node_server", "mark_unread", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[7], "node_server", "mark_unread", map[string]string{"session_id": "r1"})
 	if got := h.hubSessions["node_server"].Sessions[0].Status; got != string(session.StatusWaiting) {
 		t.Fatalf("hub status after MarkSessionUnread = %q, want waiting", got)
 	}
@@ -972,7 +1037,7 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	if err := mutator.DeleteSession(webID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	assertHubCommand(t, client.commands[7], "node_server", "delete", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[8], "node_server", "delete", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}
@@ -1461,6 +1526,19 @@ func webSnapshotHubSessionCanFork(snapshot *web.MenuSnapshot, nodeID, sessionID 
 		}
 	}
 	return false
+}
+
+func webSnapshotHubSessionNotes(snapshot *web.MenuSnapshot, nodeID, sessionID string) string {
+	if snapshot == nil {
+		return ""
+	}
+	wantID := web.HubSessionWebID(nodeID, sessionID)
+	for _, item := range snapshot.Items {
+		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
+			return item.Session.Notes
+		}
+	}
+	return ""
 }
 
 func webSnapshotHasHubGroup(snapshot *web.MenuSnapshot, nodeID, groupPath string, sessionCount int) bool {

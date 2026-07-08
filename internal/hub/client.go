@@ -1209,6 +1209,7 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		Status:           row.Status,
 		GroupPath:        row.GroupPath,
 		ProjectPath:      row.ProjectPath,
+		Notes:            notesFromRow(row),
 		DisplaySessionID: displaySessionIDFromRow(row),
 		CanFork:          canForkFromRow(row),
 		UpdatedAt:        rowUpdatedAt(row),
@@ -1218,6 +1219,14 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		info.ArchivedAt = &archivedAt
 	}
 	return info
+}
+
+func notesFromRow(row *statedb.InstanceRow) string {
+	if row == nil {
+		return ""
+	}
+	_, _, _, _, _, _, _, _, _, _, _, notes, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := statedb.UnmarshalToolData(row.ToolData)
+	return notes
 }
 
 func canForkFromRow(row *statedb.InstanceRow) bool {

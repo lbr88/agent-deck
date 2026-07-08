@@ -35,6 +35,7 @@ type fakeMutator struct {
 	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, []string, error)
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
+	updateNotesFn      func(id, notes string) error
 	markUnreadFn       func(id string) error
 	createGroupFn      func(name, parentPath string) (string, error)
 	renameGroupFn      func(groupPath, newName string) error
@@ -164,6 +165,13 @@ func (f *fakeMutator) SendSessionPrompt(id, message string) error {
 		return fmt.Errorf("sendSessionPrompt not configured")
 	}
 	return f.sendSessionFn(id, message)
+}
+
+func (f *fakeMutator) UpdateSessionNotes(id, notes string) error {
+	if f.updateNotesFn == nil {
+		return fmt.Errorf("updateSessionNotes not configured")
+	}
+	return f.updateNotesFn(id, notes)
 }
 
 func (f *fakeMutator) MarkSessionUnread(id string) error {
@@ -709,6 +717,37 @@ func TestSessionSendPromptRejectsEmptyMessage(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionUpdateNotesOK(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotID, gotNotes string
+	srv.mutator = &fakeMutator{
+		updateNotesFn: func(id, notes string) error {
+			gotID = id
+			gotNotes = notes
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/notes", strings.NewReader(`{"notes":"line one\nline two"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != "test-id" || gotNotes != "line one\nline two" {
+		t.Fatalf("notes update call = id %q notes %q, want test-id/line one\\nline two", gotID, gotNotes)
+	}
+	if !strings.Contains(rr.Body.String(), `"updatedFields":["notes"]`) {
+		t.Fatalf("response missing notes updatedFields: %s", rr.Body.String())
 	}
 }
 

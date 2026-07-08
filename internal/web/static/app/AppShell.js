@@ -29,7 +29,7 @@ import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
   editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
-  groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
+  notesSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
   profilesSignal, systemStatsSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
@@ -42,6 +42,7 @@ import { CreateSessionDialog } from './CreateSessionDialog.js'
 import { EditSessionDialog } from './EditSessionDialog.js'
 import { MoveSessionDialog } from './MoveSessionDialog.js'
 import { PromptSessionDialog } from './PromptSessionDialog.js'
+import { NotesSessionDialog } from './NotesSessionDialog.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
 import { GroupNameDialog } from './GroupNameDialog.js'
 import { ToastContainer, addToast } from './Toast.js'
@@ -92,6 +93,7 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => action('restart-fresh')}>Fresh</button>
           ${supportsYolo && html`<button class="btn ghost" onClick=${() => action('toggle-yolo')}>YOLO</button>`}
           <button class="btn ghost" onClick=${() => action('unread')}>Unread</button>
+          <button class="btn ghost" onClick=${() => (notesSessionDialogSignal.value = { sessionId: session.id })}>Notes</button>
           <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
           <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
           ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
@@ -132,6 +134,7 @@ export function AppShell() {
   const showCreateSession = createSessionDialogSignal.value
   const showMoveSession = moveSessionDialogSignal.value
   const showPromptSession = promptSessionDialogSignal.value
+  const showNotesSession = notesSessionDialogSignal.value
   const confirmData = confirmDialogSignal.value
   const groupNameData = groupNameDialogSignal.value
   const drawerOpen = infoDrawerOpenSignal.value
@@ -243,6 +246,7 @@ export function AppShell() {
       editSessionDialogSignal.value = null
       moveSessionDialogSignal.value = null
       promptSessionDialogSignal.value = null
+      notesSessionDialogSignal.value = null
       infoDrawerOpenSignal.value = false
     }
     const onKey = (e) => {
@@ -306,6 +310,13 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           promptSessionDialogSignal.value = { sessionId: s.id }
+        }
+      } else if (e.key === 'e') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          notesSessionDialogSignal.value = { sessionId: s.id }
         }
       } else if (e.key === 'u') {
         if (!mutationsEnabledSignal.value) return
@@ -384,6 +395,7 @@ export function AppShell() {
       <${EditSessionDialog}/>
       ${showMoveSession && html`<${MoveSessionDialog} ...${showMoveSession}/>`}
       ${showPromptSession && html`<${PromptSessionDialog} ...${showPromptSession}/>`}
+      ${showNotesSession && html`<${NotesSessionDialog} ...${showNotesSession}/>`}
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}
       ${groupNameData && html`<${GroupNameDialog} ...${groupNameData}/>`}
 

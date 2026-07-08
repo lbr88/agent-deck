@@ -384,7 +384,12 @@ export function TerminalPanel() {
     }
 
     connectWS(false)
-    if (!mobile) terminal.focus()
+    // Do not auto-focus xterm on mount/session switch. The web shell has
+    // global TUI-parity shortcuts (`o`, `n`, `j`, `k`, etc.); xterm focuses a
+    // hidden textarea and the AppShell shortcut guard intentionally ignores
+    // real text fields. Auto-focus made those shortcuts appear dead as soon as
+    // the terminal pane mounted. Users can still focus the terminal explicitly
+    // by clicking/tapping it before typing into the attached session.
 
     // Cleanup on unmount or sessionId change
     return () => {

@@ -284,6 +284,8 @@ type Home struct {
 	notesEditor           textarea.Model
 	notesEditing          bool
 	notesEditingSessionID string
+	notesEditingHubNodeID string
+	notesEditingHubName   string
 
 	// Analytics cache (async fetching with TTL)
 	currentAnalytics       *session.SessionAnalytics                  // Current analytics for selected session (Claude)
@@ -2110,6 +2112,7 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 					Status:         session.Status(strings.TrimSpace(info.Status)),
 					GroupPath:      webGroupPath,
 					ProjectPath:    info.ProjectPath,
+					Notes:          info.Notes,
 					Order:          i,
 					LastAccessedAt: hubSessionUpdatedAt(info),
 					ArchivedAt:     hubArchivedAtValue(info),
@@ -2877,6 +2880,7 @@ func (h *Home) projectHubItems() []session.Item {
 				Status:           info.Status,
 				GroupPath:        info.GroupPath,
 				ProjectPath:      info.ProjectPath,
+				Notes:            info.Notes,
 				DisplaySessionID: info.DisplaySessionID,
 				CanFork:          info.CanFork,
 				ArchivedAt:       info.ArchivedAt,
@@ -8104,17 +8108,63 @@ func (h *Home) beginNotesEditing(inst *session.Instance) {
 	}
 	h.notesEditing = true
 	h.notesEditingSessionID = inst.ID
+	h.notesEditingHubNodeID = ""
+	h.notesEditingHubName = ""
 	h.notesEditor.SetValue(inst.Notes)
+	h.notesEditor.Focus()
+}
+
+func (h *Home) beginHubNotesEditing(item session.Item) {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return
+	}
+	h.notesEditing = true
+	h.notesEditingSessionID = item.HubSession.ID
+	h.notesEditingHubNodeID = item.HubNodeID
+	h.notesEditingHubName = item.HubNodeName
+	h.notesEditor.SetValue(item.HubSession.Notes)
 	h.notesEditor.Focus()
 }
 
 func (h *Home) stopNotesEditing() {
 	h.notesEditing = false
 	h.notesEditingSessionID = ""
+	h.notesEditingHubNodeID = ""
+	h.notesEditingHubName = ""
 	h.notesEditor.Blur()
 }
 
 func (h *Home) handleNotesEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if h.notesEditingHubNodeID != "" {
+		item := h.getSelectedHubSessionItem()
+		if item == nil || item.HubSession == nil ||
+			item.HubNodeID != h.notesEditingHubNodeID ||
+			item.HubSession.ID != h.notesEditingSessionID {
+			h.stopNotesEditing()
+			return h, nil
+		}
+
+		switch msg.String() {
+		case "esc":
+			h.stopNotesEditing()
+			return h, nil
+		case "ctrl+s":
+			notes := strings.TrimRight(h.notesEditor.Value(), "\n")
+			changes := []hub.SessionFieldChange{{Field: session.FieldNotes, Value: notes}}
+			h.applyHubSessionFieldChanges(h.notesEditingHubNodeID, h.notesEditingSessionID, changes)
+			h.rebuildFlatItems()
+			nodeID := h.notesEditingHubNodeID
+			nodeName := h.notesEditingHubName
+			sessionID := h.notesEditingSessionID
+			h.stopNotesEditing()
+			return h, h.hubCommand(nodeID, nodeName, "update", hub.UpdateSessionRequest{SessionID: sessionID, Changes: changes})
+		}
+
+		var cmd tea.Cmd
+		h.notesEditor, cmd = h.notesEditor.Update(msg)
+		return h, cmd
+	}
+
 	selected := h.getSelectedSession()
 	if selected == nil || selected.ID != h.notesEditingSessionID {
 		h.stopNotesEditing()
@@ -9791,6 +9841,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				h.beginNotesEditing(item.Session)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.beginHubNotesEditing(item)
 			}
 		}
 		return h, nil
@@ -10007,6 +10059,7 @@ func hubSessionEditProxy(item session.Item) *session.Instance {
 		Tool:        hs.Tool,
 		GroupPath:   hs.GroupPath,
 		ProjectPath: hs.ProjectPath,
+		Notes:       hs.Notes,
 		Status:      session.Status(strings.TrimSpace(hs.Status)),
 	}
 }
@@ -13778,6 +13831,8 @@ func (h *Home) applyHubSessionFieldChanges(nodeID, sessionID string, changes []h
 				snapshot.Sessions[i].Tool = change.Value
 			case session.FieldPath:
 				snapshot.Sessions[i].ProjectPath = change.Value
+			case session.FieldNotes:
+				snapshot.Sessions[i].Notes = change.Value
 			}
 		}
 		h.hubSessions[nodeID] = snapshot
@@ -17708,6 +17763,31 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 		b.WriteString(dimStyle.Render("Tool:   ") + hs.Tool + "\n")
 	}
 	b.WriteString(dimStyle.Render("Group:  ") + hs.GroupPath + "\n\n")
+
+	if h.notesEditing && h.notesEditingHubNodeID == item.HubNodeID && h.notesEditingSessionID == hs.ID {
+		contentWidth := max(10, width-4)
+		h.notesEditor.SetWidth(contentWidth)
+		h.notesEditor.SetHeight(max(3, min(8, height/3)))
+		h.notesEditor.Focus()
+		b.WriteString(dimStyle.Render("Notes") + "\n")
+		b.WriteString(h.notesEditor.View())
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("Ctrl+S save • Esc cancel"))
+		b.WriteString("\n\n")
+	} else if strings.TrimSpace(hs.Notes) != "" {
+		b.WriteString(dimStyle.Render("Notes") + "\n")
+		notes := strings.TrimRight(hs.Notes, "\n")
+		lines := strings.Split(notes, "\n")
+		maxNotesLines := max(1, min(6, height/4))
+		if len(lines) > maxNotesLines {
+			lines = append(lines[:maxNotesLines], fmt.Sprintf("… %d more lines", len(strings.Split(notes, "\n"))-maxNotesLines))
+		}
+		for _, line := range lines {
+			b.WriteString(cellTruncate(line, max(1, width-4), "…"))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 
 	pvKey := hubPreviewCacheKey(item.HubNodeID, hs.ID)
 	h.previewCacheMu.RLock()

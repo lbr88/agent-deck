@@ -880,6 +880,14 @@ func (m *WebMutator) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+// UpdateSessionNotes saves inline notes for a local or hub session. This is the
+// web equivalent of the TUI `e` notes editor and intentionally uses the same
+// session.FieldNotes update path as the full settings dialog.
+func (m *WebMutator) UpdateSessionNotes(id, notes string) error {
+	_, _, _, err := m.UpdateSession(id, map[string]string{session.FieldNotes: notes})
+	return err
+}
+
 // MarkSessionUnread marks an idle/acknowledged session as needing attention.
 // Hub session IDs route to the owner node so the authoritative acknowledged
 // state changes where the session lives.

@@ -542,6 +542,17 @@ func (s *fixtureStore) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+func (s *fixtureStore) UpdateSessionNotes(id, notes string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	sess.Notes = notes
+	return nil
+}
+
 func (s *fixtureStore) MarkSessionUnread(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -132,6 +132,7 @@ type SessionMutator interface {
 	UpdateSession(sessionID string, updates map[string]string) (updatedFields []string, restartRequired bool, warnings []string, err error)
 	MoveSessionToGroup(sessionID, groupPath string) error
 	SendSessionPrompt(sessionID, message string) error
+	UpdateSessionNotes(sessionID, notes string) error
 	MarkSessionUnread(sessionID string) error
 	CreateGroup(name, parentPath string) (string, error)
 	RenameGroup(groupPath, newName string) error

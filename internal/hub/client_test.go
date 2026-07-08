@@ -677,6 +677,7 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 		CreatedAt:      now.Add(-time.Hour),
 		LastAccessedAt: now,
 		CodexSessionID: "codex-session-1",
+		Notes:          "remote notes",
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -697,6 +698,9 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	}
 	if got.DisplaySessionID != "codex-session-1" {
 		t.Fatalf("DisplaySessionID = %q, want codex-session-1", got.DisplaySessionID)
+	}
+	if got.Notes != "remote notes" {
+		t.Fatalf("Notes = %q, want remote notes", got.Notes)
 	}
 	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(now) {
 		t.Fatalf("UpdatedAt = %v, want %v", got.UpdatedAt, now)

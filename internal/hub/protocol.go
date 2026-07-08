@@ -63,6 +63,7 @@ type SessionInfo struct {
 	Status           string     `json:"status"`
 	GroupPath        string     `json:"group_path"`
 	ProjectPath      string     `json:"project_path,omitempty"`
+	Notes            string     `json:"notes,omitempty"`
 	DisplaySessionID string     `json:"display_session_id,omitempty"`
 	CanFork          bool       `json:"can_fork,omitempty"`
 	UpdatedAt        *time.Time `json:"updated_at,omitempty"`

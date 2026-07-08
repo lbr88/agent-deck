@@ -21,8 +21,8 @@ const MATRIX = loadMatrix()
 const EXPECTED_ACTION_ROWS = 52
 // Probeable = MISSING rows that inferMissingProbe() maps to a URL. Decremented
 // as endpoints land and their matrix rows flip MISSING → Present. The true
-// remaining probeable gap is now: Edit notes inline.
-const EXPECTED_PROBEABLE_MISSING = 1
+// remaining probeable gap count is now zero.
+const EXPECTED_PROBEABLE_MISSING = 0
 
 test.describe.configure({ mode: 'serial' })
 
@@ -149,6 +149,15 @@ test.describe('parity: session lifecycle', () => {
     expect(res.ok()).toBe(true)
     const after = await snapshot(request)
     expect(findSession(after, (s) => s.id === 'sess-001').latestPrompt).toBe('run tests')
+  })
+
+  test('edit notes inline — POST updates notes', async ({ request }) => {
+    const res = await request.post('/api/sessions/sess-001/notes', {
+      data: { notes: 'line one\nline two' },
+    })
+    expect(res.ok()).toBe(true)
+    const after = await snapshot(request)
+    expect(findSession(after, (s) => s.id === 'sess-001').notes).toBe('line one\nline two')
   })
 
   test('mark session unread — POST updates status to waiting', async ({ request }) => {

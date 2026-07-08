@@ -139,7 +139,22 @@ test.describe('keyboard parity (#780)', () => {
     await expect(dialog).toContainText(/edit session/i)
   })
 
+  test('e opens the notes editor dialog', async ({ page }) => {
+    await page.keyboard.press('e')
+    const dialog = page.locator('[data-testid="notes-session-dialog"]')
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(/edit notes/i)
+  })
+
   test('o opens the prompt session dialog', async ({ page }) => {
+    // Regression: TerminalPanel used to auto-focus xterm's hidden textarea on
+    // mount, so AppShell's "typing in a field" guard ignored global shortcuts
+    // and `o` appeared dead immediately after page load.
+    const activeBefore = await page.evaluate(() => {
+      const el = document.activeElement
+      return el ? { tag: el.tagName, cls: el.className || '' } : null
+    })
+    expect(String(activeBefore?.cls || '')).not.toContain('xterm-helper-textarea')
     await page.keyboard.press('o')
     const dialog = page.locator('.overlay .dialog, [role="dialog"]').first()
     await expect(dialog).toBeVisible()

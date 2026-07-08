@@ -103,6 +103,10 @@ export const moveSessionDialogSignal = signal(null)
 // Web parity for the TUI `o` shortcut: POSTs /api/sessions/{id}/send.
 export const promptSessionDialogSignal = signal(null)
 
+// notesSessionDialogSignal: null or { sessionId: string }
+// Web parity for the TUI `e` shortcut: POSTs /api/sessions/{id}/notes.
+export const notesSessionDialogSignal = signal(null)
+
 // WebSocket connection state for terminal: 'disconnected' | 'connecting' | 'connected' | 'error'
 export const wsStateSignal = signal('disconnected')
 

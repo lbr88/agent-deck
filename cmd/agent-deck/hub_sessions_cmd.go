@@ -31,6 +31,7 @@ type hubSessionOptions struct {
 	Group        string
 	ModelID      string
 	Message      string
+	Notes        string
 	Attach       bool
 }
 
@@ -71,6 +72,8 @@ func handleHubSessions(profile string, args []string) error {
 		return handleHubSessionsSimple(profile, "attach", args[1:])
 	case "send":
 		return handleHubSessionsSend(profile, args[1:])
+	case "notes":
+		return handleHubSessionsNotes(profile, args[1:])
 	case "close", "stop":
 		return handleHubSessionsSimple(profile, "stop", args[1:])
 	case "restart":
@@ -231,6 +234,33 @@ func handleHubSessionsSend(profile string, args []string) error {
 		NodeID:    fs.Arg(0),
 		SessionID: fs.Arg(1),
 		Message:   strings.Join(fs.Args()[2:], " "),
+	})
+}
+
+func handleHubSessionsNotes(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub sessions notes", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Output result as JSON")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node/session resolution")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions notes <node-id-or-name> <session-id-or-title> <notes>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() < 3 {
+		return fmt.Errorf("usage: agent-deck hub sessions notes <node-id-or-name> <session-id-or-title> <notes>")
+	}
+	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
+		Action:    "notes",
+		NodeID:    fs.Arg(0),
+		SessionID: fs.Arg(1),
+		Notes:     strings.Join(fs.Args()[2:], " "),
 	})
 }
 
@@ -416,6 +446,11 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, fmt.Errorf("hub sessions send message is required")
 		}
 		_, err = client.Command(ctx, resolved.NodeID, "send", map[string]string{"session_id": resolved.SessionID, "message": message})
+	case "notes":
+		_, err = client.Command(ctx, resolved.NodeID, "update", hub.UpdateSessionRequest{
+			SessionID: resolved.SessionID,
+			Changes:   []hub.SessionFieldChange{{Field: session.FieldNotes, Value: opts.Notes}},
+		})
 	case "rename":
 		title := strings.TrimSpace(opts.Title)
 		if title == "" {
@@ -649,6 +684,7 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  create <node>               Create a session on a hub node")
 	fmt.Fprintln(w, "  attach <node> <session>     Attach to a hub session")
 	fmt.Fprintln(w, "  send <node> <session> <msg> Send a prompt/message")
+	fmt.Fprintln(w, "  notes <node> <session> <notes> Update hub session notes")
 	fmt.Fprintln(w, "  close <node> <session>      Stop a hub session")
 	fmt.Fprintln(w, "  restart <node> <session>    Restart a hub session")
 	fmt.Fprintln(w, "  restart-fresh <node> <session> Restart without resume")
