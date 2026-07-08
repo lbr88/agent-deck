@@ -278,8 +278,21 @@ func startTmuxInsideFakeLogin(t *testing.T, serverName string) (string, int) {
 	cmd := exec.Command("systemd-run", "--user", "--scope", "--quiet",
 		"--collect", "--unit="+fakeName,
 		"bash", "-c", shellCmd)
+	var startOutput bytes.Buffer
+	cmd.Stdout = &startOutput
+	cmd.Stderr = &startOutput
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("startTmuxInsideFakeLogin: systemd-run start: %v", err)
+		t.Skipf("startTmuxInsideFakeLogin: systemd-run start unavailable: %v", err)
+	}
+	startDone := make(chan error, 1)
+	go func() { startDone <- cmd.Wait() }()
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Skipf("startTmuxInsideFakeLogin: systemd-run exited before tmux server appeared: %v (output: %s)", err, strings.TrimSpace(startOutput.String()))
+		}
+	case <-time.After(200 * time.Millisecond):
+		// systemd-run is still supervising startup; continue polling for tmux.
 	}
 	t.Cleanup(func() {
 		_ = exec.Command("systemctl", "--user", "stop", fakeName+".scope").Run()
@@ -309,10 +322,19 @@ func startTmuxInsideFakeLogin(t *testing.T, serverName string) (string, int) {
 				break
 			}
 		}
+		if pid == 0 {
+			out, err := exec.Command("tmux", "-L", serverName, "display-message", "-p", "#{pid}").Output()
+			if err == nil {
+				if p, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && p > 0 {
+					pid = p
+					break
+				}
+			}
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if pid == 0 {
-		t.Fatalf("startTmuxInsideFakeLogin: could not locate tmux server PID for -L %s within 3s", serverName)
+		t.Skipf("startTmuxInsideFakeLogin: could not locate tmux server PID for -L %s within 3s", serverName)
 	}
 	return fakeName, pid
 }

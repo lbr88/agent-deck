@@ -4,8 +4,7 @@
 // four MISSING rows under "MCP MANAGEMENT" in tests/web/PARITY_MATRIX.md.
 //
 // Endpoints used:
-//   GET    /api/mcps                              -> catalog
-//   GET    /api/sessions/{id}/mcps                -> attached
+//   GET    /api/sessions/{id}/mcps                -> attached + session-aware catalog
 //   POST   /api/sessions/{id}/mcps/{name}         -> attach (scope in body)
 //   DELETE /api/sessions/{id}/mcps/{name}         -> detach (scope in body)
 //   PATCH  /api/sessions/{id}/mcps/{name}         -> move scope (toggle pooled ↔ local)
@@ -16,6 +15,16 @@ import { selectedIdSignal, mutationsEnabledSignal } from '../state.js'
 import { addToast } from '../Toast.js'
 
 const SCOPES = ['local', 'global', 'user']
+
+function stringValue(value) {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ')
+  if (typeof value === 'object') {
+    return stringValue(value.path || value.projectPath || value.value || value.label || value.name || '')
+  }
+  return String(value)
+}
 
 async function jsonFetch(path, opts = {}) {
   const res = await fetch(path, {
@@ -39,6 +48,7 @@ export function McpPane() {
   const selectedId = selectedIdSignal.value
   const mutationsEnabled = mutationsEnabledSignal.value
   const session = sessions.find(s => s.id === selectedId)
+  const isHubSession = !!(session && typeof session.id === 'string' && session.id.startsWith('hub/'))
 
   const [catalog, setCatalog] = useState([])
   const [attached, setAttached] = useState({ local: [], global: [], user: [] })
@@ -50,16 +60,13 @@ export function McpPane() {
     setLoading(true)
     setError('')
     try {
-      const [catalogResp, attachedResp] = await Promise.all([
-        jsonFetch('/api/mcps'),
-        jsonFetch(`/api/sessions/${encodeURIComponent(session.id)}/mcps`),
-      ])
-      setCatalog(catalogResp.mcps || [])
+      const attachedResp = await jsonFetch(`/api/sessions/${encodeURIComponent(session.id)}/mcps`)
       setAttached({
         local: attachedResp.local || [],
         global: attachedResp.global || [],
         user: attachedResp.user || [],
       })
+      setCatalog(attachedResp.catalog || [])
     } catch (err) {
       setError(err.message)
     } finally {
@@ -137,7 +144,7 @@ export function McpPane() {
       <div class="chart-card" style="padding: 24px;">
         <div class="title" style="font-size: 16px; margin-bottom: 4px;">MCP Manager</div>
         <div style="font-family: var(--mono); font-size: 11px; color: var(--text-dim); margin-bottom: 16px;">
-          ${session.title} · ${session.path || ''}
+          ${stringValue(session.title)} · ${stringValue(session.path || session.projectPath || '')}
         </div>
 
         ${error && html`
@@ -158,7 +165,8 @@ export function McpPane() {
             attached=${attached}
             mutationsEnabled=${mutationsEnabled}
             onAttach=${attach}
-            loading=${loading}/>
+            loading=${loading}
+            isHubSession=${isHubSession}/>
         </div>
       </div>
     </div>
@@ -210,7 +218,7 @@ function AttachedSection({ attached, mutationsEnabled, onDetach, onMove }) {
   `
 }
 
-function CatalogSection({ catalog, attached, mutationsEnabled, onAttach, loading }) {
+function CatalogSection({ catalog, attached, mutationsEnabled, onAttach, loading, isHubSession }) {
   const isAttachedAnywhere = (name) => SCOPES.some(s => attached[s].includes(name))
 
   return html`
@@ -221,7 +229,9 @@ function CatalogSection({ catalog, attached, mutationsEnabled, onAttach, loading
       ${loading && html`<div style="font-family: var(--mono); font-size: 11px; color: var(--text-dim); padding: 8px;">Loading…</div>`}
       ${!loading && catalog.length === 0 && html`
         <div style="font-family: var(--mono); font-size: 12px; color: var(--text-dim); padding: 12px;">
-          No MCPs in the catalog. Add some to <code>~/.agent-deck/config.toml</code>.
+          ${isHubSession
+            ? html`No MCPs in the remote node catalog. Add them to that node's <code>~/.agent-deck/config.toml</code>.`
+            : html`No MCPs in the catalog. Add some to <code>~/.agent-deck/config.toml</code>.`}
         </div>
       `}
       ${catalog.map(entry => {

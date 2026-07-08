@@ -20,19 +20,30 @@ import (
 )
 
 type hubSessionOptions struct {
-	Action       string
-	NodeID       string
-	NodeName     string
-	SessionID    string
-	SessionTitle string
-	Title        string
-	Tool         string
-	CWD          string
-	Group        string
-	ModelID      string
-	Message      string
-	Notes        string
-	Attach       bool
+	Action          string
+	NodeID          string
+	NodeName        string
+	SessionID       string
+	SessionTitle    string
+	Title           string
+	Tool            string
+	CWD             string
+	Group           string
+	ModelID         string
+	AdditionalPaths []string
+	Message         string
+	Notes           string
+	Attach          bool
+	Worktree        bool
+	Branch          string
+	Into            string
+	NoMerge         bool
+	KeepBranch      bool
+	Force           bool
+	WithState       bool
+	WithIgnored     bool
+	Sandbox         bool
+	SandboxImage    string
 }
 
 type hubSessionCommandResult struct {
@@ -70,12 +81,16 @@ func handleHubSessions(profile string, args []string) error {
 		return handleHubSessionsCreate(profile, args[1:])
 	case "attach":
 		return handleHubSessionsSimple(profile, "attach", args[1:])
+	case "sandbox-shell", "exec-shell", "shell":
+		return handleHubSessionsSandboxShell(profile, args[1:])
 	case "send":
 		return handleHubSessionsSend(profile, args[1:])
 	case "approve":
 		return handleHubSessionsSimple(profile, "approve", args[1:])
 	case "notes":
 		return handleHubSessionsNotes(profile, args[1:])
+	case "start":
+		return handleHubSessionsSimple(profile, "start", args[1:])
 	case "close", "stop":
 		return handleHubSessionsSimple(profile, "stop", args[1:])
 	case "restart":
@@ -83,9 +98,15 @@ func handleHubSessions(profile string, args []string) error {
 	case "restart-fresh":
 		return handleHubSessionsSimple(profile, "restart_fresh", args[1:])
 	case "fork":
-		return handleHubSessionsSimple(profile, "fork", args[1:])
+		return handleHubSessionsFork(profile, args[1:])
+	case "worktree-setup", "setup-worktree":
+		return handleHubSessionsSimple(profile, "worktree_setup", args[1:])
+	case "worktree-finish", "finish-worktree":
+		return handleHubSessionsWorktreeFinish(profile, args[1:])
 	case "delete":
 		return handleHubSessionsSimple(profile, "delete", args[1:])
+	case "undo-delete", "undelete":
+		return handleHubSessionsUndoDelete(profile, args[1:])
 	case "archive":
 		return handleHubSessionsSimple(profile, "archive", args[1:])
 	case "unarchive":
@@ -157,12 +178,14 @@ func handleHubSessionsCreate(profile string, args []string) error {
 	cwd := fs.String("cwd", "", "Working directory on the remote node")
 	group := fs.String("group", "", "Group path on the remote node")
 	model := fs.String("model", "", "Model id")
+	var addDirs stringSliceFlag
+	fs.Var(&addDirs, "add-dir", "Additional working directory for multi-repo mode on the remote node (repeatable)")
 	attach := fs.Bool("attach", false, "Attach after creating")
 	jsonOutput := fs.Bool("json", false, "Output created session as JSON")
 	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
 	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node-name resolution")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions create <node-id-or-name> [--title name] [--tool tool] [--cwd path] [--group group] [--model model] [--attach]")
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions create <node-id-or-name> [--title name] [--tool tool] [--cwd path] [--add-dir path ...] [--group group] [--model model] [--attach]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -175,14 +198,15 @@ func handleHubSessionsCreate(profile string, args []string) error {
 		return fmt.Errorf("usage: agent-deck hub sessions create <node-id-or-name>")
 	}
 	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
-		Action:  "create",
-		NodeID:  fs.Arg(0),
-		Title:   *title,
-		Tool:    *tool,
-		CWD:     *cwd,
-		Group:   *group,
-		ModelID: *model,
-		Attach:  *attach && !*jsonOutput,
+		Action:          "create",
+		NodeID:          fs.Arg(0),
+		Title:           *title,
+		Tool:            *tool,
+		CWD:             *cwd,
+		AdditionalPaths: append([]string(nil), addDirs...),
+		Group:           *group,
+		ModelID:         *model,
+		Attach:          *attach && !*jsonOutput,
 	})
 }
 
@@ -209,6 +233,58 @@ func handleHubSessionsSimple(profile, action string, args []string) error {
 		Action:    action,
 		NodeID:    fs.Arg(0),
 		SessionID: fs.Arg(1),
+	})
+}
+
+func handleHubSessionsSandboxShell(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub sessions sandbox-shell", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Output result as JSON without printing the short-lived attach token")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node/session resolution")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions sandbox-shell <node-id-or-name> <session-id-or-title>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: agent-deck hub sessions sandbox-shell <node-id-or-name> <session-id-or-title>")
+	}
+	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
+		Action:    "sandbox_shell",
+		NodeID:    fs.Arg(0),
+		SessionID: fs.Arg(1),
+		Attach:    !*jsonOutput,
+	})
+}
+
+func handleHubSessionsUndoDelete(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub sessions undo-delete", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Output result as JSON")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node resolution")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions undo-delete <node-id-or-name>")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent-deck hub sessions undo-delete <node-id-or-name>")
+	}
+	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
+		Action: "undo_delete",
+		NodeID: fs.Arg(0),
 	})
 }
 
@@ -263,6 +339,86 @@ func handleHubSessionsNotes(profile string, args []string) error {
 		NodeID:    fs.Arg(0),
 		SessionID: fs.Arg(1),
 		Notes:     strings.Join(fs.Args()[2:], " "),
+	})
+}
+
+func handleHubSessionsFork(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub sessions fork", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	title := fs.String("title", "", "Title for the forked session")
+	fs.StringVar(title, "t", "", "Title for the forked session")
+	group := fs.String("group", "", "Group path for the forked session")
+	fs.StringVar(group, "g", "", "Group path for the forked session")
+	worktree := fs.Bool("worktree", false, "Create the fork in a new worktree/branch")
+	fs.BoolVar(worktree, "w", false, "Create the fork in a new worktree/branch")
+	branch := fs.String("branch", "", "Branch/bookmark name for the fork worktree")
+	fs.StringVar(branch, "b", "", "Branch/bookmark name for the fork worktree")
+	withState := fs.Bool("with-state", false, "Carry uncommitted worktree state into the fork")
+	withIgnored := fs.Bool("with-state-and-gitignored", false, "Carry uncommitted and gitignored files into the fork")
+	sandbox := fs.Bool("sandbox", false, "Run the forked session in a Docker sandbox")
+	sandboxImage := fs.String("sandbox-image", "", "Sandbox image override")
+	jsonOutput := fs.Bool("json", false, "Output result as JSON")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node/session resolution")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions fork <node-id-or-name> <session-id-or-title> [options]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: agent-deck hub sessions fork <node-id-or-name> <session-id-or-title>")
+	}
+	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
+		Action:       "fork",
+		NodeID:       fs.Arg(0),
+		SessionID:    fs.Arg(1),
+		Title:        *title,
+		Group:        *group,
+		Worktree:     *worktree,
+		Branch:       *branch,
+		WithState:    *withState,
+		WithIgnored:  *withIgnored,
+		Sandbox:      *sandbox,
+		SandboxImage: *sandboxImage,
+	})
+}
+
+func handleHubSessionsWorktreeFinish(profile string, args []string) error {
+	fs := flag.NewFlagSet("hub sessions worktree-finish", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	into := fs.String("into", "", "Target branch to merge into")
+	noMerge := fs.Bool("no-merge", false, "Skip merge and only remove worktree/session metadata")
+	keepBranch := fs.Bool("keep-branch", false, "Do not delete the source branch")
+	force := fs.Bool("force", false, "Skip dirty-worktree check and force cleanup")
+	jsonOutput := fs.Bool("json", false, "Output result as JSON")
+	connectTimeout := fs.Duration("connect-timeout", 15*time.Second, "Maximum time to wait for the hub websocket connection")
+	resolveTimeout := fs.Duration("resolve-timeout", 5*time.Second, "Maximum time to wait for node/session resolution")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: agent-deck hub sessions worktree-finish <node-id-or-name> <session-id-or-title> [options]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 2 {
+		return fmt.Errorf("usage: agent-deck hub sessions worktree-finish <node-id-or-name> <session-id-or-title>")
+	}
+	return runHubSessionCLI(profile, *connectTimeout, *resolveTimeout, *jsonOutput, hubSessionOptions{
+		Action:     "worktree_finish",
+		NodeID:     fs.Arg(0),
+		SessionID:  fs.Arg(1),
+		Into:       *into,
+		NoMerge:    *noMerge,
+		KeepBranch: *keepBranch,
+		Force:      *force,
 	})
 }
 
@@ -403,11 +559,12 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, err
 		}
 		req := hub.CreateSessionRequest{
-			Title:       strings.TrimSpace(opts.Title),
-			Tool:        strings.TrimSpace(opts.Tool),
-			ProjectPath: strings.TrimSpace(opts.CWD),
-			GroupPath:   strings.TrimSpace(opts.Group),
-			ModelID:     strings.TrimSpace(opts.ModelID),
+			Title:           strings.TrimSpace(opts.Title),
+			Tool:            strings.TrimSpace(opts.Tool),
+			ProjectPath:     strings.TrimSpace(opts.CWD),
+			AdditionalPaths: normalizeHubSessionAdditionalPaths(opts.AdditionalPaths),
+			GroupPath:       strings.TrimSpace(opts.Group),
+			ModelID:         strings.TrimSpace(opts.ModelID),
 		}
 		raw, err := client.Command(ctx, node.NodeID, "create", req)
 		if err != nil {
@@ -423,6 +580,21 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			}
 		}
 		return hubSessionCommandResult{Action: "create", NodeID: node.NodeID, NodeName: node.NodeName, SessionID: sessionID, SessionTitle: strings.TrimSpace(opts.Title)}, nil
+	}
+	if action == "undo_delete" {
+		node, err := resolveHubShellNodeSelectorFromSnapshots(snapshots, opts.NodeID)
+		if err != nil {
+			return hubSessionCommandResult{}, err
+		}
+		raw, err := client.Command(ctx, node.NodeID, "undo_delete", nil)
+		if err != nil {
+			return hubSessionCommandResult{}, err
+		}
+		sessionID, err := decodeHubCreateSessionResult(raw)
+		if err != nil {
+			return hubSessionCommandResult{}, err
+		}
+		return hubSessionCommandResult{Action: "undo_delete", NodeID: node.NodeID, NodeName: node.NodeName, SessionID: sessionID}, nil
 	}
 
 	resolved, err := resolveHubSessionTarget(snapshots, opts.NodeID, opts.SessionID)
@@ -442,6 +614,24 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, err
 		}
 		return result, nil
+	case "sandbox_shell":
+		raw, commandErr := client.Command(ctx, resolved.NodeID, "sandbox_shell", hub.SandboxShellRequest{SessionID: resolved.SessionID})
+		err = commandErr
+		if err == nil {
+			var response hub.SandboxShellResponse
+			if decodeErr := json.Unmarshal(raw, &response); decodeErr != nil {
+				return hubSessionCommandResult{}, fmt.Errorf("decode hub sandbox shell result: %w", decodeErr)
+			}
+			attachSessionID := strings.TrimSpace(response.AttachSessionID)
+			if opts.Attach {
+				if attachSessionID == "" {
+					return hubSessionCommandResult{}, fmt.Errorf("hub sandbox shell returned no attach session")
+				}
+				if attachErr := client.Attach(ctx, resolved.NodeID, attachSessionID, hub.TerminalSize{}); attachErr != nil {
+					return hubSessionCommandResult{}, attachErr
+				}
+			}
+		}
 	case "send":
 		message := strings.TrimSpace(opts.Message)
 		if message == "" {
@@ -468,17 +658,44 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, fmt.Errorf("hub sessions move group path is required")
 		}
 		_, err = client.Command(ctx, resolved.NodeID, "move", map[string]string{"session_id": resolved.SessionID, "group_path": group})
-	case "stop", "restart", "restart_fresh", "fork", "delete", "archive", "unarchive", "remove", "toggle_yolo", "mark_unread":
-		raw, commandErr := client.Command(ctx, resolved.NodeID, action, map[string]string{"session_id": resolved.SessionID})
+	case "fork":
+		req := hub.ForkSessionRequest{
+			SessionID:    resolved.SessionID,
+			Title:        strings.TrimSpace(opts.Title),
+			GroupPath:    strings.TrimSpace(opts.Group),
+			Worktree:     opts.Worktree,
+			Branch:       strings.TrimSpace(opts.Branch),
+			WithState:    opts.WithState,
+			WithIgnored:  opts.WithIgnored,
+			Sandbox:      opts.Sandbox,
+			SandboxImage: strings.TrimSpace(opts.SandboxImage),
+		}
+		raw, commandErr := client.Command(ctx, resolved.NodeID, action, req)
 		err = commandErr
-		if err == nil && action == "fork" {
+		if err == nil {
 			sessionID, decodeErr := decodeHubCreateSessionResult(raw)
 			if decodeErr != nil {
 				return hubSessionCommandResult{}, decodeErr
 			}
 			result.SessionID = sessionID
-			result.SessionTitle = resolved.SessionTitle + " (fork)"
+			if req.Title != "" {
+				result.SessionTitle = req.Title
+			} else {
+				result.SessionTitle = resolved.SessionTitle + " (fork)"
+			}
 		}
+	case "worktree_finish":
+		_, err = client.Command(ctx, resolved.NodeID, "worktree_finish", hub.WorktreeFinishRequest{
+			SessionID:  resolved.SessionID,
+			Into:       strings.TrimSpace(opts.Into),
+			NoMerge:    opts.NoMerge,
+			KeepBranch: opts.KeepBranch,
+			Force:      opts.Force,
+		})
+	case "start", "stop", "restart", "restart_fresh", "delete", "archive", "unarchive", "remove", "toggle_yolo", "mark_unread":
+		_, err = client.Command(ctx, resolved.NodeID, action, map[string]string{"session_id": resolved.SessionID})
+	case "worktree_setup":
+		_, err = client.Command(ctx, resolved.NodeID, "worktree_setup", hub.WorktreeSetupRequest{SessionID: resolved.SessionID})
 	default:
 		return hubSessionCommandResult{}, fmt.Errorf("unsupported hub sessions action %q", action)
 	}
@@ -486,6 +703,20 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 		return hubSessionCommandResult{}, err
 	}
 	return result, nil
+}
+
+func normalizeHubSessionAdditionalPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
 }
 
 type resolvedHubSessionTarget struct {
@@ -687,16 +918,21 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  list [node]                 List visible hub sessions")
 	fmt.Fprintln(w, "  create <node>               Create a session on a hub node")
 	fmt.Fprintln(w, "  attach <node> <session>     Attach to a hub session")
+	fmt.Fprintln(w, "  sandbox-shell <node> <session> Open a sandbox container shell through the hub")
 	fmt.Fprintln(w, "  send <node> <session> <msg> Send a prompt/message")
 	fmt.Fprintln(w, "  approve <node> <session>    Quick approve by sending 1+Enter")
 	fmt.Fprintln(w, "  notes <node> <session> <notes> Update hub session notes")
+	fmt.Fprintln(w, "  start <node> <session>      Start/resume a hub session")
 	fmt.Fprintln(w, "  close <node> <session>      Stop a hub session")
 	fmt.Fprintln(w, "  restart <node> <session>    Restart a hub session")
 	fmt.Fprintln(w, "  restart-fresh <node> <session> Restart without resume")
-	fmt.Fprintln(w, "  fork <node> <session>       Fork a hub session")
+	fmt.Fprintln(w, "  fork <node> <session>       Fork a hub session (supports --title/--group/--worktree)")
+	fmt.Fprintln(w, "  worktree-setup <node> <session> Re-run hub worktree setup script")
+	fmt.Fprintln(w, "  worktree-finish <node> <session> Finish a hub worktree session")
 	fmt.Fprintln(w, "  rename <node> <session> <title> Rename a hub session")
 	fmt.Fprintln(w, "  move <node> <session> <group> Move a hub session to a group")
 	fmt.Fprintln(w, "  delete <node> <session>     Delete a hub session")
+	fmt.Fprintln(w, "  undo-delete <node>          Restore the latest deleted hub session")
 	fmt.Fprintln(w, "  archive <node> <session>    Archive a hub session")
 	fmt.Fprintln(w, "  unarchive <node> <session>  Unarchive a hub session")
 	fmt.Fprintln(w, "  remove <node> <session>     Remove stopped/error hub session metadata")

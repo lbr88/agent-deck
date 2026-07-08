@@ -47,9 +47,9 @@ describe('resolveEditSessionPickerTools', () => {
 })
 
 describe('displayLabelForTool', () => {
-  it('labels codex as ChatGPT in the picker', async () => {
+  it('labels codex as Codex in the picker', async () => {
     const { displayLabelForTool } = await import(pickerToolsPath)
-    expect(displayLabelForTool('codex')).toBe('ChatGPT')
+    expect(displayLabelForTool('codex')).toBe('Codex')
     expect(displayLabelForTool('claude')).toBe('claude')
   })
 })

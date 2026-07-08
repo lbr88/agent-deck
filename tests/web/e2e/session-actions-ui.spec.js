@@ -18,12 +18,8 @@
 //   - Status renders as `<span class="dot <status>">` (icons.js Dot); the
 //     fixture transitions are start/restart→running, stop→stopped.
 //   - Fork button only renders when `s.canFork` (Sidebar.js). The fixture
-//     seed never sets CanFork, so no seeded row shows it; the canFork=true
-//     path is exercised by rewriting /api/menu in-flight. The Sidebar POSTs
-//     a `title: "<title>-fork"` body, but handlers_sessions.go ignores the
-//     body entirely — the mutator names the child. The fixture's
-//     ForkSession appends " (fork)", so the real child title is
-//     "agent-deck (fork)" (NOT "-fork"); we assert the server-side truth.
+//     seeds sess-001 with CanFork=true and leaves the other rows false.
+//     Fork now opens the web parity dialog before POSTing options.
 //   - Delete + worktree-finish route through ConfirmDialog.js whose confirm
 //     button is always labeled "Delete" and cancel is "Cancel".
 //
@@ -33,16 +29,26 @@
 import { test, expect } from '@playwright/test'
 
 // The app registers a service worker (sw.js) whose fetch handler takes over
-// page requests once active — that bypasses page.route(), which the
-// canFork=true fork test relies on to doctor /api/menu. Block SWs for this
-// file so route interception is deterministic (no behavior under test here
-// depends on the SW).
+// page requests once active. Block SWs for this file so mutation requests and
+// SSE assertions remain deterministic.
 test.use({ serviceWorkers: 'block' })
 
 const SEEDED_COUNT = 4
 
 function rowFor(page, title) {
   return page.locator('.sess', { has: page.locator('.tt', { hasText: title }) })
+}
+
+async function openMore(row) {
+  await row.hover()
+  const more = row.locator('[data-testid="session-more-btn"]')
+  await more.focus()
+  await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
+}
+
+async function clickMoreAction(row, testId) {
+  await openMore(row)
+  await row.locator(`[data-testid="${testId}"]`).click()
 }
 
 async function gotoSidebar(page) {
@@ -102,42 +108,27 @@ test.describe('sidebar session action buttons', () => {
     await expect(row.locator('.dot.running')).toHaveCount(1, { timeout: 4000 })
   })
 
-  test('Fork button is hidden for seeded sessions (canFork=false)', async ({ page }) => {
+  test('Fork button is hidden for non-forkable seeded sessions (canFork=false)', async ({ page }) => {
     await gotoSidebar(page)
-    // The fixture seed never sets CanFork, and Sidebar.js gates the button
-    // on `s.canFork` — so no row carries it. (Buttons exist in the DOM even
-    // un-hovered; only CSS hides them, so a count is meaningful.)
-    await expect(page.locator('[data-testid="session-fork-btn"]')).toHaveCount(0)
+    await expect(rowFor(page, 'scratch').locator('[data-testid="session-fork-btn"]')).toHaveCount(0)
   })
 
   test('Fork button (canFork=true) POSTs fork; child is titled "<title> (fork)" by the server', async ({ page, request }) => {
-    // Rewrite the initial /api/menu payload so every session reports
-    // canFork=true, and pin the SSE stream shut so the un-doctored snapshot
-    // can't flip the button back off mid-test.
-    await page.route('**/api/menu', async (route) => {
-      const response = await route.fetch()
-      const body = await response.json()
-      for (const it of body.items || []) {
-        if (it.session) it.session.canFork = true
-      }
-      await route.fulfill({ response, json: body })
-    })
-    await page.route('**/events/menu*', (route) => route.abort())
-
     await gotoSidebar(page)
     const row = rowFor(page, 'agent-deck') // sess-001
     await expect(row.locator('[data-testid="session-fork-btn"]')).toHaveCount(1)
 
-    await row.hover()
     const forkResponse = page.waitForResponse(
       r => r.url().includes('/api/sessions/sess-001/fork') && r.request().method() === 'POST',
     )
-    await row.locator('[data-testid="session-fork-btn"]').click()
+    await clickMoreAction(row, 'session-fork-btn')
+    const dialog = page.locator('[role="dialog"]', { hasText: 'Fork session' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: /Fork session/ }).click()
     expect((await forkResponse).status()).toBe(200)
 
-    // Server-side truth (SSE is blocked above, so assert via fixture
-    // snapshot): handlers_sessions.go ignores the client-sent
-    // "agent-deck-fork" title; the fixture mutator appends " (fork)".
+    // Server-side truth via fixture snapshot: the dialog's default title is
+    // "agent-deck (fork)" and the options mutator preserves it.
     const snap = await (await request.get('/__fixture/snapshot')).json()
     const child = snap.items.find(i => i.session && i.session.parentSessionId === 'sess-001')
     expect(child).toBeTruthy()
@@ -149,8 +140,7 @@ test.describe('sidebar session action buttons', () => {
     const row = rowFor(page, 'scratch') // sess-004
 
     // Open the confirm dialog.
-    await row.hover()
-    await row.locator('[data-testid="session-delete-btn"]').click()
+    await clickMoreAction(row, 'session-delete-btn')
     const dialog = page.locator('[role="dialog"]')
     await expect(dialog).toBeVisible()
     // Exact copy from Sidebar.js doAction('delete').
@@ -164,8 +154,7 @@ test.describe('sidebar session action buttons', () => {
     expect(snap.items.some(i => i.session && i.session.id === 'sess-004')).toBe(true)
 
     // Re-open and confirm (ConfirmDialog's confirm button is labeled "Delete").
-    await row.hover()
-    await row.locator('[data-testid="session-delete-btn"]').click()
+    await clickMoreAction(row, 'session-delete-btn')
     await expect(dialog).toBeVisible()
     await dialog.getByRole('button', { name: 'Delete' }).click()
 
@@ -184,8 +173,7 @@ test.describe('sidebar session action buttons', () => {
     await expect(finishBtns).toHaveCount(1)
 
     const row = rowFor(page, 'agent-deck')
-    await row.hover()
-    await row.locator('[data-action="worktree-finish"]').click()
+    await clickMoreAction(row, 'session-worktree-finish-btn')
 
     const dialog = page.locator('[role="dialog"]')
     await expect(dialog).toBeVisible()

@@ -952,6 +952,71 @@ func (s *parityStore) RenameGroup(groupPath, newName string) error {
 	return nil
 }
 
+func (s *parityStore) ReparentGroup(groupPath, destParentPath string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.groups[groupPath]
+	if !ok {
+		return "", errNotFound(groupPath)
+	}
+	base := groupPath
+	if idx := strings.LastIndex(groupPath, "/"); idx >= 0 {
+		base = groupPath[idx+1:]
+	}
+	newPath := base
+	if destParentPath != "" {
+		newPath = strings.Trim(destParentPath, "/") + "/" + base
+	}
+	delete(s.groups, groupPath)
+	g.Path = newPath
+	g.Name = base
+	s.groups[newPath] = g
+	oldPrefix := groupPath + "/"
+	newPrefix := newPath + "/"
+	for path, group := range s.groups {
+		if strings.HasPrefix(path, oldPrefix) {
+			delete(s.groups, path)
+			group.Path = newPrefix + strings.TrimPrefix(path, oldPrefix)
+			s.groups[group.Path] = group
+		}
+	}
+	for _, sess := range s.sessions {
+		switch {
+		case sess.GroupPath == groupPath:
+			sess.GroupPath = newPath
+		case strings.HasPrefix(sess.GroupPath, oldPrefix):
+			sess.GroupPath = newPrefix + strings.TrimPrefix(sess.GroupPath, oldPrefix)
+		}
+	}
+	return newPath, nil
+}
+
+func (s *parityStore) ReorderGroup(groupPath, direction string, position *int) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.groups[groupPath]
+	if !ok {
+		return 0, 0, errNotFound(groupPath)
+	}
+	from := g.Order
+	if position != nil {
+		g.Order = *position
+	} else {
+		switch strings.ToLower(strings.TrimSpace(direction)) {
+		case "up":
+			g.Order--
+		case "down":
+			g.Order++
+		default:
+			return 0, 0, fmt.Errorf("invalid direction")
+		}
+	}
+	if g.Order < 0 {
+		g.Order = 0
+	}
+	return from, g.Order, nil
+}
+
 // FinishWorktree is stubbed for parity tests; the worktree finish action
 // isn't part of the snapshot-equality parity matrix (no in-memory worktree
 // state). Returns ErrNotAWorktree so any accidental call is loud.

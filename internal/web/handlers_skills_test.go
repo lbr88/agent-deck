@@ -33,39 +33,41 @@ type fakeSkillsService struct {
 	catalogErr     error
 	attachedByPath map[string][]session.ProjectSkillAttachment
 	attachedErr    error
-	attachFn       func(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error)
-	detachFn       func(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error)
+	attachFn       func(sessionID, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error)
+	detachFn       func(sessionID, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error)
 }
 
-func (f *fakeSkillsService) ListCatalog() ([]session.SkillCandidate, error) {
+func (f *fakeSkillsService) ListSkillCatalog() ([]session.SkillCandidate, error) {
 	if f.catalogErr != nil {
 		return nil, f.catalogErr
 	}
 	return f.catalog, nil
 }
 
-func (f *fakeSkillsService) ListAttached(projectPath string) ([]session.ProjectSkillAttachment, error) {
+func (f *fakeSkillsService) ListSessionSkills(_ string, projectPath string) (SkillSessionState, error) {
 	if f.attachedErr != nil {
-		return nil, f.attachedErr
+		return SkillSessionState{}, f.attachedErr
 	}
+	state := SkillSessionState{Catalog: f.catalog}
 	if f.attachedByPath == nil {
-		return nil, nil
+		return state, nil
 	}
-	return f.attachedByPath[projectPath], nil
+	state.Attached = f.attachedByPath[projectPath]
+	return state, nil
 }
 
-func (f *fakeSkillsService) Attach(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+func (f *fakeSkillsService) AttachSkill(sessionID, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	if f.attachFn == nil {
 		return nil, fmt.Errorf("attach not configured")
 	}
-	return f.attachFn(projectPath, tool, skillRef, source)
+	return f.attachFn(sessionID, projectPath, tool, skillRef, source)
 }
 
-func (f *fakeSkillsService) Detach(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+func (f *fakeSkillsService) DetachSkill(sessionID, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	if f.detachFn == nil {
 		return nil, fmt.Errorf("detach not configured")
 	}
-	return f.detachFn(projectPath, skillRef, source)
+	return f.detachFn(sessionID, projectPath, skillRef, source)
 }
 
 // menuWithSession returns a snapshot containing a single session with the
@@ -237,7 +239,7 @@ func TestSessionSkillsAttach_Happy(t *testing.T) {
 
 	var gotProj, gotTool, gotRef string
 	srv.skills = &fakeSkillsService{
-		attachFn: func(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+		attachFn: func(_ string, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 			gotProj, gotTool, gotRef = projectPath, tool, skillRef
 			return &session.ProjectSkillAttachment{
 				ID: "pool/alpha", Name: "alpha", Source: "pool", EntryName: "alpha",
@@ -298,7 +300,7 @@ func TestSessionSkillsAttach_SourceQualifiedName(t *testing.T) {
 
 	var gotRef, gotSource string
 	srv.skills = &fakeSkillsService{
-		attachFn: func(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+		attachFn: func(_ string, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 			gotRef, gotSource = skillRef, source
 			return &session.ProjectSkillAttachment{ID: "pool/alpha", Name: "alpha", Source: "pool"}, nil
 		},
@@ -325,7 +327,7 @@ func TestSessionSkillsDetach_Happy(t *testing.T) {
 
 	var gotProj, gotRef string
 	srv.skills = &fakeSkillsService{
-		detachFn: func(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+		detachFn: func(_ string, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 			gotProj, gotRef = projectPath, skillRef
 			return &session.ProjectSkillAttachment{ID: "pool/alpha", Name: "alpha"}, nil
 		},
@@ -348,7 +350,7 @@ func TestSessionSkillsDetach_NotAttached(t *testing.T) {
 	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", WebMutations: true})
 	srv.menuData = &fakeMenuDataLoader{snapshot: menuWithSession("sess-1", "/tmp/proj", "claude")}
 	srv.skills = &fakeSkillsService{
-		detachFn: func(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+		detachFn: func(_ string, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 			return nil, session.ErrSkillNotAttached
 		},
 	}

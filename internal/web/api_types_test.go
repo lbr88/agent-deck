@@ -18,6 +18,7 @@ func TestAPIErrorCodeConstantsAreNonEmpty(t *testing.T) {
 		"ErrCodeInternalError":    ErrCodeInternalError,
 		"ErrCodeNotImplemented":   ErrCodeNotImplemented,
 		"ErrCodeReadOnly":         ErrCodeReadOnly,
+		"ErrCodeUnavailable":      ErrCodeUnavailable,
 	}
 	for name, val := range constants {
 		if val == "" {
@@ -142,10 +143,12 @@ func TestSSEDeleteEventJSONRoundTrip(t *testing.T) {
 
 func TestSettingsResponseJSONRoundTrip(t *testing.T) {
 	original := SettingsResponse{
-		Profile:      "work",
-		ReadOnly:     false,
-		WebMutations: true,
-		Version:      "0.26.4",
+		Profile:       "work",
+		ReadOnly:      false,
+		WebMutations:  true,
+		Version:       "0.26.4",
+		HubConfigured: true,
+		HubAdmin:      true,
 	}
 	data, err := json.Marshal(original)
 	if err != nil {
@@ -166,6 +169,9 @@ func TestSettingsResponseJSONRoundTrip(t *testing.T) {
 	}
 	if decoded.Version != "0.26.4" {
 		t.Errorf("Version mismatch: got %q", decoded.Version)
+	}
+	if !decoded.HubConfigured || !decoded.HubAdmin {
+		t.Errorf("Hub capability mismatch: configured=%v admin=%v", decoded.HubConfigured, decoded.HubAdmin)
 	}
 }
 

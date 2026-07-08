@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 // If a function field is nil, the method returns an error indicating it is unconfigured.
 type fakeMutator struct {
 	createSessionFn    func(title, tool, projectPath, groupPath, modelID string) (string, error)
+	createOptionsFn    func(req CreateSessionRequest) (string, error)
 	startSessionFn     func(id string) error
 	stopSessionFn      func(id string) error
 	restartSessionFn   func(id string) error
@@ -37,12 +39,15 @@ type fakeMutator struct {
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
 	sendOutputFn       func(sourceID, targetID string) error
+	sessionOutputFn    func(id string) (SessionOutputResponse, error)
 	quickApproveFn     func(id string) error
 	updateNotesFn      func(id, notes string) error
 	markUnreadFn       func(id string) error
 	createGroupFn      func(name, parentPath string) (string, error)
 	renameGroupFn      func(groupPath, newName string) error
 	deleteGroupFn      func(groupPath string) error
+	reparentGroupFn    func(groupPath, destParentPath string) (string, error)
+	reorderGroupFn     func(groupPath, direction string, position *int) (int, int, error)
 	finishWorktreeFn   func(id string, opts WorktreeFinishOptions) (WorktreeFinishResult, error)
 }
 
@@ -58,11 +63,23 @@ type fakeHubDashboardMutator struct {
 	resp   hub.WebProxyResponse
 }
 
+type fakeForkOptionsMutator struct {
+	fakeMutator
+	forkOptionsFn func(id string, req ForkSessionRequest) (string, error)
+}
+
 func (f *fakeMutator) CreateSession(title, tool, projectPath, groupPath, modelID string) (string, error) {
 	if f.createSessionFn == nil {
 		return "", fmt.Errorf("createSession not configured")
 	}
 	return f.createSessionFn(title, tool, projectPath, groupPath, modelID)
+}
+
+func (f *fakeMutator) CreateSessionWithOptions(req CreateSessionRequest) (string, error) {
+	if f.createOptionsFn == nil {
+		return "", fmt.Errorf("createSessionWithOptions not configured")
+	}
+	return f.createOptionsFn(req)
 }
 
 func (f *fakeMutator) StartSession(id string) error {
@@ -149,6 +166,13 @@ func (f *fakeMutator) ForkSession(id string) (string, error) {
 	return f.forkSessionFn(id)
 }
 
+func (f *fakeForkOptionsMutator) ForkSessionWithOptions(id string, req ForkSessionRequest) (string, error) {
+	if f.forkOptionsFn == nil {
+		return "", fmt.Errorf("forkSessionWithOptions not configured")
+	}
+	return f.forkOptionsFn(id, req)
+}
+
 func (f *fakeMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, []string, error) {
 	if f.updateSessionFn == nil {
 		return nil, false, nil, fmt.Errorf("updateSession not configured")
@@ -182,6 +206,13 @@ func (f *fakeMutator) SendSessionOutput(sourceID, targetID string) error {
 		return fmt.Errorf("sendSessionOutput not configured")
 	}
 	return f.sendOutputFn(sourceID, targetID)
+}
+
+func (f *fakeMutator) SessionOutput(id string) (SessionOutputResponse, error) {
+	if f.sessionOutputFn == nil {
+		return SessionOutputResponse{}, fmt.Errorf("sessionOutput not configured")
+	}
+	return f.sessionOutputFn(id)
 }
 
 func (f *fakeMutator) QuickApproveSession(id string) error {
@@ -224,6 +255,20 @@ func (f *fakeMutator) DeleteGroup(groupPath string) error {
 		return fmt.Errorf("deleteGroup not configured")
 	}
 	return f.deleteGroupFn(groupPath)
+}
+
+func (f *fakeMutator) ReparentGroup(groupPath, destParentPath string) (string, error) {
+	if f.reparentGroupFn == nil {
+		return "", fmt.Errorf("reparentGroup not configured")
+	}
+	return f.reparentGroupFn(groupPath, destParentPath)
+}
+
+func (f *fakeMutator) ReorderGroup(groupPath, direction string, position *int) (int, int, error) {
+	if f.reorderGroupFn == nil {
+		return 0, 0, fmt.Errorf("reorderGroup not configured")
+	}
+	return f.reorderGroupFn(groupPath, direction, position)
 }
 
 func (f *fakeMutator) FinishWorktree(id string, opts WorktreeFinishOptions) (WorktreeFinishResult, error) {
@@ -278,6 +323,36 @@ func TestHubDashboardProxyRoutesThroughMutatorAndRewritesPaths(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rewritten body missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestHubDashboardProxyRejectsKnownUnavailableNode(t *testing.T) {
+	mutator := &fakeHubDashboardMutator{
+		resp: hub.WebProxyResponse{
+			StatusCode: http.StatusOK,
+			BodyB64:    base64.StdEncoding.EncodeToString([]byte("should-not-proxy")),
+		},
+	}
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", Profile: "test"})
+	srv.SetMutator(mutator)
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{HubNodes: []HubNode{{
+		ID:           "node_dark",
+		Name:         "dark",
+		WebAvailable: false,
+	}}}}
+
+	req := httptest.NewRequest(http.MethodGet, "/hub/dashboard/node_dark/", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if mutator.nodeID != "" {
+		t.Fatalf("proxy mutator called for unavailable node %q", mutator.nodeID)
+	}
+	if !strings.Contains(rr.Body.String(), ErrCodeUnavailable) || !strings.Contains(rr.Body.String(), "not available") {
+		t.Fatalf("unavailable response missing guidance: %s", rr.Body.String())
 	}
 }
 
@@ -354,6 +429,38 @@ func TestSessionsCollectionPOSTCreatesSession(t *testing.T) {
 	}
 }
 
+func TestSessionsCollectionPOSTCreatesMultiRepoSession(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+
+	var got CreateSessionRequest
+	srv.mutator = &fakeMutator{
+		createOptionsFn: func(req CreateSessionRequest) (string, error) {
+			got = req
+			return "multi-id", nil
+		},
+	}
+
+	body := strings.NewReader(`{"title":"Multi","tool":"claude","projectPath":"/repo/app","additionalPaths":["/repo/lib","/repo/lib","  ","/repo/ops"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rr.Code, rr.Body.String())
+	}
+	if got.ProjectPath != "/repo/app" || len(got.AdditionalPaths) != 2 || got.AdditionalPaths[0] != "/repo/lib" || got.AdditionalPaths[1] != "/repo/ops" {
+		t.Fatalf("multi-repo create request = %+v", got)
+	}
+	if !strings.Contains(rr.Body.String(), "multi-id") {
+		t.Errorf("expected session id in response, got: %s", rr.Body.String())
+	}
+}
+
 func TestSessionsCollectionPOSTForwardsModelID(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -414,6 +521,66 @@ func TestSessionsCollectionPOSTCreatesHubSession(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), HubSessionWebID("node_server", "remote-new")) {
 		t.Errorf("expected hub session id in response, got: %s", rr.Body.String())
+	}
+}
+
+func TestSessionsCollectionPOSTCreatesHubMultiRepoSession(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+
+	var got CreateSessionRequest
+	srv.mutator = &fakeHubCreateMutator{
+		fakeMutator: fakeMutator{
+			createOptionsFn: func(req CreateSessionRequest) (string, error) {
+				got = req
+				return HubSessionWebID(req.HubNodeID, "remote-multi"), nil
+			},
+		},
+	}
+
+	body := strings.NewReader(`{"title":"RemoteMulti","tool":"codex","projectPath":"/srv/app","additionalPaths":["/srv/lib"],"hubNodeId":"node_server"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rr.Code, rr.Body.String())
+	}
+	if got.HubNodeID != "node_server" || got.ProjectPath != "/srv/app" || len(got.AdditionalPaths) != 1 || got.AdditionalPaths[0] != "/srv/lib" {
+		t.Fatalf("hub multi-repo create request = %+v", got)
+	}
+	if !strings.Contains(rr.Body.String(), HubSessionWebID("node_server", "remote-multi")) {
+		t.Errorf("expected hub session id in response, got: %s", rr.Body.String())
+	}
+}
+
+func TestSessionsCollectionGETExposesGroupDefaultPath(t *testing.T) {
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0"})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{
+		Items: []MenuItem{{
+			Type: MenuItemTypeGroup,
+			Group: &MenuGroup{
+				Name:        "ops",
+				Path:        "ops",
+				Expanded:    true,
+				DefaultPath: "/srv/ops",
+			},
+		}},
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"defaultPath":"/srv/ops"`) {
+		t.Fatalf("/api/sessions response missing group defaultPath: %s", rr.Body.String())
 	}
 }
 
@@ -795,6 +962,66 @@ func TestSessionSendOutputRejectsMissingTarget(t *testing.T) {
 	}
 }
 
+func TestSessionOutputGETUsesProvider(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotID string
+	srv.mutator = &fakeMutator{
+		sessionOutputFn: func(id string) (SessionOutputResponse, error) {
+			gotID = id
+			return SessionOutputResponse{SessionID: id, Title: "worker", Content: "answer"}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/source-id/output", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != "source-id" {
+		t.Fatalf("session output id = %q, want source-id", gotID)
+	}
+	var got SessionOutputResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.SessionID != "source-id" || got.Title != "worker" || got.Content != "answer" {
+		t.Fatalf("session output response = %+v", got)
+	}
+}
+
+func TestSessionOutputGETPreservesHubSessionID(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotID string
+	srv.mutator = &fakeMutator{
+		sessionOutputFn: func(id string) (SessionOutputResponse, error) {
+			gotID = id
+			return SessionOutputResponse{SessionID: id, Title: "remote", Content: "hub answer"}, nil
+		},
+	}
+	hubID := HubSessionWebID("node_server", "r1")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+url.PathEscape(hubID)+"/output", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != hubID {
+		t.Fatalf("session output id = %q, want %q", gotID, hubID)
+	}
+}
+
 func TestSessionQuickApproveOK(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",
@@ -922,6 +1149,42 @@ func TestSessionForkOK(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
 	}
 	if !strings.Contains(rr.Body.String(), "forked-id") {
+		t.Errorf("expected forked session id in response, got: %s", rr.Body.String())
+	}
+}
+
+func TestSessionForkWithOptionsUsesMutator(t *testing.T) {
+	var gotID string
+	var gotReq ForkSessionRequest
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeForkOptionsMutator{
+		forkOptionsFn: func(id string, req ForkSessionRequest) (string, error) {
+			gotID = id
+			gotReq = req
+			return "forked-options-id", nil
+		},
+	}
+
+	body := strings.NewReader(`{"title":"custom fork","groupPath":"ops","worktree":true,"branch":"fork/custom","withState":true,"withIgnored":true,"sandbox":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/fork", body)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotID != "test-id" {
+		t.Fatalf("fork options id = %q, want test-id", gotID)
+	}
+	if gotReq.Title != "custom fork" || gotReq.GroupPath != "ops" || gotReq.Branch != "fork/custom" ||
+		!gotReq.Worktree || !gotReq.WithState || !gotReq.WithIgnored || !gotReq.Sandbox {
+		t.Fatalf("fork options request = %+v", gotReq)
+	}
+	if !strings.Contains(rr.Body.String(), "forked-options-id") {
 		t.Errorf("expected forked session id in response, got: %s", rr.Body.String())
 	}
 }

@@ -10,14 +10,17 @@ import { useState, useMemo } from 'preact/hooks'
 import { Icon, ICONS, Dot, kindSigil } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
 import {
-  selectedIdSignal, mutationsEnabledSignal, confirmDialogSignal,
+  sessionsSignal, selectedIdSignal, terminalModeSignal, mutationsEnabledSignal, confirmDialogSignal,
   createSessionDialogSignal, editSessionDialogSignal,
   moveSessionDialogSignal, promptSessionDialogSignal, sendOutputDialogSignal, notesSessionDialogSignal,
   pathsSessionDialogSignal,
+  forkSessionDialogSignal,
+  groupNameDialogSignal, groupMoveDialogSignal,
 } from './state.js'
 import { statusFiltersSignal, showColsSignal, activeTabSignal } from './uiState.js'
 import { apiFetch } from './api.js'
 import { addToast } from './Toast.js'
+import { refreshMenuSnapshot } from './menuRefresh.js'
 
 const STATUS_CHIPS = [
   { id: 'running', sym: '●' },
@@ -35,21 +38,58 @@ const SHOW_COL_OPTIONS = [
   { id: 'lastSeen', label: 'Last activity' },
 ]
 
+function optimisticRemoveSessionFromMenu(id) {
+  const before = sessionsSignal.value || []
+  let removedGroup = ''
+  const next = []
+  for (const item of before) {
+    if (item?.type === 'session' && item.session?.id === id) {
+      removedGroup = item.session.groupPath || item.path || ''
+      continue
+    }
+    next.push(item)
+  }
+  if (next.length === before.length) return () => {}
+  sessionsSignal.value = next.map(item => {
+    if (item?.type !== 'group' || !item.group || item.group.path !== removedGroup) return item
+    return {
+      ...item,
+      group: {
+        ...item.group,
+        sessionCount: Math.max(0, (item.group.sessionCount || 0) - 1),
+      },
+    }
+  })
+  return () => { sessionsSignal.value = before }
+}
+
 function doAction(action, s) {
   if (!mutationsEnabledSignal.value) {
     addToast('mutations disabled')
     return
   }
   const id = s.id
-  if (action === 'start')   return apiFetch('POST', `/api/sessions/${id}/start`).catch(() => {})
-  if (action === 'stop')    return apiFetch('POST', `/api/sessions/${id}/stop`).catch(() => {})
-  if (action === 'close')   return apiFetch('POST', `/api/sessions/${id}/close`).catch(() => {})
-  if (action === 'restart') return apiFetch('POST', `/api/sessions/${id}/restart`).catch(() => {})
-  if (action === 'restartFresh') return apiFetch('POST', `/api/sessions/${id}/restart-fresh`).catch(() => {})
-  if (action === 'toggleYolo') return apiFetch('POST', `/api/sessions/${id}/toggle-yolo`).catch(() => {})
-  if (action === 'unread') return apiFetch('POST', `/api/sessions/${id}/unread`).catch(() => {})
-  if (action === 'approve') return apiFetch('POST', `/api/sessions/${id}/approve`).catch(() => {})
-  if (action === 'fork')    return apiFetch('POST', `/api/sessions/${id}/fork`, { title: s.title + '-fork' }).catch(() => {})
+  const mutate = (method, path, body) => apiFetch(method, path, body)
+    .then(() => refreshMenuSnapshot())
+    .catch(() => {})
+  if (action === 'start')   return mutate('POST', `/api/sessions/${id}/start`)
+  if (action === 'stop')    return mutate('POST', `/api/sessions/${id}/stop`)
+  if (action === 'close')   return mutate('POST', `/api/sessions/${id}/close`)
+  if (action === 'restart') return mutate('POST', `/api/sessions/${id}/restart`)
+  if (action === 'restartFresh') return mutate('POST', `/api/sessions/${id}/restart-fresh`)
+  if (action === 'toggleYolo') return mutate('POST', `/api/sessions/${id}/toggle-yolo`)
+  if (action === 'unread') return mutate('POST', `/api/sessions/${id}/unread`)
+  if (action === 'approve') return mutate('POST', `/api/sessions/${id}/approve`)
+  if (action === 'sandboxShell') {
+    selectedIdSignal.value = id
+    terminalModeSignal.value = 'sandbox'
+    activeTabSignal.value = 'terminal'
+    return
+  }
+  if (action === 'fork') {
+    forkSessionDialogSignal.value = { sessionId: id }
+    return
+  }
   if (action === 'remove') {
     confirmDialogSignal.value = {
       message: `Remove session "${s.title}" from the registry? This only works for stopped/error sessions and does not kill active work.`,
@@ -61,6 +101,7 @@ function doAction(action, s) {
               history.replaceState(null, '', '/')
             }
           }
+          return refreshMenuSnapshot()
         })
         .catch(() => {}),
     }
@@ -76,6 +117,7 @@ function doAction(action, s) {
               history.replaceState(null, '', '/')
             }
           }
+          return refreshMenuSnapshot()
         })
         .catch(() => {}),
     }
@@ -83,7 +125,22 @@ function doAction(action, s) {
   if (action === 'delete') {
     confirmDialogSignal.value = {
       message: `Delete session "${s.title}"? This stops the tmux session and removes metadata.`,
-      onConfirm: () => apiFetch('DELETE', `/api/sessions/${id}`).catch(() => {}),
+      onConfirm: () => {
+        const rollback = optimisticRemoveSessionFromMenu(id)
+        const previousSelected = selectedIdSignal.value
+        if (selectedIdSignal.value === id) {
+          selectedIdSignal.value = null
+          if (window.location.pathname.startsWith('/s/')) {
+            history.replaceState(null, '', '/')
+          }
+        }
+        return apiFetch('DELETE', `/api/sessions/${id}`)
+          .then(() => refreshMenuSnapshot())
+          .catch(() => {
+            rollback()
+            if (previousSelected === id) selectedIdSignal.value = id
+          })
+      },
     }
   }
   if (action === 'worktreeFinish') {
@@ -93,7 +150,7 @@ function doAction(action, s) {
     const branch = s.worktreeBranch || s.branch
     confirmDialogSignal.value = {
       message: `Finish worktree for "${s.title}"? Merges branch "${branch}" into default branch, removes worktree, deletes branch, and removes session.`,
-      onConfirm: () => apiFetch('POST', `/api/sessions/${id}/worktree/finish`).catch(() => {}),
+      onConfirm: () => mutate('POST', `/api/sessions/${id}/worktree/finish`),
     }
   }
   if (action === 'edit') {
@@ -113,6 +170,51 @@ function doAction(action, s) {
   }
   if (action === 'paths') {
     pathsSessionDialogSignal.value = { sessionId: id }
+  }
+}
+
+function groupEndpoint(path, suffix = '') {
+  return `/api/groups/${encodeURIComponent(path)}${suffix}`
+}
+
+function groupDefaultPath(g) {
+  return g?.isHub ? (g.hubGroupPath || '') : (g?.path || '')
+}
+
+function isDefaultGroup(g) {
+  return groupDefaultPath(g) === 'my-sessions'
+}
+
+function doGroupAction(action, g) {
+  if (!mutationsEnabledSignal.value) {
+    addToast('mutations disabled')
+    return
+  }
+  if (!g || !g.path) return
+  if (action === 'create') {
+    groupNameDialogSignal.value = { mode: 'create', parentPath: g.path }
+    return
+  }
+  if (action === 'rename') {
+    groupNameDialogSignal.value = { mode: 'rename', groupPath: g.path, currentName: g.name || g.label || g.path }
+    return
+  }
+  if (action === 'move') {
+    groupMoveDialogSignal.value = { groupPath: g.path }
+    return
+  }
+  if (action === 'up' || action === 'down') {
+    return apiFetch('POST', groupEndpoint(g.path, '/reorder'), { direction: action })
+      .then(() => refreshMenuSnapshot())
+      .catch(() => {})
+  }
+  if (action === 'delete') {
+    confirmDialogSignal.value = {
+      message: `Delete group "${g.name || g.label || g.path}"? Sessions move to the default group.`,
+      onConfirm: () => apiFetch('DELETE', groupEndpoint(g.path))
+        .then(() => refreshMenuSnapshot())
+        .catch(() => {}),
+    }
   }
 }
 
@@ -163,24 +265,28 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           ? html`<button class="mini" title="Stop" data-testid="session-stop-btn" onClick=${() => doAction('stop', s)}><${Icon} d=${ICONS.stop} size=${12}/></button>`
           : html`<button class="mini good" title="Start" data-testid="session-start-btn" onClick=${() => doAction('start', s)}><${Icon} d=${ICONS.play} size=${12}/></button>`}
         <button class="mini good" title="Restart" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}><${Icon} d=${ICONS.restart} size=${12}/></button>
-        <button class="mini good" title="Restart fresh" data-testid="session-restart-fresh-btn" onClick=${() => doAction('restartFresh', s)}>T</button>
-        ${(s.tool === 'gemini' || s.tool === 'codex' || s.tool === 'hermes') && html`
-          <button class="mini" title="Toggle YOLO / auto-approve" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>YOLO</button>
-        `}
-        <button class="mini" title="Close process; keep metadata" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>D</button>
-        <button class="mini" title="Mark unread / needs attention" data-testid="session-unread-btn" onClick=${() => doAction('unread', s)}>u</button>
-        <button class="mini" title="Quick approve Claude prompt" data-testid="session-approve-btn" onClick=${() => doAction('approve', s)}>a</button>
-        <button class="mini" title="Edit notes" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>e</button>
         <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
-        <button class="mini" title="Send output to session" data-testid="session-send-output-btn" onClick=${() => doAction('sendOutput', s)}>x</button>
-        <button class="mini" title="Move to group" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>M</button>
-        ${s.multiRepoEnabled && html`<button class="mini" title="Edit multi-repo paths" data-testid="session-paths-btn" onClick=${() => doAction('paths', s)}>p</button>`}
-        <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>
-        ${s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
-        ${!s.isHub && s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}
-        <button class="mini" title="Archive" onClick=${() => doAction('archive', s)}>⌂</button>
-        <button class="mini danger" title="Remove metadata only" data-testid="session-remove-btn" onClick=${() => doAction('remove', s)}>X</button>
-        <button class="mini danger" title="Delete" data-testid="session-delete-btn" onClick=${() => doAction('delete', s)}><${Icon} d=${ICONS.trash} size=${12}/></button>
+        <button class="mini" title="More actions" data-testid="session-more-btn" aria-haspopup="menu">⋯</button>
+        <div class="more-menu" role="menu" data-testid="session-more-menu">
+          <button role="menuitem" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}>Edit</button>
+          <button role="menuitem" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>Notes</button>
+          <button role="menuitem" data-testid="session-send-output-btn" onClick=${() => doAction('sendOutput', s)}>Send output</button>
+          <button role="menuitem" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>Move group</button>
+          <button role="menuitem" data-testid="session-unread-btn" onClick=${() => doAction('unread', s)}>Mark unread</button>
+          <button role="menuitem" data-testid="session-approve-btn" onClick=${() => doAction('approve', s)}>Quick approve</button>
+          <button role="menuitem" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>Close process</button>
+          ${s.sandbox && html`<button role="menuitem" data-testid="session-sandbox-shell-btn" onClick=${() => doAction('sandboxShell', s)}>Sandbox shell</button>`}
+          <button role="menuitem" data-testid="session-restart-fresh-btn" onClick=${() => doAction('restartFresh', s)}>Restart fresh</button>
+          ${(s.tool === 'gemini' || s.tool === 'codex' || s.tool === 'hermes') && html`
+            <button role="menuitem" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>Toggle YOLO</button>
+          `}
+          ${s.multiRepoEnabled && html`<button role="menuitem" data-testid="session-paths-btn" onClick=${() => doAction('paths', s)}>Edit paths</button>`}
+          ${s.canFork && html`<button role="menuitem" class="fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}>Fork</button>`}
+          ${!s.isHub && s.worktree && html`<button role="menuitem" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">Finish worktree</button>`}
+          <button role="menuitem" data-testid="session-archive-btn" onClick=${() => doAction('archive', s)}>Archive</button>
+          <button role="menuitem" class="danger" data-testid="session-remove-btn" onClick=${() => doAction('remove', s)}>Remove metadata</button>
+          <button role="menuitem" class="danger" data-testid="session-delete-btn" onClick=${() => doAction('delete', s)}>Delete</button>
+        </div>
       </div>
     </div>
   `
@@ -215,6 +321,7 @@ export function Sidebar() {
   const toggleGroup = (p) => setExpanded(s => ({ ...s, [p]: s[p] === false }))
   const onSelect = (id) => {
     selectedIdSignal.value = id
+    terminalModeSignal.value = 'session'
     activeTabSignal.value = 'terminal'
   }
   const setShowCol = (id) => {
@@ -281,6 +388,20 @@ export function Sidebar() {
                 <span class="chev">${open ? '▾' : '▸'}</span>
                 <span class="name">${g.label}</span>
                 <span class="badge">(${members.length})</span>
+                ${mutationsEnabledSignal.value && html`
+                  <span class="group-actions" onClick=${e => e.stopPropagation()}>
+                    <button class="mini" title="New subgroup" data-testid="group-create-btn" onClick=${() => doGroupAction('create', g)}>+</button>
+                    <button class="mini" title="Rename group" data-testid="group-rename-btn" onClick=${() => doGroupAction('rename', g)}>r</button>
+                    ${!isDefaultGroup(g) && html`
+                      <button class="mini" title="Move group" data-testid="group-move-btn" onClick=${() => doGroupAction('move', g)}>M</button>
+                    `}
+                    <button class="mini" title="Move group up" data-testid="group-reorder-up-btn" onClick=${() => doGroupAction('up', g)}>↑</button>
+                    <button class="mini" title="Move group down" data-testid="group-reorder-down-btn" onClick=${() => doGroupAction('down', g)}>↓</button>
+                    ${!isDefaultGroup(g) && html`
+                      <button class="mini danger" title="Delete group" data-testid="group-delete-btn" onClick=${() => doGroupAction('delete', g)}>×</button>
+                    `}
+                  </span>
+                `}
               </div>
               ${open && members.map(s => html`
                 <${SessionItem} key=${s.id} s=${s} sel=${selected === s.id} onSelect=${onSelect} showCols=${showCols}/>

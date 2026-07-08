@@ -37,11 +37,19 @@ func (s *Server) handleHubDashboardProxy(w http.ResponseWriter, r *http.Request)
 			writeAPIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 			return
 		}
+		if !s.hubDashboardNodeWebAvailable(nodeID) {
+			s.writeHubDashboardUnavailable(w, nodeID)
+			return
+		}
 		s.handleHubDashboardSessionWS(w, r, nodeID, remotePath)
 		return
 	}
 	if !s.authorizeRequest(r) {
 		writeAPIError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "unauthorized")
+		return
+	}
+	if !s.hubDashboardNodeWebAvailable(nodeID) {
+		s.writeHubDashboardUnavailable(w, nodeID)
 		return
 	}
 
@@ -66,6 +74,32 @@ func (s *Server) handleHubDashboardProxy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeHubDashboardProxyResponse(w, nodeID, resp)
+}
+
+func (s *Server) hubDashboardNodeWebAvailable(nodeID string) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" || s == nil || s.menuData == nil {
+		return true
+	}
+	snapshot, err := s.menuData.LoadMenuSnapshot()
+	if err != nil || snapshot == nil {
+		return true
+	}
+	for _, node := range snapshot.HubNodes {
+		if node.ID == nodeID {
+			return node.WebAvailable
+		}
+	}
+	return true
+}
+
+func (s *Server) writeHubDashboardUnavailable(w http.ResponseWriter, nodeID string) {
+	writeAPIError(
+		w,
+		http.StatusServiceUnavailable,
+		ErrCodeUnavailable,
+		fmt.Sprintf("remote dashboard for hub node %q is not available", nodeID),
+	)
 }
 
 func (s *Server) handleHubDashboardSessionWS(w http.ResponseWriter, r *http.Request, nodeID, remotePath string) {
@@ -109,7 +143,12 @@ func (s *Server) handleHubDashboardSessionWS(w http.ResponseWriter, r *http.Requ
 		})
 	} else {
 		attachCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		stream, err := attacher.OpenHubTerminal(attachCtx, nodeID, sessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+		var stream hub.AttachStream
+		if terminalSandboxShellRequested(r) {
+			stream, err = attacher.OpenHubSandboxShellTerminal(attachCtx, nodeID, sessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+		} else {
+			stream, err = attacher.OpenHubTerminal(attachCtx, nodeID, sessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+		}
 		cancel()
 		if err != nil {
 			_ = writer.WriteJSON(wsServerMessage{
@@ -275,6 +314,10 @@ func rewriteHubDashboardBody(nodeID, contentType string, body []byte) []byte {
 func (s *Server) handleHubDashboardSSE(w http.ResponseWriter, r *http.Request, nodeID, eventName, remotePath string) {
 	if !s.authorizeStreamRequest(r) {
 		writeAPIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
+		return
+	}
+	if !s.hubDashboardNodeWebAvailable(nodeID) {
+		s.writeHubDashboardUnavailable(w, nodeID)
 		return
 	}
 	flusher, ok := w.(http.Flusher)

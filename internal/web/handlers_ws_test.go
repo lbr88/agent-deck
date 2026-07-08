@@ -266,6 +266,52 @@ func TestWSEndpointConnectAndPing(t *testing.T) {
 	}
 }
 
+func TestWSEndpointAcknowledgesLocalTerminalBeforeAttach(t *testing.T) {
+	mutator := &fakeLocalTerminalAcknowledger{}
+	srv := NewServer(Config{
+		ListenAddr: "127.0.0.1:0",
+		Profile:    "work",
+	})
+	srv.mutator = mutator
+	srv.menuData = &fakeMenuDataLoader{
+		snapshot: &MenuSnapshot{
+			Profile: "work",
+			Items: []MenuItem{
+				{
+					Type: MenuItemTypeSession,
+					Session: &MenuSession{
+						ID:          "sess-ack",
+						TmuxSession: "agent-deck-missing-test-session",
+					},
+				},
+			},
+		},
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(testServer.URL, "/ws/session/sess-ack"), nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial failed with status %d: %v", resp.StatusCode, err)
+		}
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	expectWSStatusEvent(t, conn, "connected")
+	expectWSStatusEvent(t, conn, "ready")
+	var msg wsServerMessage
+	if err := conn.ReadJSON(&msg); err != nil {
+		t.Fatalf("read attach failure message: %v", err)
+	}
+	if mutator.sessionID != "sess-ack" {
+		t.Fatalf("acknowledged session id = %q, want sess-ack", mutator.sessionID)
+	}
+}
+
 func TestWSEndpointHubSessionAttachesThroughHubTerminal(t *testing.T) {
 	stream := newFakeHubAttachStream()
 	mutator := &fakeHubTerminalMutator{stream: stream}
@@ -334,6 +380,58 @@ func TestWSEndpointHubSessionAttachesThroughHubTerminal(t *testing.T) {
 	}
 	if got := stream.waitResize(t); got.Cols != 120 || got.Rows != 40 {
 		t.Fatalf("hub stream resize = %+v, want 120x40", got)
+	}
+}
+
+func TestWSEndpointHubSandboxSessionOpensSandboxShellTerminal(t *testing.T) {
+	stream := newFakeHubAttachStream()
+	mutator := &fakeHubTerminalMutator{stream: stream}
+	sessionID := HubSessionWebID("node_server", "remote_sbx")
+	srv := NewServer(Config{
+		ListenAddr: "127.0.0.1:0",
+		Profile:    "work",
+	})
+	srv.mutator = mutator
+	srv.menuData = &fakeMenuDataLoader{
+		snapshot: &MenuSnapshot{
+			Profile: "work",
+			Items: []MenuItem{
+				{
+					Type: MenuItemTypeSession,
+					Session: &MenuSession{
+						ID:               sessionID,
+						Source:           "hub",
+						HubNodeID:        "node_server",
+						HubNodeName:      "server",
+						HubSessionID:     "remote_sbx",
+						SandboxContainer: "agent-deck-sbx-remote",
+					},
+				},
+			},
+		},
+	}
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(testServer.URL, "/ws/session/"+sessionID+"?shell=sandbox"), nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial failed with status %d: %v", resp.StatusCode, err)
+		}
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	expectWSStatusEvent(t, conn, "connected")
+	expectWSStatusEvent(t, conn, "ready")
+	expectWSStatusEvent(t, conn, "terminal_attached")
+	if !mutator.sandboxShell {
+		t.Fatal("hub sandbox shell attach path was not used")
+	}
+	if mutator.nodeID != "node_server" || mutator.sessionID != "remote_sbx" {
+		t.Fatalf("hub sandbox shell target = %q/%q, want node_server/remote_sbx", mutator.nodeID, mutator.sessionID)
 	}
 }
 
@@ -549,10 +647,11 @@ func expectWSStatusEvent(t *testing.T, conn *websocket.Conn, event string) {
 
 type fakeHubTerminalMutator struct {
 	fakeMutator
-	stream    *fakeHubAttachStream
-	nodeID    string
-	sessionID string
-	size      hub.TerminalSize
+	stream       *fakeHubAttachStream
+	nodeID       string
+	sessionID    string
+	size         hub.TerminalSize
+	sandboxShell bool
 }
 
 func (m *fakeHubTerminalMutator) OpenHubTerminal(_ context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
@@ -560,6 +659,24 @@ func (m *fakeHubTerminalMutator) OpenHubTerminal(_ context.Context, nodeID, sess
 	m.sessionID = sessionID
 	m.size = size
 	return m.stream, nil
+}
+
+func (m *fakeHubTerminalMutator) OpenHubSandboxShellTerminal(_ context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
+	m.nodeID = nodeID
+	m.sessionID = sessionID
+	m.size = size
+	m.sandboxShell = true
+	return m.stream, nil
+}
+
+type fakeLocalTerminalAcknowledger struct {
+	fakeMutator
+	sessionID string
+}
+
+func (m *fakeLocalTerminalAcknowledger) AcknowledgeLocalTerminal(sessionID string) error {
+	m.sessionID = sessionID
+	return nil
 }
 
 type fakeHubAttachStream struct {

@@ -33,8 +33,9 @@ type MenuSnapshot struct {
 }
 
 type HubNode struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	WebAvailable bool   `json:"webAvailable,omitempty"`
 }
 
 // MenuItem represents one row in the flattened navigation list.
@@ -58,6 +59,7 @@ type MenuGroup struct {
 	Expanded     bool   `json:"expanded"`
 	Order        int    `json:"order"`
 	SessionCount int    `json:"sessionCount"`
+	DefaultPath  string `json:"defaultPath,omitempty"`
 	Source       string `json:"source,omitempty"`
 	HubNodeID    string `json:"hubNodeId,omitempty"`
 	HubNodeName  string `json:"hubNodeName,omitempty"`
@@ -88,10 +90,11 @@ type MenuSession struct {
 	// TmuxSocketName is the tmux -L selector captured at session creation
 	// (Instance.TmuxSocketName). Surfaced so the web PTY bridge can reach
 	// sessions running on an isolated socket (issue #687, v1.7.50).
-	TmuxSocketName string    `json:"tmuxSocketName,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	LastAccessedAt time.Time `json:"lastAccessedAt,omitempty"`
-	ArchivedAt     time.Time `json:"archivedAt,omitempty"`
+	TmuxSocketName string           `json:"tmuxSocketName,omitempty"`
+	Windows        []MenuWindowInfo `json:"windows,omitempty"`
+	CreatedAt      time.Time        `json:"createdAt"`
+	LastAccessedAt time.Time        `json:"lastAccessedAt,omitempty"`
+	ArchivedAt     time.Time        `json:"archivedAt,omitempty"`
 
 	// Fields below mirror *session.Instance state visible in the TUI
 	// EditSessionDialog. Promoted from MISSING in tests/web/PARITY_MATRIX.md
@@ -112,11 +115,13 @@ type MenuSession struct {
 
 	Color string `json:"color,omitempty"`
 
-	Command         string          `json:"command,omitempty"`
-	Wrapper         string          `json:"wrapper,omitempty"`
-	Channels        []string        `json:"channels,omitempty"`
-	ExtraArgs       []string        `json:"extraArgs,omitempty"`
-	ToolOptionsJSON json.RawMessage `json:"toolOptions,omitempty"`
+	Command                   string          `json:"command,omitempty"`
+	Wrapper                   string          `json:"wrapper,omitempty"`
+	Plugins                   []string        `json:"plugins,omitempty"`
+	Channels                  []string        `json:"channels,omitempty"`
+	PluginChannelLinkDisabled bool            `json:"pluginChannelLinkDisabled,omitempty"`
+	ExtraArgs                 []string        `json:"extraArgs,omitempty"`
+	ToolOptionsJSON           json.RawMessage `json:"toolOptions,omitempty"`
 
 	Sandbox          *session.SandboxConfig `json:"sandbox,omitempty"`
 	SandboxContainer string                 `json:"sandboxContainer,omitempty"`
@@ -149,6 +154,13 @@ type MenuSession struct {
 	ReadOnly     bool   `json:"readOnly,omitempty"`
 }
 
+type MenuWindowInfo struct {
+	Index    int    `json:"index"`
+	Name     string `json:"name"`
+	Activity int64  `json:"activity,omitempty"`
+	Tool     string `json:"tool,omitempty"`
+}
+
 func HubSessionWebID(nodeID, sessionID string) string {
 	nodeID = strings.TrimSpace(nodeID)
 	sessionID = strings.TrimSpace(sessionID)
@@ -156,6 +168,31 @@ func HubSessionWebID(nodeID, sessionID string) string {
 		return ""
 	}
 	return "hub:" + nodeID + ":" + sessionID
+}
+
+func HubGroupWebPath(nodeID, groupPath string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if nodeID == "" {
+		return ""
+	}
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	return "hub/" + nodeID + "/" + groupPath
+}
+
+func ParseHubGroupWebPath(path string) (nodeID, groupPath string, ok bool) {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) != 3 || parts[0] != "hub" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return "", "", false
+	}
+	groupPath = strings.Trim(strings.TrimSpace(parts[2]), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	return strings.TrimSpace(parts[1]), groupPath, true
 }
 
 func ParseHubSessionWebID(id string) (nodeID, sessionID string, ok bool) {
@@ -266,54 +303,56 @@ func toMenuSession(inst *session.Instance) *MenuSession {
 	modelInfo := inst.LaunchModelInfo()
 
 	return &MenuSession{
-		ID:                 inst.ID,
-		Title:              inst.Title,
-		Tool:               inst.GetToolThreadSafe(),
-		ModelID:            modelInfo.ModelID,
-		Model:              modelInfo.Model,
-		ModelVersion:       modelInfo.Version,
-		CanFork:            inst.CanFork(),
-		Status:             inst.GetStatusThreadSafe(),
-		Substate:           string(inst.CachedSubstate()),
-		GroupPath:          inst.GroupPath,
-		ProjectPath:        inst.ProjectPath,
-		ParentSessionID:    inst.ParentSessionID,
-		Order:              inst.Order,
-		TmuxSession:        tmuxName,
-		TmuxSocketName:     inst.TmuxSocketName,
-		CreatedAt:          inst.CreatedAt,
-		LastAccessedAt:     inst.LastAccessedAt,
-		ArchivedAt:         inst.ArchivedAt,
-		IsConductor:        inst.IsConductor,
-		ClaudeSessionID:    inst.ClaudeSessionID,
-		GeminiSessionID:    inst.GeminiSessionID,
-		GeminiModel:        inst.GeminiModel,
-		GeminiYoloMode:     inst.GeminiYoloMode,
-		CodexSessionID:     inst.CodexSessionID,
-		OpenCodeSessionID:  inst.OpenCodeSessionID,
-		LatestPrompt:       inst.LatestPrompt,
-		Notes:              inst.Notes,
-		Color:              inst.Color,
-		Command:            inst.Command,
-		Wrapper:            inst.Wrapper,
-		Channels:           inst.Channels,
-		ExtraArgs:          inst.ExtraArgs,
-		ToolOptionsJSON:    inst.ToolOptionsJSON,
-		Sandbox:            inst.Sandbox,
-		SandboxContainer:   inst.SandboxContainer,
-		SSHHost:            inst.SSHHost,
-		SSHRemotePath:      inst.SSHRemotePath,
-		MultiRepoEnabled:   inst.MultiRepoEnabled,
-		AdditionalPaths:    inst.AdditionalPaths,
-		MultiRepoTempDir:   inst.MultiRepoTempDir,
-		MultiRepoWorktrees: inst.MultiRepoWorktrees,
-		WorktreePath:       inst.WorktreePath,
-		WorktreeRepoRoot:   inst.WorktreeRepoRoot,
-		WorktreeBranch:     inst.WorktreeBranch,
-		TitleLocked:        inst.TitleLocked,
-		NoTransitionNotify: inst.NoTransitionNotify,
-		LoadedMCPNames:     inst.LoadedMCPNames,
-		GeminiAnalytics:    inst.GeminiAnalytics,
+		ID:                        inst.ID,
+		Title:                     inst.Title,
+		Tool:                      inst.GetToolThreadSafe(),
+		ModelID:                   modelInfo.ModelID,
+		Model:                     modelInfo.Model,
+		ModelVersion:              modelInfo.Version,
+		CanFork:                   inst.CanFork(),
+		Status:                    inst.GetStatusThreadSafe(),
+		Substate:                  string(inst.CachedSubstate()),
+		GroupPath:                 inst.GroupPath,
+		ProjectPath:               inst.ProjectPath,
+		ParentSessionID:           inst.ParentSessionID,
+		Order:                     inst.Order,
+		TmuxSession:               tmuxName,
+		TmuxSocketName:            inst.TmuxSocketName,
+		CreatedAt:                 inst.CreatedAt,
+		LastAccessedAt:            inst.LastAccessedAt,
+		ArchivedAt:                inst.ArchivedAt,
+		IsConductor:               inst.IsConductor,
+		ClaudeSessionID:           inst.ClaudeSessionID,
+		GeminiSessionID:           inst.GeminiSessionID,
+		GeminiModel:               inst.GeminiModel,
+		GeminiYoloMode:            inst.GeminiYoloMode,
+		CodexSessionID:            inst.CodexSessionID,
+		OpenCodeSessionID:         inst.OpenCodeSessionID,
+		LatestPrompt:              inst.LatestPrompt,
+		Notes:                     inst.Notes,
+		Color:                     inst.Color,
+		Command:                   inst.Command,
+		Wrapper:                   inst.Wrapper,
+		Plugins:                   inst.Plugins,
+		Channels:                  inst.Channels,
+		PluginChannelLinkDisabled: inst.PluginChannelLinkDisabled,
+		ExtraArgs:                 inst.ExtraArgs,
+		ToolOptionsJSON:           inst.ToolOptionsJSON,
+		Sandbox:                   inst.Sandbox,
+		SandboxContainer:          inst.SandboxContainer,
+		SSHHost:                   inst.SSHHost,
+		SSHRemotePath:             inst.SSHRemotePath,
+		MultiRepoEnabled:          inst.MultiRepoEnabled,
+		AdditionalPaths:           inst.AdditionalPaths,
+		MultiRepoTempDir:          inst.MultiRepoTempDir,
+		MultiRepoWorktrees:        inst.MultiRepoWorktrees,
+		WorktreePath:              inst.WorktreePath,
+		WorktreeRepoRoot:          inst.WorktreeRepoRoot,
+		WorktreeBranch:            inst.WorktreeBranch,
+		TitleLocked:               inst.TitleLocked,
+		NoTransitionNotify:        inst.NoTransitionNotify,
+		LoadedMCPNames:            inst.LoadedMCPNames,
+		GeminiAnalytics:           inst.GeminiAnalytics,
 	}
 }
 

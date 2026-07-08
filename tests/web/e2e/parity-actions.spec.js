@@ -18,7 +18,7 @@ const MATRIX = loadMatrix()
 
 // Pinned row counts. If the matrix grows or shrinks, these MUST be updated
 // in the same PR — the failure is the point.
-const EXPECTED_ACTION_ROWS = 52
+const EXPECTED_ACTION_ROWS = 53
 // Probeable = MISSING rows that inferMissingProbe() maps to a URL. Decremented
 // as endpoints land and their matrix rows flip MISSING → Present. The true
 // remaining probeable gap count is now zero.

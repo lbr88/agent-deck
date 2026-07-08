@@ -80,6 +80,14 @@ func (s *Server) handleGroupByPath(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "group path is required")
 		return
 	}
+	if strings.HasSuffix(groupPath, "/change") {
+		s.handleGroupChange(w, r, strings.TrimSuffix(groupPath, "/change"))
+		return
+	}
+	if strings.HasSuffix(groupPath, "/reorder") {
+		s.handleGroupReorder(w, r, strings.TrimSuffix(groupPath, "/reorder"))
+		return
+	}
 
 	switch r.Method {
 	case http.MethodPatch:
@@ -134,4 +142,74 @@ func (s *Server) handleGroupByPath(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleGroupChange(w http.ResponseWriter, r *http.Request, groupPath string) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
+		return
+	}
+	if strings.TrimSpace(groupPath) == "" {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "group path is required")
+		return
+	}
+	if !s.checkMutationsAllowed(w) {
+		return
+	}
+	if !s.checkMutationRateLimit(w) {
+		return
+	}
+	var req ReparentGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+		return
+	}
+	if s.mutator == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
+		return
+	}
+	newPath, err := s.mutator.ReparentGroup(groupPath, req.DestParentPath)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+		return
+	}
+	s.notifyMenuChanged()
+	writeJSON(w, http.StatusOK, map[string]string{"oldPath": groupPath, "path": newPath})
+}
+
+func (s *Server) handleGroupReorder(w http.ResponseWriter, r *http.Request, groupPath string) {
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
+		return
+	}
+	if strings.TrimSpace(groupPath) == "" {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "group path is required")
+		return
+	}
+	if !s.checkMutationsAllowed(w) {
+		return
+	}
+	if !s.checkMutationRateLimit(w) {
+		return
+	}
+	var req ReorderGroupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.Direction) == "" && req.Position == nil {
+		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "direction or position is required")
+		return
+	}
+	if s.mutator == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
+		return
+	}
+	from, to, err := s.mutator.ReorderGroup(groupPath, req.Direction, req.Position)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+		return
+	}
+	s.notifyMenuChanged()
+	writeJSON(w, http.StatusOK, map[string]any{"path": groupPath, "fromPosition": from, "toPosition": to})
 }

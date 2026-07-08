@@ -24,19 +24,21 @@ import { StubPane } from './panes/StubPane.js'
 import { SearchPane } from './panes/SearchPane.js'
 import { McpPane } from './panes/McpPane.js'
 import { SkillsPane } from './panes/SkillsPane.js'
+import { PluginsPane } from './panes/PluginsPane.js'
 import { Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
 import {
-  selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
+  selectedIdSignal, terminalModeSignal, createSessionDialogSignal, confirmDialogSignal,
   editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
-  sendOutputDialogSignal, notesSessionDialogSignal, pathsSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
-  profilesSignal, systemStatsSignal,
+  sendOutputDialogSignal, notesSessionDialogSignal, pathsSessionDialogSignal, forkSessionDialogSignal, groupNameDialogSignal, groupMoveDialogSignal, hubNodesDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
+  profilesSignal, systemStatsSignal, hubAdminSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
 } from './state.js'
 import {
   activeTabSignal, paletteOpenSignal, tweaksOpenSignal,
-  railSignal, profileSignal,
+  railSignal, profileSignal, previewModeSignal, cyclePreviewMode,
+  rightRailPanelsSignal,
 } from './uiState.js'
 import { CreateSessionDialog } from './CreateSessionDialog.js'
 import { EditSessionDialog } from './EditSessionDialog.js'
@@ -45,8 +47,11 @@ import { PromptSessionDialog } from './PromptSessionDialog.js'
 import { SendOutputDialog } from './SendOutputDialog.js'
 import { NotesSessionDialog } from './NotesSessionDialog.js'
 import { EditPathsDialog } from './EditPathsDialog.js'
+import { ForkSessionDialog } from './ForkSessionDialog.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
 import { GroupNameDialog } from './GroupNameDialog.js'
+import { GroupMoveDialog } from './GroupMoveDialog.js'
+import { HubNodesDialog } from './HubNodesDialog.js'
 import { ToastContainer, addToast } from './Toast.js'
 import { ToastHistoryDrawer } from './ToastHistoryDrawer.js'
 import { SettingsPanel } from './SettingsPanel.js'
@@ -64,6 +69,7 @@ function WorkHead() {
   const kindLabel = (session.kind || 'agent').toUpperCase()
   const profile = profileSignal.value || ''
   const canMutate = mutationsEnabledSignal.value
+  const previewMode = previewModeSignal.value
   const scopeLabel = session.isHub ? `hub:${session.hubNodeName || session.hubNodeId}` : profile
   const modelLabel = session.model
     ? `${session.model}${session.modelVersion ? ` ${session.modelVersion}` : ''}`
@@ -71,7 +77,10 @@ function WorkHead() {
 
   const action = (verb) => {
     if (!canMutate) return
-    if (verb === 'fork') return apiFetch('POST', `/api/sessions/${session.id}/fork`, { title: session.title + '-fork' }).catch(() => {})
+    if (verb === 'fork') {
+      forkSessionDialogSignal.value = { sessionId: session.id }
+      return
+    }
     return apiFetch('POST', `/api/sessions/${session.id}/${verb}`).catch(() => {})
   }
   const supportsYolo = session.tool === 'gemini' || session.tool === 'codex' || session.tool === 'hermes'
@@ -86,6 +95,12 @@ function WorkHead() {
       </div>
       <span class=${`status-chip ${session.status}`}><span class="d"/>${session.status}</span>
       ${modelLabel && html`<span class="status-chip model" title=${session.modelId || modelLabel}>${modelLabel}</span>`}
+      <button type="button"
+              class="status-chip model"
+              title="Cycle preview mode (v): both → output → analytics"
+              onClick=${cycleAndApplyPreviewMode}>
+        preview:${previewMode}
+      </button>
       <span class="spacer"/>
       ${canMutate && html`
         <div class="actions">
@@ -128,6 +143,7 @@ function Panes({ tab }) {
     ${tab === 'archived'  && html`<${ArchivedPane}/>`}
     ${tab === 'mcp'       && html`<${McpPane}/>`}
     ${tab === 'skills'    && html`<${SkillsPane}/>`}
+    ${tab === 'plugins'   && html`<${PluginsPane}/>`}
     ${tab === 'conductor' && html`<${StubPane} title="Conductor"
                               message="Conductor orchestration view is TUI-only. The web API does not expose child topology, bridges, or NEED escalation."/>`}
     ${tab === 'watchers'  && html`<${StubPane} title="Watchers"
@@ -157,8 +173,34 @@ function jumpSessionHints() {
 function openJumpSession(session) {
   if (!session) return
   selectedIdSignal.value = session.id
+  terminalModeSignal.value = 'session'
   activeTabSignal.value = 'terminal'
   jumpModeSignal.value = false
+}
+
+function applyPreviewMode(mode) {
+  if (mode === 'output') {
+    activeTabSignal.value = 'terminal'
+    railSignal.value = 'hidden'
+    return
+  }
+  if (mode === 'analytics') {
+    activeTabSignal.value = 'costs'
+    railSignal.value = 'visible'
+    rightRailPanelsSignal.value = {
+      ...rightRailPanelsSignal.value,
+      usage: true,
+    }
+    return
+  }
+  activeTabSignal.value = 'terminal'
+  railSignal.value = 'visible'
+}
+
+function cycleAndApplyPreviewMode() {
+  const next = cyclePreviewMode()
+  applyPreviewMode(next)
+  addToast(`Preview mode: ${next}`, 'info')
 }
 
 function JumpOverlay() {
@@ -266,8 +308,11 @@ export function AppShell() {
   const showSendOutput = sendOutputDialogSignal.value
   const showNotesSession = notesSessionDialogSignal.value
   const showPathsSession = pathsSessionDialogSignal.value
+  const showForkSession = forkSessionDialogSignal.value
   const confirmData = confirmDialogSignal.value
   const groupNameData = groupNameDialogSignal.value
+  const groupMoveData = groupMoveDialogSignal.value
+  const showHubNodes = hubAdminSignal.value === true && hubNodesDialogSignal.value
   const drawerOpen = infoDrawerOpenSignal.value
 
   // Hide the vanilla .app div from the legacy boot path (kept for back-compat
@@ -288,6 +333,10 @@ export function AppShell() {
         if (!data) return
         if (typeof data.webMutations === 'boolean') {
           mutationsEnabledSignal.value = data.webMutations
+        }
+        hubAdminSignal.value = data.hubAdmin === true
+        if (data.hubAdmin !== true) {
+          hubNodesDialogSignal.value = false
         }
         if (typeof data.toolFilter === 'boolean') {
           toolFilterSignal.value = data.toolFilter
@@ -376,12 +425,15 @@ export function AppShell() {
       createSessionDialogSignal.value = false
       confirmDialogSignal.value = null
       groupNameDialogSignal.value = null
+      groupMoveDialogSignal.value = null
+      hubNodesDialogSignal.value = false
       editSessionDialogSignal.value = null
       moveSessionDialogSignal.value = null
       promptSessionDialogSignal.value = null
       sendOutputDialogSignal.value = null
       notesSessionDialogSignal.value = null
       pathsSessionDialogSignal.value = null
+      forkSessionDialogSignal.value = null
       infoDrawerOpenSignal.value = false
     }
     const onKey = (e) => {
@@ -460,6 +512,9 @@ export function AppShell() {
         e.preventDefault()
         jumpBuffer = ''
         jumpModeSignal.value = true
+      } else if (e.key === 'v') {
+        e.preventDefault()
+        cycleAndApplyPreviewMode()
       } else if (e.key === 'j') {
         e.preventDefault(); moveFocus(+1)
       } else if (e.key === 'k') {
@@ -469,6 +524,7 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           selectedIdSignal.value = s.id
+          terminalModeSignal.value = 'session'
           activeTabSignal.value = 'terminal'
         }
       } else if (e.key === 'n' && mutationsEnabledSignal.value) {
@@ -501,6 +557,15 @@ export function AppShell() {
           e.preventDefault()
           notesSessionDialogSignal.value = { sessionId: s.id }
         }
+      } else if (e.key === 'E') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s && s.sandbox) {
+          e.preventDefault()
+          selectedIdSignal.value = s.id
+          terminalModeSignal.value = 'sandbox'
+          activeTabSignal.value = 'terminal'
+        }
       } else if (e.key === 'p') {
         if (!mutationsEnabledSignal.value) return
         const s = focusedSession()
@@ -513,20 +578,35 @@ export function AppShell() {
         const s = focusedSession()
         if (s) {
           e.preventDefault()
-          apiFetch('POST', `/api/sessions/${s.id}/unread`).catch(() => {})
+          apiFetch('POST', `/api/sessions/${s.id}/unread`)
+            .then(() => refreshMenuSnapshot())
+            .catch(() => {})
         }
       } else if (e.key === 'a') {
         if (!mutationsEnabledSignal.value) return
         const s = focusedSession()
         if (s) {
           e.preventDefault()
-          apiFetch('POST', `/api/sessions/${s.id}/approve`).catch(() => {})
+          apiFetch('POST', `/api/sessions/${s.id}/approve`)
+            .then(() => refreshMenuSnapshot())
+            .catch(() => {})
         }
       } else if (e.key === 'c' && !e.shiftKey) {
         const detail = { handled: false, text: '' }
         window.dispatchEvent(new CustomEvent('agentdeck:copy-terminal-output', { detail }))
         e.preventDefault()
-        copyTextToClipboard(detail.text, 'Copied terminal output')
+        if (String(detail.text || '').trim()) {
+          copyTextToClipboard(detail.text, 'Copied terminal output')
+          return
+        }
+        const s = focusedSession()
+        if (s) {
+          apiFetch('GET', `/api/sessions/${encodeURIComponent(s.id)}/output`)
+            .then(resp => copyTextToClipboard(resp?.content || '', 'Copied session output'))
+            .catch(() => addToast('Nothing to copy', 'info'))
+        } else {
+          copyTextToClipboard('', 'Copied terminal output')
+        }
       } else if (e.key === 'C' || (e.key === 'c' && e.shiftKey)) {
         const s = focusedSession()
         if (s) {
@@ -549,7 +629,9 @@ export function AppShell() {
         if (!s) return
         confirmDialogSignal.value = {
           message: `Close session "${s.title}"? The tmux process will be killed; metadata is preserved.`,
-          onConfirm: () => apiFetch('POST', `/api/sessions/${s.id}/close`).catch(() => {}),
+          onConfirm: () => apiFetch('POST', `/api/sessions/${s.id}/close`)
+            .then(() => refreshMenuSnapshot())
+            .catch(() => {}),
         }
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         // Ctrl/Cmd+Z — Chrome-style undo of the most recent delete.
@@ -562,6 +644,7 @@ export function AppShell() {
           .then(resp => {
             if (resp && resp.sessionId) addToast(`Restored session ${resp.sessionId}`, 'success')
             else addToast('Restored last deleted session', 'success')
+            return refreshMenuSnapshot()
           })
           .catch(() => addToast('Nothing to undo', 'info'))
       } else if (e.key === 'q') {
@@ -573,8 +656,11 @@ export function AppShell() {
         railSignal.value = railSignal.value === 'visible' ? 'hidden' : 'visible'
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    // Capture phase is intentional for browser-reserved chords such as
+    // Ctrl/Cmd+R: handle the Agent Deck refresh before Chromium turns it into
+    // a page reload.
+    window.addEventListener('keydown', onKey, { capture: true })
+    return () => window.removeEventListener('keydown', onKey, { capture: true })
   }, [])
 
   // Esc closes info drawer (preserved from old AppShell).
@@ -606,8 +692,11 @@ export function AppShell() {
       ${showSendOutput && html`<${SendOutputDialog} ...${showSendOutput}/>`}
       ${showNotesSession && html`<${NotesSessionDialog} ...${showNotesSession}/>`}
       ${showPathsSession && html`<${EditPathsDialog} ...${showPathsSession}/>`}
+      ${showForkSession && html`<${ForkSessionDialog} ...${showForkSession}/>`}
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}
       ${groupNameData && html`<${GroupNameDialog} ...${groupNameData}/>`}
+      ${groupMoveData && html`<${GroupMoveDialog} ...${groupMoveData}/>`}
+      ${showHubNodes && html`<${HubNodesDialog}/>`}
 
       ${drawerOpen && html`
         <div class="overlay" onClick=${() => (infoDrawerOpenSignal.value = false)}>

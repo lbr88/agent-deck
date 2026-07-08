@@ -125,6 +125,12 @@ body[data-rail="hidden"] .rightrail { display: none; }
 @media (max-width: 1000px) {
   .top-search { display: none; }
   .top-tab { padding: 5px 7px; }
+  .top-right .dashboard-switch,
+  .top-right .hub-nodes-top-btn,
+  .top-right .profile-pill,
+  .top-right .conn-pill {
+    display: none;
+  }
 }
 
 .icon-btn {
@@ -183,6 +189,16 @@ body[data-rail="hidden"] .rightrail { display: none; }
 .side-group-head .chev { font-size: 10px; width: 10px; }
 .side-group-head .name { flex: 1; }
 .side-group-head .badge { color: var(--muted); }
+.group-actions {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: auto; opacity: 0;
+}
+.side-group-head:hover .group-actions,
+.side-group-head:focus-within .group-actions { opacity: 1; }
+.group-actions .mini {
+  min-width: 18px; height: 18px; padding: 0 4px;
+  font-size: 10px; letter-spacing: 0;
+}
 .side-group-head.conductor .name { color: var(--tn-purple); }
 .side-group-head.watcher .name { color: var(--tn-cyan); }
 
@@ -257,6 +273,7 @@ body[data-rail="hidden"] .rightrail { display: none; }
 
 .sess .actions {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  z-index: 2;
   display: none; gap: 1px; background: var(--panel-2); border-radius: 4px;
   padding: 2px; border: 1px solid var(--border);
   /* The hover overlay is absolutely positioned over the row. As more action
@@ -277,6 +294,44 @@ body[data-rail="hidden"] .rightrail { display: none; }
 .sess .actions .mini.danger:hover { color: var(--tn-red); }
 .sess .actions .mini.good:hover   { color: var(--tn-green); }
 .sess .actions .mini.fork:hover   { color: var(--tn-purple); }
+.sess .actions .more-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  max-height: min(70vh, 360px);
+  overflow: auto;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+.sess .actions .mini[aria-haspopup="menu"]:hover + .more-menu,
+.sess .actions .more-menu:hover,
+.sess .actions:focus-within .more-menu {
+  display: flex;
+}
+.sess .actions .more-menu button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  border-radius: 4px;
+  padding: 5px 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.sess .actions .more-menu button:hover { background: var(--card); color: var(--text); }
+.sess .actions .more-menu button.danger:hover { color: var(--tn-red); }
+.sess .actions .more-menu button.fork:hover { color: var(--tn-purple); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -623,6 +678,8 @@ body[data-rail="hidden"] .rightrail { display: none; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); outline: 0; }
 
 .seg-row { display: flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); width: fit-content; }
+.tool-picker-row { flex-wrap: wrap; width: 100%; align-items: stretch; }
+.tool-picker-row .seg-btn { flex: 0 1 auto; }
 .seg-btn { padding: 5px 12px; border-radius: 4px; background: transparent; border: 0; color: var(--text-dim); font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
 .seg-btn:hover { color: var(--text); }
 .seg-btn.on { background: var(--card); color: var(--text-hi); }
@@ -918,7 +975,8 @@ body[data-rail="hidden"] .rightrail { display: none; }
   .top-tabs { display: none; }
   .top-search { display: none; }
   .top-right { padding: 0 8px; gap: 4px; }
-  .top-right select { display: none; }
+  .top-right select,
+  .top-right .rail-toggle { display: none; }
 
   .work-head {
     flex-wrap: wrap; gap: 6px; padding: 8px 10px; min-height: 0;
@@ -1130,4 +1188,34 @@ body[data-rail="hidden"] .rightrail { display: none; }
   .cc-input { bottom: 56px; }
   .cc { padding-bottom: 150px; }
   .cc-input select { max-width: 120px; }
+}
+
+/* create-session path chips */
+.path-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0;
+}
+.path-chip-row.suggestions {
+  max-height: 72px;
+  overflow: auto;
+}
+.path-chip {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 3px 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.path-chip:hover {
+  background: var(--card);
+  color: var(--text);
 }

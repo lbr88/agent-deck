@@ -22,9 +22,9 @@ function persist(sig, key) {
 }
 
 // Active tab in main work surface.
-// Bundle ships 8 tabs: fleet, terminal, mcp, skills, conductor, watchers, costs, search.
-// Only `fleet | terminal | costs | search` have data (search filters local sessions only).
-// MCP/Skills/Conductor/Watchers render informative stubs because the API doesn't expose them.
+// Bundle ships data-backed session management panes plus a few informational
+// panes. MCP/Skills/Plugins are backed by web APIs and route hub sessions
+// through the same hub command channel as the TUI.
 export const activeTabSignal = signal(loadJSON('agentdeck.tab', 'fleet'))
 persist(activeTabSignal, 'agentdeck.tab')
 
@@ -44,9 +44,26 @@ persist(densitySignal, 'agentdeck.density')
 export const railSignal = signal(loadJSON('agentdeck.rail', 'visible'))
 persist(railSignal, 'agentdeck.rail')
 
+// TUI preview-mode parity (`v`): both → output → analytics.
+// Web maps these to existing surfaces:
+//   both      = terminal output plus right-rail analytics
+//   output    = terminal output only
+//   analytics = costs/usage-focused view with right rail visible
+export const PREVIEW_MODES = ['both', 'output', 'analytics']
+export const previewModeSignal = signal(loadJSON('agentdeck.previewMode', 'both'))
+persist(previewModeSignal, 'agentdeck.previewMode')
+
+export function cyclePreviewMode() {
+  const cur = previewModeSignal.value
+  const idx = PREVIEW_MODES.indexOf(cur)
+  const next = PREVIEW_MODES[(idx + 1 + PREVIEW_MODES.length) % PREVIEW_MODES.length]
+  previewModeSignal.value = next
+  return next
+}
+
 // Right rail panel toggles (which cards are shown).
 export const rightRailPanelsSignal = signal(loadJSON('agentdeck.rightRailPanels', {
-  overview: true, usage: true, mcps: true, skills: true, children: true, events: true,
+	overview: true, usage: true, mcps: true, skills: true, children: true, events: true,
 }))
 persist(rightRailPanelsSignal, 'agentdeck.rightRailPanels')
 

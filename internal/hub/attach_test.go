@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAttachRouterForwardsInputToOwnerAndOutputToRequester(t *testing.T) {
@@ -337,6 +338,31 @@ func TestAttachRouterUnregisterNodeNotifiesPinnedSurvivingPeer(t *testing.T) {
 	}
 	if len(requesterB.messages) != 0 {
 		t.Fatalf("requester B received %d messages, want none", len(requesterB.messages))
+	}
+}
+
+func TestTmuxAttachTokenRejectsTampering(t *testing.T) {
+	token, err := newTmuxAttachToken("agent-deck", "ad-term-session", time.Minute)
+	if err != nil {
+		t.Fatalf("newTmuxAttachToken: %v", err)
+	}
+	target, ok, err := parseTmuxAttachToken(token)
+	if err != nil {
+		t.Fatalf("parseTmuxAttachToken valid token: %v", err)
+	}
+	if !ok {
+		t.Fatal("parseTmuxAttachToken valid token did not report token")
+	}
+	if target.SocketName != "agent-deck" || target.SessionName != "ad-term-session" {
+		t.Fatalf("attach target = %+v", target)
+	}
+
+	_, ok, err = parseTmuxAttachToken(token + "x")
+	if !ok {
+		t.Fatal("tampered token was not recognized as attach token")
+	}
+	if err == nil {
+		t.Fatal("tampered attach token parsed without error")
 	}
 }
 

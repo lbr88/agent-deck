@@ -14,13 +14,25 @@ func TestEnvelopeRoundTripSessionSnapshot(t *testing.T) {
 		Type:    MsgSnapshot,
 		NodeID:  "node_123",
 		Payload: mustRaw(t, SnapshotPayload{
-			SentAt: time.Unix(123, 0).UTC(),
+			SentAt:       time.Unix(123, 0).UTC(),
+			WebAvailable: true,
 			Sessions: []SessionInfo{{
-				ID:        "sess_1",
-				Title:     "api-fix",
-				Tool:      "claude",
-				Status:    "waiting",
-				GroupPath: "default",
+				ID:          "sess_1",
+				Title:       "api-fix",
+				Tool:        "claude",
+				Status:      "waiting",
+				Substate:    "auth-401",
+				GroupPath:   "default",
+				IsConductor: true,
+				Windows: []WindowInfo{{
+					Index:    0,
+					Name:     "main",
+					Activity: 123,
+					Tool:     "claude",
+				}, {
+					Index: 1,
+					Name:  "logs",
+				}},
 			}},
 		}),
 	}
@@ -41,6 +53,40 @@ func TestEnvelopeRoundTripSessionSnapshot(t *testing.T) {
 	}
 	if len(payload.Sessions) != 1 || payload.Sessions[0].Title != "api-fix" {
 		t.Fatalf("payload = %+v", payload)
+	}
+	if !payload.WebAvailable {
+		t.Fatal("payload WebAvailable = false, want true")
+	}
+	if payload.Sessions[0].Substate != "auth-401" {
+		t.Fatalf("payload substate = %q, want auth-401", payload.Sessions[0].Substate)
+	}
+	if !payload.Sessions[0].IsConductor {
+		t.Fatal("payload is_conductor = false, want true")
+	}
+	if len(payload.Sessions[0].Windows) != 2 || payload.Sessions[0].Windows[0].Name != "main" || payload.Sessions[0].Windows[0].Tool != "claude" {
+		t.Fatalf("payload windows = %+v", payload.Sessions[0].Windows)
+	}
+}
+
+func TestAttachOpenPayloadRoundTripsWindowIndex(t *testing.T) {
+	windowIndex := 0
+	env, err := MarshalEnvelope(MsgAttachOpen, "requester", AttachOpenPayload{
+		StreamID:    "stream_1",
+		NodeID:      "owner",
+		SessionID:   "sess_1",
+		WindowIndex: &windowIndex,
+		Cols:        100,
+		Rows:        30,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope: %v", err)
+	}
+	var payload AttachOpenPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if payload.WindowIndex == nil || *payload.WindowIndex != 0 {
+		t.Fatalf("window index = %+v, want 0", payload.WindowIndex)
 	}
 }
 

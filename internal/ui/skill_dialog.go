@@ -61,6 +61,21 @@ func NewSkillDialog() *SkillDialog {
 
 // Show opens the dialog for a specific project/session.
 func (d *SkillDialog) Show(projectPath, sessionID, tool string) error {
+	if !session.SupportsProjectSkills(tool) {
+		return d.ShowWithData(projectPath, sessionID, tool, nil, nil)
+	}
+	allDiscoveredSkills, err := session.ListAvailableSkills()
+	if err != nil {
+		return err
+	}
+	attachedSkills, err := session.GetAttachedProjectSkills(projectPath)
+	if err != nil {
+		return err
+	}
+	return d.ShowWithData(projectPath, sessionID, tool, allDiscoveredSkills, attachedSkills)
+}
+
+func (d *SkillDialog) ShowWithData(projectPath, sessionID, tool string, allDiscoveredSkills []session.SkillCandidate, attachedSkills []session.ProjectSkillAttachment) error {
 	d.projectPath = projectPath
 	d.sessionID = sessionID
 	d.tool = tool
@@ -82,15 +97,6 @@ func (d *SkillDialog) Show(projectPath, sessionID, tool string) error {
 		d.available = nil
 		d.emptyHelpText = "Skills manager is available for Claude, Gemini, Codex, and Pi sessions."
 		return nil
-	}
-
-	allDiscoveredSkills, err := session.ListAvailableSkills()
-	if err != nil {
-		return err
-	}
-	attachedSkills, err := session.GetAttachedProjectSkills(projectPath)
-	if err != nil {
-		return err
 	}
 
 	discoveredByID := make(map[string]session.SkillCandidate, len(allDiscoveredSkills))
@@ -180,6 +186,14 @@ func (d *SkillDialog) NeedsApply() bool {
 // GetSessionID returns the managed session ID.
 func (d *SkillDialog) GetSessionID() string {
 	return d.sessionID
+}
+
+func (d *SkillDialog) AttachedCandidates() []session.SkillCandidate {
+	out := make([]session.SkillCandidate, 0, len(d.attached))
+	for _, item := range d.attached {
+		out = append(out, item.Candidate)
+	}
+	return out
 }
 
 // GetError returns the latest apply error.

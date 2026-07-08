@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 )
@@ -318,4 +319,53 @@ func TestPickerToolNames_MapsShellAlias(t *testing.T) {
 			t.Fatalf("PickerToolNames() should not include hidden gemini: %v", got)
 		}
 	}
+}
+
+func TestPickerToolNames_PreservesConfiguredDefaultTool(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	if err := SaveUserConfig(&UserConfig{
+		DefaultTool: "codex",
+		UI:          UISettings{ShowOnlyInstalledTools: true},
+	}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+
+	withStubbedProbe(t, []string{"claude"}, func() {
+		ClearUserConfigCache()
+		got := PickerToolNames()
+		if !slices.Contains(got, "codex") {
+			t.Fatalf("PickerToolNames() = %v, want configured default tool codex preserved even when service PATH probe misses it", got)
+		}
+		if !slices.Contains(got, "claude") {
+			t.Fatalf("PickerToolNames() = %v, want installed claude retained", got)
+		}
+		if len(got) == 0 || got[0] != "shell" {
+			t.Fatalf("PickerToolNames() = %v, want shell first", got)
+		}
+	})
+}
+
+func TestPickerToolNames_HiddenDefaultToolStaysHidden(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	if err := SaveUserConfig(&UserConfig{
+		DefaultTool: "codex",
+		UI: UISettings{
+			ShowOnlyInstalledTools: true,
+			HiddenTools:            []string{"codex"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveUserConfig: %v", err)
+	}
+
+	withStubbedProbe(t, []string{"claude"}, func() {
+		ClearUserConfigCache()
+		got := PickerToolNames()
+		if slices.Contains(got, "codex") {
+			t.Fatalf("PickerToolNames() = %v, hidden default tool codex must stay hidden", got)
+		}
+	})
 }

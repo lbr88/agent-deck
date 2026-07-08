@@ -169,7 +169,7 @@ func TestNewDialog_ModelSuggestions_FilterAndSelectCodex(t *testing.T) {
 	}
 }
 
-func TestNewDialog_ModelDropdownVisibleOnFocus(t *testing.T) {
+func TestNewDialog_ModelDownMovesFocusUnlessPickerExplicitlyOpen(t *testing.T) {
 	d := NewNewDialog()
 	d.SetDefaultTool("codex")
 	d.SetSize(100, 50)
@@ -178,19 +178,18 @@ func TestNewDialog_ModelDropdownVisibleOnFocus(t *testing.T) {
 	d.updateFocus()
 
 	if d.IsModelSuggestionsActive() {
-		t.Fatal("model dropdown should be visible on focus without taking active dropdown control")
+		t.Fatal("model picker should not be active on focus")
 	}
-	view := d.View()
-	if !strings.Contains(view, "Type custom model ID") || !strings.Contains(view, "gpt-5.5") {
-		t.Fatalf("model dropdown should show custom entry and known model IDs on focus: %q", view)
+	if view := d.View(); strings.Contains(view, "✎ Type custom model ID") {
+		t.Fatalf("model picker should not render until explicitly opened: %q", view)
 	}
 
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if !d.IsModelSuggestionsActive() {
-		t.Fatal("down on focused model input should activate model dropdown navigation")
+	if d.IsModelSuggestionsActive() {
+		t.Fatal("down on focused model input should move focus, not activate model dropdown navigation")
 	}
-	if d.modelSuggestionCursor != 1 {
-		t.Fatalf("modelSuggestionCursor = %d, want 1", d.modelSuggestionCursor)
+	if d.currentTarget() != focusPath {
+		t.Fatalf("currentTarget after down from model field = %v, want focusPath", d.currentTarget())
 	}
 }
 
@@ -392,6 +391,56 @@ func TestNewDialog_SetPathSuggestions(t *testing.T) {
 	// Verify full set is stored in allPathSuggestions
 	if len(d.allPathSuggestions) != 3 {
 		t.Errorf("expected 3 allPathSuggestions, got %d", len(d.allPathSuggestions))
+	}
+}
+
+func TestNewDialog_RemotePathTabCompletesWithoutLocalStatTrap(t *testing.T) {
+	d := NewNewDialog()
+	d.SetRemotePathSuggestions([]string{"/remote/app", "/remote/lib"})
+	d.SetSize(100, 50)
+	d.Show()
+	d.focusIndex = d.indexOf(focusPath)
+	d.updateFocus()
+	d.pathSoftSelected = false
+	d.pathInput.Focus()
+	d.pathInput.SetValue("/remote/a")
+	d.filterPathSuggestions()
+
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := d.pathInput.Value(); got != "/remote/app" {
+		t.Fatalf("remote tab completion path = %q, want /remote/app", got)
+	}
+	if d.currentTarget() != focusPath {
+		t.Fatalf("remote tab completion should stay on path while completing, target=%v", d.currentTarget())
+	}
+
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if d.currentTarget() == focusPath {
+		t.Fatal("tab on an exact remote suggestion should advance focus instead of local-stat trapping")
+	}
+}
+
+func TestNewDialog_MultiRepoRemotePathAutocompleteUsesSuggestions(t *testing.T) {
+	d := NewNewDialog()
+	d.SetRemotePathSuggestions([]string{"/remote/app", "/remote/lib", "/remote/tools"})
+	d.SetSize(100, 50)
+	d.Show()
+	d.ToggleMultiRepo()
+	d.focusIndex = d.indexOf(focusMultiRepo)
+	d.updateFocus()
+
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter}) // edit primary path
+	d.pathInput.SetValue("/remote/l")
+	d.filterPathSuggestions()
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := d.pathInput.Value(); got != "/remote/lib" {
+		t.Fatalf("multi-repo remote tab completion path = %q, want /remote/lib", got)
+	}
+
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter}) // commit primary path
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(d.multiRepoPaths) != 2 || d.multiRepoPaths[1] != "/remote/app" {
+		t.Fatalf("added multi-repo path = %#v, want second unused suggestion /remote/app", d.multiRepoPaths)
 	}
 }
 

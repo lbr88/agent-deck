@@ -2,6 +2,7 @@ package ui
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -376,6 +377,97 @@ func (m *MCPDialog) Show(projectPath string, sessionID string, tool string) erro
 	return nil
 }
 
+// ShowWithAttached displays the MCP dialog with attached state supplied by a
+// remote owner. It still uses the local catalog for item descriptions until hub
+// snapshots/commands expose a remote catalog, but attached/local/global/user
+// membership comes from the owner node.
+func (m *MCPDialog) ShowWithAttached(projectPath string, sessionID string, tool string, attached map[string][]string) error {
+	if err := m.Show(projectPath, sessionID, tool); err != nil {
+		return err
+	}
+	m.overrideAttached(attached)
+	m.localChanged = false
+	m.globalChanged = false
+	m.userChanged = false
+	return nil
+}
+
+func (m *MCPDialog) overrideAttached(attached map[string][]string) {
+	items := m.allItemsByName()
+	m.localAttached, m.localAvailable = m.itemsForScope(items, attached["local"])
+	m.globalAttached, m.globalAvailable = m.itemsForScope(items, attached["global"])
+	m.userAttached, m.userAvailable = m.itemsForScope(items, attached["user"])
+	m.localAttachedIdx, m.localAvailableIdx = 0, 0
+	m.globalAttachedIdx, m.globalAvailableIdx = 0, 0
+	m.userAttachedIdx, m.userAvailableIdx = 0, 0
+}
+
+func (m *MCPDialog) allItemsByName() map[string]MCPItem {
+	items := make(map[string]MCPItem)
+	for _, list := range [][]MCPItem{
+		m.localAttached, m.localAvailable,
+		m.globalAttached, m.globalAvailable,
+		m.userAttached, m.userAvailable,
+	} {
+		for _, item := range list {
+			if strings.TrimSpace(item.Name) != "" {
+				items[item.Name] = item
+			}
+		}
+	}
+	return items
+}
+
+func (m *MCPDialog) itemsForScope(items map[string]MCPItem, attachedNames []string) ([]MCPItem, []MCPItem) {
+	attachedSet := make(map[string]bool, len(attachedNames))
+	for _, name := range attachedNames {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			attachedSet[name] = true
+			if _, ok := items[name]; !ok {
+				items[name] = MCPItem{Name: name, Description: "(not in local config.toml)", IsOrphan: true}
+			}
+		}
+	}
+	names := make([]string, 0, len(items))
+	for name := range items {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	attached := make([]MCPItem, 0, len(attachedSet))
+	available := make([]MCPItem, 0, len(items)-len(attachedSet))
+	for _, name := range names {
+		item := items[name]
+		if attachedSet[name] {
+			attached = append(attached, item)
+		} else {
+			available = append(available, item)
+		}
+	}
+	return attached, available
+}
+
+// AttachedNamesByScope returns the current attached MCP names by scope.
+func (m *MCPDialog) AttachedNamesByScope() map[string][]string {
+	return map[string][]string{
+		"local":  mcpItemNames(m.localAttached),
+		"global": mcpItemNames(m.globalAttached),
+		"user":   mcpItemNames(m.userAttached),
+	}
+}
+
+func mcpItemNames(items []MCPItem) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Hide hides the dialog
 func (m *MCPDialog) Hide() {
 	m.visible = false
@@ -397,7 +489,7 @@ func (m *MCPDialog) IsVisible() bool {
 
 // HasItems returns true if there are MCPs to manage
 func (m *MCPDialog) HasItems() bool {
-	return len(m.localAttached)+len(m.localAvailable)+len(m.globalAttached)+len(m.globalAvailable) > 0
+	return len(m.localAttached)+len(m.localAvailable)+len(m.globalAttached)+len(m.globalAvailable)+len(m.userAttached)+len(m.userAvailable) > 0
 }
 
 // HasChanged returns true if any MCPs were changed (any scope)

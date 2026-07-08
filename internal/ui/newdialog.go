@@ -176,6 +176,7 @@ type NewDialog struct {
 	parentGroupName       string
 	pathSuggestions       []string // filtered subset of path suggestions shown in dropdown.
 	allPathSuggestions    []string // full unfiltered set of path suggestions.
+	remotePathSuggestions bool     // true when path suggestions describe another machine; do not stat local FS.
 	pathSuggestionCursor  int      // tracks selected entry in dropdown (0 = "Type custom", 1.. = suggestions).
 	suggestionNavigated   bool     // tracks if user explicitly navigated suggestions.
 	pathSoftSelected      bool     // true when path text is "soft selected" (ready to replace on type).
@@ -186,7 +187,7 @@ type NewDialog struct {
 	modelSuggestionActive bool     // true when arrow-key focus is inside the model dropdown.
 	modelSuggestionHidden bool     // true when the model dropdown is explicitly dismissed.
 	modelNavigated        bool     // true when the user explicitly navigated model suggestions.
-	modelLineOffset       int      // Content line where model suggestions overlay should appear.
+	modelLineOffset       int      // Deprecated overlay offset; retained for narrow-rendering tests.
 	// Worktree support.
 	worktreeEnabled bool
 	worktreeToggled bool // true once the user explicitly toggled the worktree checkbox (vs config default_enabled); see #1185.
@@ -201,7 +202,7 @@ type NewDialog struct {
 	// Inline validation error displayed inside the dialog.
 	validationErr         string
 	pathCycler            session.CompletionCycler // Path autocomplete state.
-	suggestionsLineOffset int                      // Content line where suggestions overlay should appear.
+	suggestionsLineOffset int                      // Deprecated overlay offset; retained for narrow-rendering tests.
 	// Multi-repo mode.
 	multiRepoEnabled    bool
 	multiRepoPaths      []string // All paths when multi-repo is active.
@@ -554,11 +555,27 @@ func (d *NewDialog) SetSize(width, height int) {
 	}
 }
 
-// SetPathSuggestions sets the available path suggestions for autocomplete
+// SetPathSuggestions sets local-machine path suggestions for autocomplete.
 func (d *NewDialog) SetPathSuggestions(paths []string) {
-	d.allPathSuggestions = paths
-	d.pathSuggestions = paths
+	d.setPathSuggestions(paths, false)
+}
+
+// SetRemotePathSuggestions sets path suggestions that belong to another node
+// (SSH or hub). Autocomplete uses the supplied suggestions only and never
+// validates them with os.Stat on this machine.
+func (d *NewDialog) SetRemotePathSuggestions(paths []string) {
+	d.setPathSuggestions(paths, true)
+}
+
+func (d *NewDialog) setPathSuggestions(paths []string, remote bool) {
+	d.allPathSuggestions = append([]string(nil), paths...)
+	d.pathSuggestions = append([]string(nil), paths...)
+	d.remotePathSuggestions = remote
 	d.pathSuggestionCursor = 0
+	d.suggestionNavigated = false
+	d.suggestionsActive = false
+	d.suggestionsHidden = false
+	d.pathCycler.Reset()
 }
 
 // IsRecentPickerOpen returns whether the recent sessions picker is visible.
@@ -622,6 +639,7 @@ func (d *NewDialog) IsModelSuggestionsActive() bool {
 func (d *NewDialog) IsModelPickerOpen() bool {
 	return d.currentTarget() == focusModel &&
 		d.selectedToolSupportsModel() &&
+		d.modelSuggestionActive &&
 		!d.modelSuggestionHidden
 }
 
@@ -904,6 +922,52 @@ func (d *NewDialog) filterPathSuggestions() {
 	if d.pathSuggestionCursor > len(d.pathSuggestions) {
 		d.pathSuggestionCursor = 0
 	}
+}
+
+func (d *NewDialog) startRemotePathSuggestionCycle() bool {
+	d.filterPathSuggestions()
+	if len(d.pathSuggestions) == 0 {
+		return false
+	}
+	current := strings.Trim(strings.TrimSpace(d.pathInput.Value()), "'\"")
+	if len(d.pathSuggestions) == 1 && current == d.pathSuggestions[0] {
+		return false
+	}
+	d.pathCycler.SetMatches(append([]string(nil), d.pathSuggestions...))
+	next := d.pathCycler.Next()
+	if next == "" {
+		return false
+	}
+	d.pathInput.SetValue(next)
+	d.pathInput.SetCursor(len(next))
+	d.suggestionNavigated = false
+	d.suggestionsActive = false
+	d.suggestionsHidden = false
+	return true
+}
+
+func (d *NewDialog) firstUnusedPathSuggestion() string {
+	if len(d.allPathSuggestions) == 0 {
+		return ""
+	}
+	used := make(map[string]struct{}, len(d.multiRepoPaths))
+	for _, p := range d.multiRepoPaths {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			used[p] = struct{}{}
+		}
+	}
+	for _, p := range d.allPathSuggestions {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := used[p]; ok {
+			continue
+		}
+		return p
+	}
+	return ""
 }
 
 func knownModelIDsForTool(tool string) []string {
@@ -1627,45 +1691,25 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			return d, nil
 		}
 
-		// Issue #896 sub-bug 4: when the path-suggestions popup is visible
-		// and the user is actively editing the path (pathInput focused,
-		// not soft-selected), arrow keys auto-activate the popup so the
-		// suggestionsActive handler below takes over and home.go's Enter
-		// handler can pick the highlighted suggestion (sub-bug 3).
-		//
-		// Issue #1020 (@JMBattista): in soft-select mode (Tab-landed on a
-		// path field with a pre-filled value, pathInput blurred), Up/Down
-		// must NOT auto-activate — they must fall through to form-field
-		// navigation so the user can escape the path section. Explicit
-		// entry into popup-nav stays available via Space or Right, handled
-		// in the soft-select block just below.
-		if !d.suggestionsActive && d.currentTarget() == focusPath &&
-			len(d.pathSuggestions) > 0 && !d.suggestionsHidden &&
-			!d.pathSoftSelected {
-			if s := msg.String(); s == "down" || s == "up" {
-				d.suggestionsActive = true
-				d.pathInput.Blur()
-				d.suggestionNavigated = true
-				// fall through to the suggestionsActive arrow handler below
-			}
-		}
-		if !d.modelSuggestionActive && d.currentTarget() == focusModel &&
-			!d.modelSuggestionHidden && d.selectedToolSupportsModel() {
-			if s := msg.String(); s == "down" || s == "up" {
-				d.filterModelSuggestions()
-				d.modelSuggestionActive = true
-				d.modelInput.Blur()
-				d.modelNavigated = true
-				// fall through to the modelSuggestionActive arrow handler below
-			}
-		}
+		// Plain Up/Down always navigate form fields unless the user has
+		// explicitly entered a suggestion picker. This avoids trapping focus on
+		// path/model selectors during normal vertical navigation. Explicit picker
+		// entry remains available via Enter, Space/Right on soft-selected paths,
+		// and Ctrl+N/Ctrl+P.
 
 		// Suggestions dropdown active: arrow keys navigate, space/enter select,
 		// left/esc exit. The dropdown shows a synthetic "Type custom path..."
 		// entry at index 0, followed by real suggestions at indices 1..N.
-		if d.suggestionsActive && d.currentTarget() == focusPath {
+		pathPickerTarget := d.currentTarget() == focusPath || (d.currentTarget() == focusMultiRepo && d.multiRepoEditing)
+		if d.suggestionsActive && pathPickerTarget {
 			if isNewDialogTabKey(msg) {
+				if d.suggestionNavigated && d.pathSuggestionCursor > 0 {
+					d.ApplyHighlightedSuggestion()
+				}
 				d.DismissSuggestions()
+				if d.multiRepoEditing {
+					return d, nil
+				}
 				d.moveFocus(1)
 				return d, nil
 			}
@@ -1694,7 +1738,7 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 				customSelected := d.pathSuggestionCursor == 0
 				d.ApplyHighlightedSuggestion()
 				d.DismissSuggestions()
-				if msg.String() == "enter" && !customSelected {
+				if msg.String() == "enter" && !customSelected && !d.multiRepoEditing {
 					d.moveFocus(1)
 				}
 				return d, nil
@@ -1703,7 +1747,18 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 				d.pathInput.Focus()
 				return d, nil
 			}
-			return d, nil // consume all other keys while dropdown is active
+			switch msg.Type {
+			case tea.KeyRunes, tea.KeyBackspace, tea.KeyDelete:
+				d.DismissSuggestions()
+				d.pathSoftSelected = false
+				d.pathInput.Focus()
+				d.suggestionNavigated = false
+				d.pathSuggestionCursor = 0
+				d.pathCycler.Reset()
+				// Let the edit key reach the path text input below.
+			default:
+				return d, nil // consume all other keys while dropdown is active
+			}
 		}
 
 		if d.modelSuggestionActive && d.currentTarget() == focusModel {
@@ -1785,23 +1840,33 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			// On path field (or multi-repo path editing): trigger autocomplete or cycle through matches.
 			isPathEditing := cur == focusPath || d.multiRepoEditing
 			if isPathEditing {
-				path := d.pathInput.Value()
-				info, err := os.Stat(path)
-				isDir := err == nil && info.IsDir()
-				isPartial := !isDir || strings.HasSuffix(path, string(os.PathSeparator))
-
-				if d.pathCycler.IsActive() || isPartial {
-					if d.pathCycler.IsActive() {
-						d.pathInput.SetValue(d.pathCycler.Next())
+				if d.pathCycler.IsActive() {
+					next := d.pathCycler.Next()
+					if !(d.remotePathSuggestions && next == strings.Trim(strings.TrimSpace(d.pathInput.Value()), "'\"")) {
+						d.pathInput.SetValue(next)
 						d.pathInput.SetCursor(len(d.pathInput.Value()))
 						return d, nil
 					}
-					matches, err := session.GetDirectoryCompletions(path)
-					if err == nil && len(matches) > 0 {
-						d.pathCycler.SetMatches(matches)
-						d.pathInput.SetValue(d.pathCycler.Next())
-						d.pathInput.SetCursor(len(d.pathInput.Value()))
+					d.pathCycler.Reset()
+				}
+				if d.remotePathSuggestions {
+					if d.startRemotePathSuggestionCycle() {
 						return d, nil
+					}
+				} else {
+					path := d.pathInput.Value()
+					info, err := os.Stat(path)
+					isDir := err == nil && info.IsDir()
+					isPartial := !isDir || strings.HasSuffix(path, string(os.PathSeparator))
+
+					if isPartial {
+						matches, err := session.GetDirectoryCompletions(path)
+						if err == nil && len(matches) > 0 {
+							d.pathCycler.SetMatches(matches)
+							d.pathInput.SetValue(d.pathCycler.Next())
+							d.pathInput.SetCursor(len(d.pathInput.Value()))
+							return d, nil
+						}
 					}
 				}
 			}
@@ -1829,7 +1894,7 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			// that doesn't point to an existing directory. Tab should stick to
 			// the input until the user has a usable path; otherwise it silently
 			// jumps to the agent selector and the typed path is left dangling.
-			if isPathEditing {
+			if isPathEditing && !d.remotePathSuggestions {
 				v := strings.Trim(strings.TrimSpace(d.pathInput.Value()), "'\"")
 				if v != "" {
 					expanded := session.ExpandPath(v)
@@ -1862,6 +1927,9 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 				d.pathInput.Focus() // exit soft-select, focus for future input.
 				d.pathSuggestionCursor = (d.pathSuggestionCursor + 1) % (len(d.pathSuggestions) + 1)
 				d.suggestionNavigated = true
+				d.suggestionsActive = true
+				d.suggestionsHidden = false
+				d.pathInput.Blur()
 				return d, nil
 			}
 			// Emacs fallback: advance to next form field (mirrors "down").
@@ -1896,6 +1964,9 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 					d.pathSuggestionCursor = len(d.pathSuggestions)
 				}
 				d.suggestionNavigated = true
+				d.suggestionsActive = true
+				d.suggestionsHidden = false
+				d.pathInput.Blur()
 				return d, nil
 			}
 			// Emacs fallback: retreat to previous form field (mirrors "shift+tab"/"up").
@@ -2127,20 +2198,22 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 		case "a":
 			if cur == focusMultiRepo && d.multiRepoEnabled && !d.multiRepoEditing {
 				// Pre-fill with parent directory of the last path
-				defaultPath := ""
-				for i := len(d.multiRepoPaths) - 1; i >= 0; i-- {
-					if p := strings.TrimSpace(d.multiRepoPaths[i]); p != "" {
-						defaultPath = filepath.Dir(session.ExpandPath(p))
-						if defaultPath != "" && defaultPath != "." {
-							// Collapse home dir back to ~
-							if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(defaultPath, home) {
-								defaultPath = "~" + defaultPath[len(home):]
+				defaultPath := d.firstUnusedPathSuggestion()
+				if defaultPath == "" {
+					for i := len(d.multiRepoPaths) - 1; i >= 0; i-- {
+						if p := strings.TrimSpace(d.multiRepoPaths[i]); p != "" {
+							defaultPath = filepath.Dir(session.ExpandPath(p))
+							if defaultPath != "" && defaultPath != "." {
+								// Collapse home dir back to ~
+								if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(defaultPath, home) {
+									defaultPath = "~" + defaultPath[len(home):]
+								}
+								defaultPath += string(os.PathSeparator)
+							} else {
+								defaultPath = ""
 							}
-							defaultPath += string(os.PathSeparator)
-						} else {
-							defaultPath = ""
+							break
 						}
-						break
 					}
 				}
 				d.multiRepoPaths = append(d.multiRepoPaths, defaultPath)
@@ -2180,6 +2253,13 @@ func (d *NewDialog) Update(msg tea.Msg) (*NewDialog, tea.Cmd) {
 			}
 
 		case " ":
+			if cur == focusModel {
+				d.filterModelSuggestions()
+				d.modelSuggestionActive = true
+				d.modelSuggestionHidden = false
+				d.modelInput.Blur()
+				return d, nil
+			}
 			if cur == focusWorktree {
 				d.ToggleWorktree()
 				d.rebuildFocusTargets()
@@ -2389,6 +2469,10 @@ func (d *NewDialog) renderModelSection(content *strings.Builder, cur focusTarget
 		content.WriteString("\n  ")
 		content.WriteString(dimStyle.Render(hint))
 	}
+	if dropdown := d.renderModelSuggestionsDropdown(); dropdown != "" {
+		content.WriteString("\n  ")
+		content.WriteString(strings.ReplaceAll(dropdown, "\n", "\n  "))
+	}
 	content.WriteString("\n\n")
 }
 
@@ -2428,6 +2512,11 @@ func (d *NewDialog) renderSinglePathSection(content *strings.Builder, cur focusT
 	}
 	wrapped := lipgloss.NewStyle().Width(innerWidth).Render(content.String())
 	d.suggestionsLineOffset = lipgloss.Height(wrapped)
+	if dropdown := d.renderSuggestionsDropdown(); dropdown != "" {
+		content.WriteString("  ")
+		content.WriteString(strings.ReplaceAll(dropdown, "\n", "\n  "))
+		content.WriteString("\n")
+	}
 	content.WriteString("\n")
 }
 
@@ -2484,6 +2573,11 @@ func (d *NewDialog) renderMultiRepoSection(content *strings.Builder, cur focusTa
 		content.WriteString("\n")
 		// Record line offset for suggestions overlay (rendered after dialog is placed).
 		d.suggestionsLineOffset = strings.Count(content.String(), "\n")
+		if dropdown := d.renderSuggestionsDropdown(); dropdown != "" {
+			content.WriteString("    ")
+			content.WriteString(strings.ReplaceAll(dropdown, "\n", "\n    "))
+			content.WriteString("\n")
+		}
 	} else {
 		for i, p := range d.multiRepoPaths {
 			display := p
@@ -2772,9 +2866,9 @@ func (d *NewDialog) View() string {
 		if d.suggestionsActive {
 			helpText = "↑/↓ navigate │ Space/Enter select │ Tab next │ Esc back"
 		} else if d.pathSoftSelected {
-			helpText = "Type to replace │ Enter browse list │ ← edit │ Tab next │ Esc cancel"
+			helpText = "Type to replace │ Enter/Space browse │ ↑↓ next field │ Tab next │ Esc cancel"
 		} else {
-			helpText = "Tab autocomplete │ Enter browse list │ Esc cancel"
+			helpText = "Tab autocomplete │ Enter browse list │ ↑↓ next field │ Esc cancel"
 		}
 	} else if cur == focusBranch {
 		if d.branchPicker != nil && d.branchPicker.IsVisible() {
@@ -2797,7 +2891,7 @@ func (d *NewDialog) View() string {
 		if d.modelSuggestionActive {
 			helpText = "↑/↓ navigate │ Space/Enter select │ Esc back │ Tab next"
 		} else {
-			helpText = "Type custom model ID │ Enter browse known IDs │ Tab next"
+			helpText = "Type custom model ID │ Enter browse known IDs │ ↑↓ next field │ Tab next"
 		}
 	} else if cur == focusConductor {
 		helpText = "↑↓ select parent │ Tab next │ Enter/^S create │ Esc cancel"
@@ -2822,32 +2916,6 @@ func (d *NewDialog) View() string {
 		dialog,
 	)
 
-	// Overlay path suggestions dropdown if visible.
-	// Rendered as a floating bordered menu over the placed dialog so it
-	// doesn't shift the layout when it appears/disappears.
-	if suggestionsOverlay := d.renderSuggestionsDropdown(); suggestionsOverlay != "" {
-		// Anchor the floating menu to the dialog's top-left, then add the line
-		// offset down to the path input.
-		topRow, leftCol := dialogOrigin(d.width, d.height, lipgloss.Width(dialog), lipgloss.Height(dialog))
-
-		// suggestionsLineOffset is the content line where the dropdown should appear.
-		// Add border (1) + top padding (2) to get the actual row within the dialog box.
-		overlayRow := topRow + 1 + 2 + d.suggestionsLineOffset
-		// Align with the path input: border (1) + padding (4)
-		overlayCol := leftCol + 1 + 4
-
-		placed = overlayDropdown(placed, suggestionsOverlay, overlayRow, overlayCol)
-	}
-
-	if modelOverlay := d.renderModelSuggestionsDropdown(); modelOverlay != "" {
-		topRow, leftCol := dialogOrigin(d.width, d.height, lipgloss.Width(dialog), lipgloss.Height(dialog))
-
-		overlayRow := topRow + 1 + 2 + d.modelLineOffset
-		overlayCol := leftCol + 1 + 4
-
-		placed = overlayDropdown(placed, modelOverlay, overlayRow, overlayCol)
-	}
-
 	return placed
 }
 
@@ -2865,13 +2933,13 @@ func dropdownMenuBg() lipgloss.Color {
 func (d *NewDialog) renderSuggestionsDropdown() string {
 	cur := d.currentTarget()
 
-	// The dropdown shows whenever the path field is focused — even with no
-	// real suggestions, the synthetic "✎ Type custom path…" entry is always
-	// available at the top. Hidden after explicit dismiss (e.g. Enter).
+	// The dropdown is inline and only appears after explicit picker entry. It
+	// used to appear as an overlay whenever the path field was focused, which
+	// covered lower fields and made normal Up/Down navigation feel trapped.
 	showSingle := !d.multiRepoEnabled && cur == focusPath
 	showMulti := d.multiRepoEnabled && cur == focusMultiRepo && d.multiRepoEditing
 
-	if (!showSingle && !showMulti) || d.suggestionsHidden {
+	if (!showSingle && !showMulti) || d.suggestionsHidden || !d.suggestionsActive {
 		return ""
 	}
 
@@ -2969,7 +3037,7 @@ func (d *NewDialog) renderSuggestionsDropdown() string {
 }
 
 func (d *NewDialog) renderModelSuggestionsDropdown() string {
-	if d.currentTarget() != focusModel || d.modelSuggestionHidden || !d.selectedToolSupportsModel() {
+	if d.currentTarget() != focusModel || d.modelSuggestionHidden || !d.modelSuggestionActive || !d.selectedToolSupportsModel() {
 		return ""
 	}
 

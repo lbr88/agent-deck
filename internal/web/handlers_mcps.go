@@ -32,10 +32,14 @@ import (
 // gets defaultMCPManager which delegates to internal/session.
 type MCPManager interface {
 	ListCatalog() []MCPCatalogEntry
-	ListAttached(projectPath string) (map[string][]string, error)
-	Attach(projectPath, name, scope string) error
-	Detach(projectPath, name, scope string) error
-	Move(projectPath, name, fromScope, toScope string) error
+	ListAttached(sessionID, projectPath string) (map[string][]string, error)
+	Attach(sessionID, projectPath, name, scope string) error
+	Detach(sessionID, projectPath, name, scope string) error
+	Move(sessionID, projectPath, name, fromScope, toScope string) error
+}
+
+type SessionMCPStateProvider interface {
+	ListSessionMCPs(sessionID, projectPath string) (SessionMCPsResponse, error)
 }
 
 // MCPCatalogEntry describes one MCP available in the catalog (config.toml).
@@ -54,10 +58,11 @@ type MCPCatalogResponse struct {
 
 // SessionMCPsResponse is returned by GET /api/sessions/{id}/mcps.
 type SessionMCPsResponse struct {
-	SessionID string   `json:"sessionId"`
-	Local     []string `json:"local"`
-	Global    []string `json:"global"`
-	User      []string `json:"user"`
+	SessionID string            `json:"sessionId"`
+	Local     []string          `json:"local"`
+	Global    []string          `json:"global"`
+	User      []string          `json:"user"`
+	Catalog   []MCPCatalogEntry `json:"catalog,omitempty"`
 }
 
 // mcpMutateRequest is the JSON body for POST/DELETE/PATCH endpoints.
@@ -130,7 +135,16 @@ func (s *Server) handleSessionMCPs(w http.ResponseWriter, r *http.Request, sessi
 			writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
 			return
 		}
-		attached, err := s.mcpMgr.ListAttached(projectPath)
+		if provider, ok := s.mcpMgr.(SessionMCPStateProvider); ok {
+			state, err := provider.ListSessionMCPs(sessionID, projectPath)
+			if err != nil {
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, state)
+			return
+		}
+		attached, err := s.mcpMgr.ListAttached(sessionID, projectPath)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 			return
@@ -152,17 +166,17 @@ func (s *Server) handleSessionMCPs(w http.ResponseWriter, r *http.Request, sessi
 
 	switch r.Method {
 	case http.MethodPost:
-		s.handleMCPAttach(w, r, projectPath, name)
+		s.handleMCPAttach(w, r, sessionID, projectPath, name)
 	case http.MethodDelete:
-		s.handleMCPDetach(w, r, projectPath, name)
+		s.handleMCPDetach(w, r, sessionID, projectPath, name)
 	case http.MethodPatch:
-		s.handleMCPMove(w, r, projectPath, name)
+		s.handleMCPMove(w, r, sessionID, projectPath, name)
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
 	}
 }
 
-func (s *Server) handleMCPAttach(w http.ResponseWriter, r *http.Request, projectPath, name string) {
+func (s *Server) handleMCPAttach(w http.ResponseWriter, r *http.Request, sessionID, projectPath, name string) {
 	if !s.checkMutationsAllowed(w) {
 		return
 	}
@@ -178,7 +192,7 @@ func (s *Server) handleMCPAttach(w http.ResponseWriter, r *http.Request, project
 		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid scope (want local|global|user)")
 		return
 	}
-	if err := s.mcpMgr.Attach(projectPath, name, scope); err != nil {
+	if err := s.mcpMgr.Attach(sessionID, projectPath, name, scope); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 		return
 	}
@@ -186,14 +200,14 @@ func (s *Server) handleMCPAttach(w http.ResponseWriter, r *http.Request, project
 	writeJSON(w, http.StatusOK, map[string]string{"attached": name, "scope": scope})
 }
 
-func (s *Server) handleMCPDetach(w http.ResponseWriter, r *http.Request, projectPath, name string) {
+func (s *Server) handleMCPDetach(w http.ResponseWriter, r *http.Request, sessionID, projectPath, name string) {
 	if !s.checkMutationsAllowed(w) {
 		return
 	}
 	if !s.checkMutationRateLimit(w) {
 		return
 	}
-	scope := s.detectAttachedScope(projectPath, name)
+	scope := s.detectAttachedScope(sessionID, projectPath, name)
 	if scope == "" {
 		scope = "local"
 	}
@@ -209,7 +223,7 @@ func (s *Server) handleMCPDetach(w http.ResponseWriter, r *http.Request, project
 			return
 		}
 	}
-	if err := s.mcpMgr.Detach(projectPath, name, scope); err != nil {
+	if err := s.mcpMgr.Detach(sessionID, projectPath, name, scope); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 		return
 	}
@@ -217,7 +231,7 @@ func (s *Server) handleMCPDetach(w http.ResponseWriter, r *http.Request, project
 	writeJSON(w, http.StatusOK, map[string]string{"detached": name, "scope": scope})
 }
 
-func (s *Server) handleMCPMove(w http.ResponseWriter, r *http.Request, projectPath, name string) {
+func (s *Server) handleMCPMove(w http.ResponseWriter, r *http.Request, sessionID, projectPath, name string) {
 	if !s.checkMutationsAllowed(w) {
 		return
 	}
@@ -237,7 +251,7 @@ func (s *Server) handleMCPMove(w http.ResponseWriter, r *http.Request, projectPa
 		writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid scope (want local|global|user)")
 		return
 	}
-	fromScope := s.detectAttachedScope(projectPath, name)
+	fromScope := s.detectAttachedScope(sessionID, projectPath, name)
 	if fromScope == "" {
 		writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, "MCP not attached to this session")
 		return
@@ -246,7 +260,7 @@ func (s *Server) handleMCPMove(w http.ResponseWriter, r *http.Request, projectPa
 		writeJSON(w, http.StatusOK, map[string]string{"scope": toScope})
 		return
 	}
-	if err := s.mcpMgr.Move(projectPath, name, fromScope, toScope); err != nil {
+	if err := s.mcpMgr.Move(sessionID, projectPath, name, fromScope, toScope); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 		return
 	}
@@ -272,8 +286,8 @@ func (s *Server) lookupSessionProjectPath(sessionID string) (string, bool) {
 	return "", false
 }
 
-func (s *Server) detectAttachedScope(projectPath, name string) string {
-	attached, err := s.mcpMgr.ListAttached(projectPath)
+func (s *Server) detectAttachedScope(sessionID, projectPath, name string) string {
+	attached, err := s.mcpMgr.ListAttached(sessionID, projectPath)
 	if err != nil {
 		return ""
 	}
@@ -354,7 +368,7 @@ func (defaultMCPManager) ListCatalog() []MCPCatalogEntry {
 	return out
 }
 
-func (defaultMCPManager) ListAttached(projectPath string) (map[string][]string, error) {
+func (defaultMCPManager) ListAttached(_ string, projectPath string) (map[string][]string, error) {
 	return map[string][]string{
 		"local":  filterDefined(session.GetProjectMCPNames(projectPath)),
 		"global": filterDefined(session.GetGlobalMCPNames()),
@@ -362,7 +376,21 @@ func (defaultMCPManager) ListAttached(projectPath string) (map[string][]string, 
 	}, nil
 }
 
-func (m defaultMCPManager) Attach(projectPath, name, scope string) error {
+func (m defaultMCPManager) ListSessionMCPs(sessionID, projectPath string) (SessionMCPsResponse, error) {
+	attached, err := m.ListAttached(sessionID, projectPath)
+	if err != nil {
+		return SessionMCPsResponse{}, err
+	}
+	return SessionMCPsResponse{
+		SessionID: sessionID,
+		Local:     sortedScope(attached, "local"),
+		Global:    sortedScope(attached, "global"),
+		User:      sortedScope(attached, "user"),
+		Catalog:   m.ListCatalog(),
+	}, nil
+}
+
+func (m defaultMCPManager) Attach(_, projectPath, name, scope string) error {
 	names, err := m.namesAt(projectPath, scope)
 	if err != nil {
 		return err
@@ -375,7 +403,7 @@ func (m defaultMCPManager) Attach(projectPath, name, scope string) error {
 	return m.writeScope(projectPath, scope, append(names, name))
 }
 
-func (m defaultMCPManager) Detach(projectPath, name, scope string) error {
+func (m defaultMCPManager) Detach(_, projectPath, name, scope string) error {
 	names, err := m.namesAt(projectPath, scope)
 	if err != nil {
 		return err
@@ -389,11 +417,11 @@ func (m defaultMCPManager) Detach(projectPath, name, scope string) error {
 	return m.writeScope(projectPath, scope, out)
 }
 
-func (m defaultMCPManager) Move(projectPath, name, fromScope, toScope string) error {
-	if err := m.Detach(projectPath, name, fromScope); err != nil {
+func (m defaultMCPManager) Move(sessionID, projectPath, name, fromScope, toScope string) error {
+	if err := m.Detach(sessionID, projectPath, name, fromScope); err != nil {
 		return err
 	}
-	return m.Attach(projectPath, name, toScope)
+	return m.Attach(sessionID, projectPath, name, toScope)
 }
 
 func (defaultMCPManager) namesAt(projectPath, scope string) ([]string, error) {

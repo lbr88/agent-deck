@@ -21,27 +21,40 @@ import (
 // fake; production gets defaultSkillsService which delegates straight to
 // the session package.
 type SkillsService interface {
-	ListCatalog() ([]session.SkillCandidate, error)
-	ListAttached(projectPath string) ([]session.ProjectSkillAttachment, error)
-	Attach(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error)
-	Detach(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error)
+	ListSkillCatalog() ([]session.SkillCandidate, error)
+	ListSessionSkills(sessionID, projectPath string) (SkillSessionState, error)
+	AttachSkill(sessionID, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error)
+	DetachSkill(sessionID, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error)
+}
+
+type SkillSessionState struct {
+	Catalog  []session.SkillCandidate
+	Attached []session.ProjectSkillAttachment
 }
 
 type defaultSkillsService struct{}
 
-func (defaultSkillsService) ListCatalog() ([]session.SkillCandidate, error) {
+func (defaultSkillsService) ListSkillCatalog() ([]session.SkillCandidate, error) {
 	return session.ListAvailableSkills()
 }
 
-func (defaultSkillsService) ListAttached(projectPath string) ([]session.ProjectSkillAttachment, error) {
-	return session.GetAttachedProjectSkills(projectPath)
+func (defaultSkillsService) ListSessionSkills(_, projectPath string) (SkillSessionState, error) {
+	catalog, err := session.ListAvailableSkills()
+	if err != nil {
+		return SkillSessionState{}, err
+	}
+	attached, err := session.GetAttachedProjectSkills(projectPath)
+	if err != nil {
+		return SkillSessionState{}, err
+	}
+	return SkillSessionState{Catalog: catalog, Attached: attached}, nil
 }
 
-func (defaultSkillsService) Attach(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+func (defaultSkillsService) AttachSkill(_, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	return session.AttachSkillToProject(projectPath, tool, skillRef, source)
 }
 
-func (defaultSkillsService) Detach(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+func (defaultSkillsService) DetachSkill(_, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	return session.DetachSkillFromProject(projectPath, skillRef, source)
 }
 
@@ -50,7 +63,8 @@ type skillsCatalogResponse struct {
 }
 
 type sessionSkillsResponse struct {
-	Skills []session.ProjectSkillAttachment `json:"skills"`
+	Skills  []session.ProjectSkillAttachment `json:"skills"`
+	Catalog []session.SkillCandidate         `json:"catalog,omitempty"`
 }
 
 type skillActionResponse struct {
@@ -69,7 +83,7 @@ func (s *Server) handleSkillsCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	svc := s.skillsServiceOrDefault()
-	catalog, err := svc.ListCatalog()
+	catalog, err := svc.ListSkillCatalog()
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to list skills")
 		return
@@ -108,15 +122,18 @@ func (s *Server) handleSessionSkills(w http.ResponseWriter, r *http.Request, ses
 			return
 		}
 		svc := s.skillsServiceOrDefault()
-		attached, err := svc.ListAttached(sess.ProjectPath)
+		state, err := svc.ListSessionSkills(sessionID, sess.ProjectPath)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to list attached skills")
 			return
 		}
-		if attached == nil {
-			attached = []session.ProjectSkillAttachment{}
+		if state.Attached == nil {
+			state.Attached = []session.ProjectSkillAttachment{}
 		}
-		writeJSON(w, http.StatusOK, sessionSkillsResponse{Skills: attached})
+		if state.Catalog == nil {
+			state.Catalog = []session.SkillCandidate{}
+		}
+		writeJSON(w, http.StatusOK, sessionSkillsResponse{Skills: state.Attached, Catalog: state.Catalog})
 
 	case http.MethodPost:
 		if !s.checkMutationsAllowed(w) {
@@ -134,7 +151,7 @@ func (s *Server) handleSessionSkills(w http.ResponseWriter, r *http.Request, ses
 			return
 		}
 		svc := s.skillsServiceOrDefault()
-		att, err := svc.Attach(sess.ProjectPath, sess.Tool, skillName, source)
+		att, err := svc.AttachSkill(sessionID, sess.ProjectPath, sess.Tool, skillName, source)
 		if err != nil {
 			writeSkillError(w, err)
 			return
@@ -154,7 +171,7 @@ func (s *Server) handleSessionSkills(w http.ResponseWriter, r *http.Request, ses
 			return
 		}
 		svc := s.skillsServiceOrDefault()
-		att, err := svc.Detach(sess.ProjectPath, skillName, source)
+		att, err := svc.DetachSkill(sessionID, sess.ProjectPath, skillName, source)
 		if err != nil {
 			writeSkillError(w, err)
 			return

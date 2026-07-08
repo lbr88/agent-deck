@@ -34,6 +34,13 @@ async function waitForAppMount(page) {
   await page.waitForSelector('.sess', { timeout: 5000 })
 }
 
+async function openMore(row) {
+  await row.hover()
+  const more = row.locator('[data-testid="session-more-btn"]')
+  await more.focus()
+  await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
+}
+
 test.describe('keyboard extras', () => {
   test.skip(({ viewport }) => (viewport?.width || 1280) < 768, 'phone viewport: keyboard bindings act on sidebar/rail, hidden on phones')
 
@@ -69,8 +76,8 @@ test.describe('keyboard extras', () => {
     // :hover (app.css .sess:hover .actions), so hover first.
     const row = page.locator('.sess', { hasText: 'frontend' })
     await expect(row).toBeVisible()
-    await row.hover()
-    await row.locator('button[title="Delete"]').click()
+    await openMore(row)
+    await row.locator('[data-testid="session-delete-btn"]').click()
 
     // ConfirmDialog: kicker CONFIRM, message "Delete session …", confirm
     // button labelled "Delete" (ConfirmDialog.js).

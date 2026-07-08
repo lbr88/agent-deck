@@ -4,6 +4,9 @@ import { render, html } from 'htm/preact'
 import { App } from './App.js'
 import {
   selectedIdSignal,
+  sessionsSignal,
+  hubNodesSignal,
+  sessionsLoadedSignal,
   connectionSignal,
   authTokenSignal,
   commandCenterSignal,

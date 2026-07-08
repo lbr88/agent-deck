@@ -22,6 +22,7 @@ type MemoryMenuData struct {
 	snapshot         *MenuSnapshot
 	archivedSnapshot *MenuSnapshot
 	fallback         MenuDataLoader
+	onChange         func()
 }
 
 // NewMemoryMenuData creates an in-memory menu data store.
@@ -29,6 +30,17 @@ func NewMemoryMenuData(fallback MenuDataLoader) *MemoryMenuData {
 	return &MemoryMenuData{
 		fallback: fallback,
 	}
+}
+
+// SetOnChange registers a callback fired after in-memory snapshots change.
+// The callback runs after the store lock is released.
+func (m *MemoryMenuData) SetOnChange(onChange func()) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.onChange = onChange
+	m.mu.Unlock()
 }
 
 // LoadMenuSnapshot returns the latest in-memory snapshot.
@@ -95,7 +107,11 @@ func (m *MemoryMenuData) SetSnapshot(snapshot *MenuSnapshot) {
 	}
 	m.mu.Lock()
 	m.snapshot = cloneMenuSnapshot(snapshot)
+	onChange := m.onChange
 	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
 }
 
 // SetArchivedSnapshot replaces the stored archived menu snapshot.
@@ -105,7 +121,11 @@ func (m *MemoryMenuData) SetArchivedSnapshot(snapshot *MenuSnapshot) {
 	}
 	m.mu.Lock()
 	m.archivedSnapshot = cloneMenuSnapshot(snapshot)
+	onChange := m.onChange
 	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
 }
 
 // UpdateSessionStates updates status/tool fields in-place for existing sessions.
@@ -115,12 +135,12 @@ func (m *MemoryMenuData) UpdateSessionStates(states map[string]MenuSessionState,
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.snapshot == nil {
+		m.mu.Unlock()
 		return
 	}
 
+	changed := false
 	for i := range m.snapshot.Items {
 		item := &m.snapshot.Items[i]
 		if item.Type != MenuItemTypeSession || item.Session == nil {
@@ -135,12 +155,128 @@ func (m *MemoryMenuData) UpdateSessionStates(states map[string]MenuSessionState,
 		if state.Tool != "" {
 			item.Session.Tool = state.Tool
 		}
+		changed = true
+	}
+	if !changed {
+		m.mu.Unlock()
+		return
 	}
 
 	if generatedAt.IsZero() {
 		generatedAt = time.Now()
 	}
 	m.snapshot.GeneratedAt = generatedAt.UTC()
+	onChange := m.onChange
+	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
+}
+
+// UpdateHubNodeName updates an already-published hub node label in-place and
+// notifies subscribers. It lets admin node renames reflect immediately in the
+// web UI instead of waiting for the next remote snapshot.
+func (m *MemoryMenuData) UpdateHubNodeName(nodeID, name string) {
+	if m == nil || nodeID == "" || name == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if m.snapshot == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	changed := false
+	for i := range m.snapshot.HubNodes {
+		if m.snapshot.HubNodes[i].ID == nodeID && m.snapshot.HubNodes[i].Name != name {
+			m.snapshot.HubNodes[i].Name = name
+			changed = true
+		}
+	}
+	for i := range m.snapshot.Items {
+		item := &m.snapshot.Items[i]
+		if item.Group != nil && item.Group.HubNodeID == nodeID && item.Group.HubNodeName != name {
+			item.Group.HubNodeName = name
+			changed = true
+		}
+		if item.Session != nil && item.Session.HubNodeID == nodeID && item.Session.HubNodeName != name {
+			item.Session.HubNodeName = name
+			changed = true
+		}
+	}
+	if !changed {
+		m.mu.Unlock()
+		return
+	}
+
+	m.snapshot.GeneratedAt = time.Now().UTC()
+	onChange := m.onChange
+	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
+}
+
+// RemoveHubNode removes a hub node and all projected groups/sessions owned by
+// that node from the in-memory menu snapshot after an admin revoke.
+func (m *MemoryMenuData) RemoveHubNode(nodeID string) {
+	if m == nil || nodeID == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if m.snapshot == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	changed := false
+	hubNodes := m.snapshot.HubNodes[:0]
+	for _, node := range m.snapshot.HubNodes {
+		if node.ID == nodeID {
+			changed = true
+			continue
+		}
+		hubNodes = append(hubNodes, node)
+	}
+	m.snapshot.HubNodes = hubNodes
+
+	items := m.snapshot.Items[:0]
+	for _, item := range m.snapshot.Items {
+		if item.Group != nil && item.Group.HubNodeID == nodeID {
+			changed = true
+			continue
+		}
+		if item.Session != nil && item.Session.HubNodeID == nodeID {
+			changed = true
+			continue
+		}
+		item.Index = len(items)
+		items = append(items, item)
+	}
+	m.snapshot.Items = items
+	if !changed {
+		m.mu.Unlock()
+		return
+	}
+
+	m.snapshot.TotalGroups = 0
+	m.snapshot.TotalSessions = 0
+	for _, item := range m.snapshot.Items {
+		switch item.Type {
+		case MenuItemTypeGroup:
+			m.snapshot.TotalGroups++
+		case MenuItemTypeSession:
+			m.snapshot.TotalSessions++
+		}
+	}
+	m.snapshot.GeneratedAt = time.Now().UTC()
+	onChange := m.onChange
+	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
 }
 
 func cloneMenuSnapshot(snapshot *MenuSnapshot) *MenuSnapshot {

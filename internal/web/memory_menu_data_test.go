@@ -163,3 +163,100 @@ func TestMemoryMenuData_UpdateSessionStates(t *testing.T) {
 		t.Fatalf("generatedAt = %s, want %s", snapshot.GeneratedAt, ts)
 	}
 }
+
+func TestMemoryMenuData_OnChangeFiresForSnapshotAndStateUpdates(t *testing.T) {
+	store := NewMemoryMenuData(nil)
+	changed := make(chan struct{}, 4)
+	store.SetOnChange(func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	})
+
+	store.SetSnapshot(&MenuSnapshot{
+		Items: []MenuItem{{
+			Type:    MenuItemTypeSession,
+			Session: &MenuSession{ID: "sess-1", Status: session.StatusIdle},
+		}},
+	})
+	waitMemoryMenuChange(t, changed, "set snapshot")
+
+	store.UpdateSessionStates(map[string]MenuSessionState{
+		"sess-1": {Status: session.StatusWaiting},
+	}, time.Now())
+	waitMemoryMenuChange(t, changed, "update session state")
+
+	store.SetArchivedSnapshot(&MenuSnapshot{})
+	waitMemoryMenuChange(t, changed, "set archived snapshot")
+
+	store.UpdateSessionStates(map[string]MenuSessionState{
+		"missing": {Status: session.StatusRunning},
+	}, time.Now())
+	select {
+	case <-changed:
+		t.Fatal("unexpected change notification for missing session state")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestNewServerWiresMemoryMenuDataChangesToSubscribers(t *testing.T) {
+	store := NewMemoryMenuData(nil)
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", MenuData: store})
+	ch := srv.subscribeMenuChanges()
+	defer srv.unsubscribeMenuChanges(ch)
+
+	store.SetSnapshot(&MenuSnapshot{Profile: "default"})
+	select {
+	case <-ch:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected server subscriber notification after memory menu change")
+	}
+}
+
+func TestServerInvalidatesMemoryMenuDataBeforeNotifyingSubscribers(t *testing.T) {
+	loader := &staticMenuLoader{
+		snapshot: &MenuSnapshot{
+			Items: []MenuItem{{
+				Type:    MenuItemTypeSession,
+				Session: &MenuSession{ID: "old", Title: "old"},
+			}},
+		},
+	}
+	store := NewMemoryMenuData(loader)
+	if _, err := store.LoadMenuSnapshot(); err != nil {
+		t.Fatalf("initial LoadMenuSnapshot: %v", err)
+	}
+	loader.snapshot = &MenuSnapshot{
+		Items: []MenuItem{{
+			Type:    MenuItemTypeSession,
+			Session: &MenuSession{ID: "new", Title: "new"},
+		}},
+	}
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", MenuData: store})
+	ch := srv.subscribeMenuChanges()
+	defer srv.unsubscribeMenuChanges(ch)
+
+	srv.notifyMenuChanged()
+	select {
+	case <-ch:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected menu change notification")
+	}
+	got, err := store.LoadMenuSnapshot()
+	if err != nil {
+		t.Fatalf("LoadMenuSnapshot after notify: %v", err)
+	}
+	if len(got.Items) != 1 || got.Items[0].Session == nil || got.Items[0].Session.ID != "new" {
+		t.Fatalf("snapshot after notification = %+v, want freshly reloaded new session", got.Items)
+	}
+}
+
+func waitMemoryMenuChange(t *testing.T, ch <-chan struct{}, action string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatalf("timed out waiting for onChange after %s", action)
+	}
+}

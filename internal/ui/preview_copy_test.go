@@ -108,3 +108,47 @@ func TestBuildSessionInfoForCopy_MultiRepo(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildHubSessionInfoForCopy_ProjectingRemoteMetadata(t *testing.T) {
+	hs := &session.HubSessionInfo{
+		ID:               "remote-1",
+		Title:            "docker",
+		ProjectPath:      "/srv/docker",
+		WorktreePath:     "/srv/docker/.worktrees/fix",
+		WorktreeRepoRoot: "/srv/docker",
+		WorktreeBranch:   "fix/hub",
+		DisplaySessionID: "codex-session-1",
+	}
+
+	got := buildHubSessionInfoForCopy("a-nyvej-gpu", hs)
+
+	for _, want := range []string{
+		"Node: a-nyvej-gpu",
+		"Repo: /srv/docker",
+		"Path: /srv/docker/.worktrees/fix",
+		"Branch: fix/hub",
+		"Session: codex-session-1",
+		"Hub session: remote-1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected payload to contain %q, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildHubSessionInfoForCopy_MultiRepo(t *testing.T) {
+	hs := &session.HubSessionInfo{
+		ID:               "remote-1",
+		ProjectPath:      "/srv/api",
+		MultiRepoEnabled: true,
+		AdditionalPaths:  []string{"/srv/web", "/srv/shared"},
+	}
+
+	got := buildHubSessionInfoForCopy("gpu", hs)
+
+	for _, want := range []string{"/srv/api", "/srv/web", "/srv/shared"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected payload to contain %q, got:\n%s", want, got)
+		}
+	}
+}

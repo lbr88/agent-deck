@@ -817,6 +817,7 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	welcome, err := MarshalEnvelope(MsgWelcome, node.ID, WelcomePayload{
 		NodeID:   node.ID,
 		NodeName: node.Name,
+		Admin:    node.Admin,
 	})
 	if err == nil {
 		_ = s.writePeerJSON(peer, welcome)
@@ -1380,13 +1381,15 @@ func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload
 
 func (s *Server) snapshotEnvelope(latest NodeSessions, includeSessions bool) (Envelope, error) {
 	payload := SnapshotPayload{
-		NodeID:   latest.Node.ID,
-		NodeName: latest.Node.Name,
-		SentAt:   latest.SentAt,
-		Sessions: []SessionInfo{},
+		NodeID:       latest.Node.ID,
+		NodeName:     latest.Node.Name,
+		SentAt:       latest.SentAt,
+		WebAvailable: latest.WebAvailable,
+		Sessions:     []SessionInfo{},
 	}
 	if includeSessions {
 		payload.Sessions = append([]SessionInfo(nil), latest.Sessions...)
+		payload.Groups = append([]GroupInfo(nil), latest.Groups...)
 	}
 	return MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
 }

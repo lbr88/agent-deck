@@ -21,7 +21,8 @@ import (
 )
 
 // focusModelForCodex returns a visible new-session dialog with the codex tool
-// selected and focus parked on the model field (the model picker is showing).
+// selected and focus parked on the model field. The picker must not open merely
+// because focus moved there; it opens only after an explicit Enter.
 func focusModelForCodex(t *testing.T) *NewDialog {
 	t.Helper()
 	d := NewNewDialog()
@@ -79,8 +80,12 @@ func TestIssue1162_UnicodeModelNameVisibleWhileTyping(t *testing.T) {
 // IsModelPickerOpen reflects whether the picker is showing for the model field.
 func TestIssue1162_IsModelPickerOpen(t *testing.T) {
 	d := focusModelForCodex(t)
+	if d.IsModelPickerOpen() {
+		t.Fatal("model picker should not auto-open merely because model field is focused")
+	}
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !d.IsModelPickerOpen() {
-		t.Fatal("model picker should report open when focused on model field")
+		t.Fatal("model picker should report open after explicit Enter on model field")
 	}
 	// A tool without model support (shell) must never report the picker open.
 	shell := NewNewDialog()
@@ -97,6 +102,10 @@ func TestIssue1162_IsModelPickerOpen(t *testing.T) {
 func TestIssue1162_EscDismissesPickerKeepsDialog(t *testing.T) {
 	d := focusModelForCodex(t)
 	d = typeRunes(d, "gpt-5.5")
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !d.IsModelPickerOpen() {
+		t.Fatal("precondition: model picker should be open")
+	}
 
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
@@ -125,6 +134,7 @@ func TestIssue1162_HomeEscInPickerKeepsFlowAlive(t *testing.T) {
 	h.newDialog.Show()
 	h.newDialog.focusIndex = h.newDialog.indexOf(focusModel)
 	h.newDialog.updateFocus()
+	h.newDialog, _ = h.newDialog.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
 	if !h.newDialog.IsModelPickerOpen() {
 		t.Fatal("precondition: model picker should be open")

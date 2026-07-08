@@ -114,6 +114,21 @@ func buildWebServer(profile string, args []string, menuData web.MenuDataLoader, 
 
 	if mutator != nil {
 		server.SetMutator(mutator)
+		if mcpMgr, ok := mutator.(web.MCPManager); ok {
+			server.SetMCPManager(mcpMgr)
+		}
+		if skillsSvc, ok := mutator.(web.SkillsService); ok {
+			server.SetSkillsService(skillsSvc)
+		}
+		if pluginMgr, ok := mutator.(web.PluginManager); ok {
+			server.SetPluginManager(pluginMgr)
+		}
+	}
+	if !server.HasMCPManager() {
+		server.SetMCPManager(web.NewDefaultMCPManager())
+	}
+	if !server.HasPluginManager() {
+		server.SetPluginManager(web.NewDefaultPluginManager())
 	}
 
 	return server, nil

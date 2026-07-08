@@ -38,21 +38,17 @@ pre-push:
       run: python3 -c "import yaml; yaml.safe_load(open('.claude/release-tests.yaml'))"
       tags: [quality, manifest]
 
-# Fast pre-commit checks. golangci-lint is scoped to new issues so existing
-# lint debt does not make every commit impossible, while newly introduced
-# findings are blocked before they enter history.
+# CI-aligned pre-commit checks. This intentionally runs the same gate classes
+# that block GitHub Actions for touched paths (full race tests/lint/security for
+# Go, web unit/e2e/parity for web, Lighthouse budgets for web performance).
+# It is expensive by design: fail before commit/push, not after CI minutes are
+# already burned.
 pre-commit:
   piped: true
   commands:
-    fmt-check:
-      glob: "*.go"
-      run: test -z "$(gofmt -l . | grep -v -E '^(\.worktrees/|\.claude/worktrees/)')" || (echo "Run 'go fmt ./...' to fix formatting" && gofmt -l . | grep -v -E '^(\.worktrees/|\.claude/worktrees/)' && exit 1)
-      tags: [quality]
     golangci-lint-new:
-      glob: "*.go"
       run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX make lint-new
-      tags: [quality, lint]
-    vet:
-      glob: "*.go"
-      run: go vet ./...
       tags: [quality]
+    local-ci-gate:
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX scripts/precommit-ci-gate.sh
+      tags: [quality, lint, security, test, web, lighthouse]

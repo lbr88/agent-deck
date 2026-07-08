@@ -15,6 +15,7 @@ import { menuModelSignal } from './dataModel.js'
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
 import { displayLabelForTool, resolveEditSessionPickerTools } from './pickerTools.js'
+import { refreshMenuSnapshot } from './menuRefresh.js'
 
 // Build PATCH body from form state. Only includes fields that differ from
 // the original — mirrors the TUI EditSessionDialog.GetChanges diff logic so
@@ -95,6 +96,7 @@ export function EditSessionDialog() {
     setSubmitting(true)
     try {
       await apiFetch('PATCH', `/api/sessions/${encodeURIComponent(session.id)}`, updates)
+      await refreshMenuSnapshot()
       close()
     } catch (err) {
       setError(err.message || String(err))
@@ -148,7 +150,7 @@ export function EditSessionDialog() {
           </div>
           <div class="field">
             <label>TOOL (restart required)</label>
-            <div class="seg-row">
+            <div class="seg-row tool-picker-row">
               ${shownTools.map(t => html`
                 <button type="button" key=${t}
                         class=${`seg-btn ${tool === t ? 'on' : ''}`}

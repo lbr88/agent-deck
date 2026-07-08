@@ -49,7 +49,7 @@ test.describe('tool visibility — new-session picker UI', () => {
 
     expect(normalized).toContain('shell')
     for (const tool of settings.pickerTools) {
-      const display = tool === 'codex' ? 'ChatGPT' : tool
+      const display = tool === 'codex' ? 'Codex' : tool
       expect(normalized).toContain(display)
     }
     for (const hidden of settings.hiddenTools) {

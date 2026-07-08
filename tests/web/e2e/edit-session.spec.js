@@ -22,6 +22,9 @@ async function openEditDialog(page) {
   // attached to sess-001 (the fixture seed's first session).
   const firstSession = page.locator('.sess').first()
   await firstSession.click()
+  await firstSession.hover()
+  await firstSession.locator('[data-testid="session-more-btn"]').focus()
+  await expect(firstSession.locator('[data-testid="session-more-menu"]')).toBeVisible()
   await firstSession.locator('[data-testid="edit-session-btn"]').click()
   await page.waitForSelector('[data-testid="edit-session-dialog"]', { timeout: 5000 })
 }

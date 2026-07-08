@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -172,7 +173,8 @@ func (s *fixtureStore) seed() {
 		"sess-001": {
 			ID: "sess-001", Title: "agent-deck", Tool: "claude",
 			Status: session.StatusIdle, GroupPath: "work", ProjectPath: "/srv/agent-deck",
-			Order: 0, CreatedAt: now,
+			CanFork: true,
+			Order:   0, CreatedAt: now,
 			// Populate every promoted MenuSession field on a single session so
 			// parity-state's "at least one session carries this key" assertion
 			// passes for every row promoted out of MISSING in PARITY_MATRIX.md.
@@ -644,6 +646,56 @@ func (s *fixtureStore) ForkSession(parentID string) (string, error) {
 	return id, nil
 }
 
+func (s *fixtureStore) ForkSessionWithOptions(parentID string, req web.ForkSessionRequest) (string, error) {
+	s.mu.Lock()
+	parent, ok := s.sessions[parentID]
+	if !ok {
+		s.mu.Unlock()
+		return "", fmt.Errorf("parent session %q not found", parentID)
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = parent.Title + " (fork)"
+	}
+	groupPath := strings.Trim(strings.TrimSpace(req.GroupPath), "/")
+	if groupPath == "" {
+		groupPath = parent.GroupPath
+	}
+	if _, ok := s.groups[groupPath]; !ok {
+		parts := strings.Split(groupPath, "/")
+		s.groups[groupPath] = &web.MenuGroup{Name: parts[len(parts)-1], Path: groupPath, Order: len(s.groups)}
+	}
+	id := fmt.Sprintf("sess-%03d", s.nextID)
+	s.nextID++
+	child := &web.MenuSession{
+		ID: id, Title: title, Tool: parent.Tool,
+		Status: session.StatusIdle, GroupPath: groupPath, ProjectPath: parent.ProjectPath,
+		ParentSessionID: parentID, Order: len(s.order), CreatedAt: s.now(),
+	}
+	if req.Sandbox {
+		image := strings.TrimSpace(req.SandboxImage)
+		if image == "" && parent.Sandbox != nil {
+			image = parent.Sandbox.Image
+		}
+		if image == "" {
+			image = "fixture-sandbox:latest"
+		}
+		child.Sandbox = &session.SandboxConfig{Enabled: true, Image: image}
+	}
+	if req.Worktree {
+		child.WorktreeBranch = strings.TrimSpace(req.Branch)
+		if child.WorktreeBranch == "" {
+			child.WorktreeBranch = "fork/" + id
+		}
+		child.WorktreeRepoRoot = parent.WorktreeRepoRoot
+		child.WorktreePath = "/tmp/worktrees/" + id
+	}
+	s.sessions[id] = child
+	s.order = append(s.order, id)
+	s.mu.Unlock()
+	return id, nil
+}
+
 func (s *fixtureStore) CreateGroup(name, parentPath string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -677,6 +729,122 @@ func (s *fixtureStore) DeleteGroup(groupPath string) error {
 	}
 	delete(s.groups, groupPath)
 	return nil
+}
+
+func (s *fixtureStore) ReparentGroup(groupPath, destParentPath string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	destParentPath = strings.Trim(strings.TrimSpace(destParentPath), "/")
+	g, ok := s.groups[groupPath]
+	if !ok {
+		return "", fmt.Errorf("group %q not found", groupPath)
+	}
+	if destParentPath != "" {
+		if _, ok := s.groups[destParentPath]; !ok {
+			return "", fmt.Errorf("destination group %q not found", destParentPath)
+		}
+	}
+	name := strings.TrimSpace(g.Name)
+	if name == "" {
+		parts := strings.Split(groupPath, "/")
+		name = parts[len(parts)-1]
+	}
+	newPath := name
+	if destParentPath != "" {
+		newPath = destParentPath + "/" + name
+	}
+	if newPath == groupPath {
+		return newPath, nil
+	}
+	if _, exists := s.groups[newPath]; exists {
+		return "", fmt.Errorf("group %q already exists", newPath)
+	}
+	delete(s.groups, groupPath)
+	g.Path = newPath
+	s.groups[newPath] = g
+	oldPrefix := groupPath + "/"
+	newPrefix := newPath + "/"
+	for path, child := range s.groups {
+		if strings.HasPrefix(path, oldPrefix) {
+			delete(s.groups, path)
+			child.Path = newPrefix + strings.TrimPrefix(path, oldPrefix)
+			s.groups[child.Path] = child
+		}
+	}
+	for _, sess := range s.sessions {
+		switch {
+		case sess.GroupPath == groupPath:
+			sess.GroupPath = newPath
+		case strings.HasPrefix(sess.GroupPath, oldPrefix):
+			sess.GroupPath = newPrefix + strings.TrimPrefix(sess.GroupPath, oldPrefix)
+		}
+	}
+	return newPath, nil
+}
+
+func (s *fixtureStore) ReorderGroup(groupPath, direction string, position *int) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.groups[groupPath]
+	if !ok {
+		return 0, 0, fmt.Errorf("group %q not found", groupPath)
+	}
+	parent := parentGroupPath(groupPath)
+	siblings := make([]*web.MenuGroup, 0)
+	for _, group := range s.groups {
+		if parentGroupPath(group.Path) == parent {
+			siblings = append(siblings, group)
+		}
+	}
+	sort.SliceStable(siblings, func(i, j int) bool {
+		if siblings[i].Order == siblings[j].Order {
+			return siblings[i].Path < siblings[j].Path
+		}
+		return siblings[i].Order < siblings[j].Order
+	})
+	oldIndex := 0
+	for i, sibling := range siblings {
+		if sibling.Path == groupPath {
+			oldIndex = i
+			break
+		}
+	}
+	var newIndex int
+	if position != nil {
+		newIndex = *position
+	} else {
+		switch direction {
+		case "up":
+			newIndex = oldIndex - 1
+		case "down":
+			newIndex = oldIndex + 1
+		default:
+			return oldIndex, oldIndex, fmt.Errorf("invalid group reorder direction %q", direction)
+		}
+	}
+	if newIndex < 0 {
+		newIndex = 0
+	}
+	if newIndex >= len(siblings) {
+		newIndex = len(siblings) - 1
+	}
+	siblings = append(siblings[:oldIndex], siblings[oldIndex+1:]...)
+	siblings = append(siblings, nil)
+	copy(siblings[newIndex+1:], siblings[newIndex:])
+	siblings[newIndex] = g
+	for i, sibling := range siblings {
+		sibling.Order = i
+	}
+	return oldIndex, newIndex, nil
+}
+
+func parentGroupPath(path string) string {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[:idx]
+	}
+	return ""
 }
 
 // FinishWorktree implements web.SessionMutator for issue #1126. Without a
@@ -814,7 +982,7 @@ func indexOf(s string, c byte) int {
 
 // --- web.SkillsService -----------------------------------------------------
 
-// ListCatalog implements web.SkillsService.
+// ListCatalog implements the fixture's legacy skill catalog seam.
 func (s *fixtureStore) ListCatalog() ([]session.SkillCandidate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -823,7 +991,11 @@ func (s *fixtureStore) ListCatalog() ([]session.SkillCandidate, error) {
 	return out, nil
 }
 
-// ListAttached implements web.SkillsService.
+func (s *fixtureStore) ListSkillCatalog() ([]session.SkillCandidate, error) {
+	return s.ListCatalog()
+}
+
+// ListAttached implements the fixture's legacy skill attachment seam.
 func (s *fixtureStore) ListAttached(projectPath string) ([]session.ProjectSkillAttachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -832,7 +1004,19 @@ func (s *fixtureStore) ListAttached(projectPath string) ([]session.ProjectSkillA
 	return out, nil
 }
 
-// Attach implements web.SkillsService.
+func (s *fixtureStore) ListSessionSkills(_, projectPath string) (web.SkillSessionState, error) {
+	catalog, err := s.ListCatalog()
+	if err != nil {
+		return web.SkillSessionState{}, err
+	}
+	attached, err := s.ListAttached(projectPath)
+	if err != nil {
+		return web.SkillSessionState{}, err
+	}
+	return web.SkillSessionState{Catalog: catalog, Attached: attached}, nil
+}
+
+// Attach implements the fixture's legacy skill attachment seam.
 func (s *fixtureStore) Attach(projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -860,7 +1044,11 @@ func (s *fixtureStore) Attach(projectPath, tool, skillRef, source string) (*sess
 	return &att, nil
 }
 
-// Detach implements web.SkillsService.
+func (s *fixtureStore) AttachSkill(_, projectPath, tool, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+	return s.Attach(projectPath, tool, skillRef, source)
+}
+
+// Detach implements the fixture's legacy skill attachment seam.
 func (s *fixtureStore) Detach(projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -873,4 +1061,8 @@ func (s *fixtureStore) Detach(projectPath, skillRef, source string) (*session.Pr
 		}
 	}
 	return nil, fmt.Errorf("%w: %s", session.ErrSkillNotAttached, skillRef)
+}
+
+func (s *fixtureStore) DetachSkill(_, projectPath, skillRef, source string) (*session.ProjectSkillAttachment, error) {
+	return s.Detach(projectPath, skillRef, source)
 }

@@ -9,17 +9,16 @@ import (
 // Issue #896 sub-bug 3 (paskal's enumeration): the path-suggestions popup is
 // visible after typing a prefix, but pressing Enter does NOT select the
 // highlighted suggestion — it submits whatever value is in the input. The
-// popup looks interactive but Enter ignores it.
+// picker selection looks interactive but Enter ignores it.
 //
 // Root cause: home.go's Enter handler only intercepts when
 // IsSuggestionsActive() is true, which today requires the user to first press
 // Space or Ctrl+N to enter "arrow-key mode". Plain arrow keys on a freshly
 // shown popup do not activate it — they move dialog focus instead.
 //
-// Fix contract verified here: once the user presses Down on a visible popup,
-// the popup becomes active and the highlighted real suggestion is the one
-// that gets applied (i.e. ApplyHighlightedSuggestion writes it to pathInput).
-// home.go's existing Enter handler then submits with that path.
+// Current contract verified here: plain Up/Down are reserved for form
+// navigation; Ctrl+N/Ctrl+P explicitly enter suggestion navigation and the
+// highlighted real suggestion is the one that gets applied.
 func TestNewDialog_PopupEnter_SelectsHighlightedSuggestion_RegressionFor896(t *testing.T) {
 	d := NewNewDialog()
 	d.Show()
@@ -43,21 +42,21 @@ func TestNewDialog_PopupEnter_SelectsHighlightedSuggestion_RegressionFor896(t *t
 	d.pathInput.Focus()
 	d.pathSoftSelected = false
 
-	// User presses Down twice — cursor should advance through:
+	// User presses Ctrl+N twice — cursor should advance through:
 	//   0 ("Type custom") -> 1 (/p/alpha) -> 2 (/p/beta)
-	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
-	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyDown})
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
 
 	// Precondition for the Enter handler in home.go: popup must be active so
 	// IsSuggestionsActive() is true and apply-highlighted runs.
 	if !d.IsSuggestionsActive() {
-		t.Fatalf("after Down arrows on visible popup, IsSuggestionsActive()=false; home.go's Enter handler will be skipped and form will submit with typed value (issue #896 sub-bug 3)")
+		t.Fatalf("after Ctrl+N on path suggestions, IsSuggestionsActive()=false; home.go's Enter handler will be skipped and form will submit with typed value")
 	}
 	if d.IsTypeCustomHighlighted() {
-		t.Fatalf("after 2 Down arrows, Type-custom is highlighted; cursor=%d, expected to be on a real suggestion", d.pathSuggestionCursor)
+		t.Fatalf("after 2 Ctrl+N presses, Type-custom is highlighted; cursor=%d, expected to be on a real suggestion", d.pathSuggestionCursor)
 	}
 	if got := d.pathSuggestionCursor; got != 2 {
-		t.Fatalf("after 2 Down arrows, pathSuggestionCursor=%d, want 2 (second real suggestion)", got)
+		t.Fatalf("after 2 Ctrl+N presses, pathSuggestionCursor=%d, want 2 (second real suggestion)", got)
 	}
 
 	// Now simulate exactly what home.handleNewDialogKey does on Enter when the
@@ -86,13 +85,12 @@ func TestNewDialog_PopupEnter_SelectsHighlightedSuggestion_RegressionFor896(t *t
 // operate using ctrl+n and space".
 //
 // Root cause: when the popup is visible on the path field, Up/Down arrow
-// keys are NOT routed to the popup unless suggestionsActive=true. The user
-// has to press Space (or Right) first to enter arrow-key mode, otherwise
-// arrows move dialog focus between fields. From the user's perspective,
-// arrows on a visible popup do nothing useful.
+// keys are routed to the popup only after suggestionsActive=true. That keeps
+// normal field navigation predictable while preserving reliable arrows once
+// the picker has been explicitly opened.
 //
-// Fix contract: arrows on a visible popup over the path field must navigate
-// the popup cursor reliably from press 1, no off-by-one, no skipped frames,
+// Contract: arrows on an explicitly opened path picker must navigate the
+// popup cursor reliably from press 1, no off-by-one, no skipped frames,
 // wrap-around at the ends.
 func TestNewDialog_PopupArrows_NavigateReliably_RegressionFor896(t *testing.T) {
 	d := NewNewDialog()
@@ -111,15 +109,14 @@ func TestNewDialog_PopupArrows_NavigateReliably_RegressionFor896(t *testing.T) {
 	d.pathInput.Focus()
 	d.pathSoftSelected = false
 
-	// Popup is visible because path is focused, suggestions are non-empty,
-	// and suggestionsHidden is false (default after Show + SetPathSuggestions).
-	if d.suggestionsHidden {
-		t.Fatalf("test precondition: suggestionsHidden=true but popup should be visible")
+	// Explicitly open the picker before using arrow-key navigation.
+	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !d.IsSuggestionsActive() {
+		t.Fatalf("test precondition: Enter should activate path suggestions")
 	}
 
 	// Press Down — cursor space is: 0 ("Type custom"), 1..3 (real suggestions).
-	// On a visible popup, Down must navigate the popup; today it advances
-	// focusIndex instead, leaving the popup unmoved.
+	// On an active picker, Down must navigate the popup instead of moving form focus.
 	steps := []struct {
 		key      tea.KeyType
 		wantCur  int
@@ -139,7 +136,7 @@ func TestNewDialog_PopupArrows_NavigateReliably_RegressionFor896(t *testing.T) {
 		d, _ = d.Update(tea.KeyMsg{Type: s.key})
 
 		if !d.IsSuggestionsActive() {
-			t.Fatalf("step %d (%s): popup arrow did not activate suggestions; user has to fall back to Ctrl+N (issue #896 sub-bug 4)", i, s.wantName)
+			t.Fatalf("step %d (%s): popup arrow deactivated suggestions", i, s.wantName)
 		}
 		if d.pathSuggestionCursor != s.wantCur {
 			t.Fatalf("step %d (%s): pathSuggestionCursor=%d, want %d (issue #896 sub-bug 4: arrow navigation flaky)",

@@ -7,13 +7,13 @@ import { Icon, ICONS } from './icons.js'
 import { groupNameDialogSignal } from './state.js'
 import { apiFetch } from './api.js'
 
-export function GroupNameDialog({ mode, groupPath, currentName, onSubmit }) {
+export function GroupNameDialog({ mode, groupPath, parentPath, currentName, onSubmit }) {
   const [name, setName] = useState(currentName || '')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
   const isCreate = mode === 'create'
-  const dialogTitle = isCreate ? 'New group' : 'Rename group'
+  const dialogTitle = isCreate ? (parentPath ? 'New subgroup' : 'New group') : 'Rename group'
   const submitLabel = isCreate ? 'Create' : 'Rename'
   const close = () => (groupNameDialogSignal.value = null)
 
@@ -23,7 +23,7 @@ export function GroupNameDialog({ mode, groupPath, currentName, onSubmit }) {
     setSubmitting(true)
     try {
       if (isCreate) {
-        await apiFetch('POST', '/api/groups', { name })
+        await apiFetch('POST', '/api/groups', { name, parentPath: parentPath || '' })
       } else {
         await apiFetch('PATCH', '/api/groups/' + encodeURIComponent(groupPath), { name })
       }
@@ -53,6 +53,12 @@ export function GroupNameDialog({ mode, groupPath, currentName, onSubmit }) {
             <label>NAME</label>
             <input autofocus required value=${name} onInput=${e => setName(e.target.value)} placeholder="my-group"/>
           </div>
+          ${isCreate && parentPath && html`
+            <div class="field">
+              <label>PARENT</label>
+              <input readonly value=${parentPath}/>
+            </div>
+          `}
           ${error && html`
             <div style="font-family: var(--mono); font-size: 11.5px; color: var(--tn-red); padding: 8px 10px;
                         border: 1px solid rgba(247,118,142,0.3); border-radius: 4px; background: rgba(247,118,142,0.06);">

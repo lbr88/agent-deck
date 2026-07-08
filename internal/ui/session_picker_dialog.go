@@ -16,8 +16,101 @@ type SessionPickerDialog struct {
 	visible       bool
 	width, height int
 	sessions      []*session.Instance // Filtered target sessions (excludes source)
+	targets       []sendOutputTarget
 	cursor        int
 	sourceSession *session.Instance
+	sourceTarget  sendOutputTarget
+}
+
+type sendOutputTargetKind int
+
+const (
+	sendOutputTargetLocal sendOutputTargetKind = iota
+	sendOutputTargetHub
+)
+
+type sendOutputTarget struct {
+	kind         sendOutputTargetKind
+	local        *session.Instance
+	hubNodeID    string
+	hubNodeName  string
+	hubSessionID string
+	title        string
+	tool         string
+	status       session.Status
+}
+
+func localSendOutputTarget(inst *session.Instance) sendOutputTarget {
+	if inst == nil {
+		return sendOutputTarget{}
+	}
+	return sendOutputTarget{
+		kind:   sendOutputTargetLocal,
+		local:  inst,
+		title:  inst.Title,
+		tool:   inst.Tool,
+		status: inst.GetStatusThreadSafe(),
+	}
+}
+
+func hubSendOutputTarget(nodeID, nodeName string, hs *session.HubSessionInfo) sendOutputTarget {
+	if hs == nil {
+		return sendOutputTarget{}
+	}
+	return sendOutputTarget{
+		kind:         sendOutputTargetHub,
+		hubNodeID:    nodeID,
+		hubNodeName:  nodeName,
+		hubSessionID: hs.ID,
+		title:        hs.Title,
+		tool:         hs.Tool,
+		status:       session.Status(hs.Status),
+	}
+}
+
+func (t sendOutputTarget) isZero() bool {
+	return t.local == nil && t.hubSessionID == "" && t.title == ""
+}
+
+func (t sendOutputTarget) sameSession(other sendOutputTarget) bool {
+	if t.kind != other.kind {
+		return false
+	}
+	switch t.kind {
+	case sendOutputTargetLocal:
+		return t.local != nil && other.local != nil && t.local.ID == other.local.ID
+	case sendOutputTargetHub:
+		return t.hubNodeID == other.hubNodeID && t.hubSessionID == other.hubSessionID
+	default:
+		return false
+	}
+}
+
+func (t sendOutputTarget) displayTitle() string {
+	title := strings.TrimSpace(t.title)
+	if title == "" {
+		switch t.kind {
+		case sendOutputTargetLocal:
+			if t.local != nil {
+				title = t.local.ID
+			}
+		case sendOutputTargetHub:
+			title = t.hubSessionID
+		}
+	}
+	if t.kind == sendOutputTargetHub {
+		node := strings.TrimSpace(t.hubNodeName)
+		if node == "" {
+			node = strings.TrimSpace(t.hubNodeID)
+		}
+		if node != "" && title != "" {
+			return fmt.Sprintf("%s/%s", node, title)
+		}
+		if node != "" {
+			return node
+		}
+	}
+	return title
 }
 
 // NewSessionPickerDialog creates a new session picker dialog.
@@ -30,10 +123,12 @@ func NewSessionPickerDialog() *SessionPickerDialog {
 func (d *SessionPickerDialog) Show(source *session.Instance, allInstances []*session.Instance) {
 	d.visible = true
 	d.sourceSession = source
+	d.sourceTarget = localSendOutputTarget(source)
 	d.cursor = 0
 
 	// Filter: exclude source session and error-status sessions
 	d.sessions = nil
+	d.targets = nil
 	for _, inst := range allInstances {
 		if inst.ID == source.ID {
 			continue
@@ -42,6 +137,28 @@ func (d *SessionPickerDialog) Show(source *session.Instance, allInstances []*ses
 			continue
 		}
 		d.sessions = append(d.sessions, inst)
+		d.targets = append(d.targets, localSendOutputTarget(inst))
+	}
+}
+
+func (d *SessionPickerDialog) ShowTargets(source sendOutputTarget, targets []sendOutputTarget) {
+	d.visible = true
+	d.sourceSession = source.local
+	d.sourceTarget = source
+	d.cursor = 0
+	d.sessions = nil
+	d.targets = nil
+	for _, target := range targets {
+		if target.isZero() || target.sameSession(source) {
+			continue
+		}
+		if target.status == session.StatusError || target.status == session.StatusStopped {
+			continue
+		}
+		d.targets = append(d.targets, target)
+		if target.local != nil {
+			d.sessions = append(d.sessions, target.local)
+		}
 	}
 }
 
@@ -50,7 +167,9 @@ func (d *SessionPickerDialog) Hide() {
 	d.visible = false
 	d.cursor = 0
 	d.sourceSession = nil
+	d.sourceTarget = sendOutputTarget{}
 	d.sessions = nil
+	d.targets = nil
 }
 
 // IsVisible returns whether the dialog is currently shown.
@@ -66,15 +185,27 @@ func (d *SessionPickerDialog) SetSize(w, h int) {
 
 // GetSelected returns the session at the current cursor position, or nil.
 func (d *SessionPickerDialog) GetSelected() *session.Instance {
-	if len(d.sessions) == 0 || d.cursor >= len(d.sessions) {
+	target := d.GetSelectedTarget()
+	if target.local == nil {
 		return nil
 	}
-	return d.sessions[d.cursor]
+	return target.local
+}
+
+func (d *SessionPickerDialog) GetSelectedTarget() sendOutputTarget {
+	if len(d.targets) == 0 || d.cursor >= len(d.targets) {
+		return sendOutputTarget{}
+	}
+	return d.targets[d.cursor]
 }
 
 // GetSource returns the source session.
 func (d *SessionPickerDialog) GetSource() *session.Instance {
 	return d.sourceSession
+}
+
+func (d *SessionPickerDialog) GetSourceTarget() sendOutputTarget {
+	return d.sourceTarget
 }
 
 // Update handles key events for the picker.
@@ -134,21 +265,23 @@ func (d *SessionPickerDialog) View() string {
 	sourceName := "unknown"
 	if d.sourceSession != nil {
 		sourceName = d.sourceSession.Title
+	} else if !d.sourceTarget.isZero() {
+		sourceName = d.sourceTarget.displayTitle()
 	}
 	lines = append(lines, sourceStyle.Render(fmt.Sprintf("Source: \"%s\"", sourceName)))
 	lines = append(lines, "")
 
-	if len(d.sessions) == 0 {
+	if len(d.targets) == 0 {
 		lines = append(lines, normalStyle.Render("No sessions available"))
 	} else {
-		for i, inst := range d.sessions {
-			indicator := statusIndicator(inst.Status)
+		for i, target := range d.targets {
+			indicator := statusIndicator(target.status)
 			tool := ""
-			if inst.Tool != "" {
-				tool = fmt.Sprintf(" (%s)", inst.Tool)
+			if target.tool != "" {
+				tool = fmt.Sprintf(" (%s)", target.tool)
 			}
 
-			label := fmt.Sprintf("%s %s%s", indicator, inst.Title, tool)
+			label := fmt.Sprintf("%s %s%s", indicator, target.displayTitle(), tool)
 			if i == d.cursor {
 				lines = append(lines, "> "+selectedStyle.Render(label))
 			} else {

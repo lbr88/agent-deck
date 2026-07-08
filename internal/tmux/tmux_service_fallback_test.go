@@ -24,14 +24,13 @@ func TestStart_Service_SuccessPath(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skipf("no tmux binary available: %v", err)
 	}
-	if _, err := exec.LookPath("systemd-run"); err != nil {
-		t.Skipf("no systemd-run available: %v", err)
-	}
-
 	original := execCommand
 	var calls []string
 	execCommand = func(name string, arg ...string) *exec.Cmd {
 		calls = append(calls, name)
+		if name == "systemd-run" {
+			return exec.Command("tmux", stripSystemdRunPrefix(arg)...)
+		}
 		return exec.Command(name, arg...)
 	}
 	t.Cleanup(func() { execCommand = original })

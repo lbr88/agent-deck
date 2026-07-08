@@ -68,16 +68,58 @@ type Item struct {
 // Hub node. It intentionally lives in session instead of importing internal/hub,
 // because the hub client already depends on session for local snapshot sources.
 type HubSessionInfo struct {
-	ID               string
-	Title            string
-	Tool             string
-	Status           string
-	GroupPath        string
-	ProjectPath      string
-	Notes            string
-	DisplaySessionID string
-	CanFork          bool
-	ArchivedAt       *time.Time
+	ID                        string
+	Title                     string
+	Tool                      string
+	Status                    string
+	Substate                  string
+	GroupPath                 string
+	ProjectPath               string
+	ParentSessionID           string
+	IsConductor               bool
+	Windows                   []HubWindowInfo
+	Command                   string
+	Wrapper                   string
+	TmuxSession               string
+	TmuxSocketName            string
+	Color                     string
+	ClaudeSessionID           string
+	GeminiSessionID           string
+	GeminiModel               string
+	GeminiYoloMode            *bool
+	OpenCodeSessionID         string
+	CodexSessionID            string
+	LatestPrompt              string
+	AdditionalPaths           []string
+	MultiRepoEnabled          bool
+	MultiRepoTempDir          string
+	MultiRepoWorktrees        []MultiRepoWorktree
+	WorktreePath              string
+	WorktreeRepoRoot          string
+	WorktreeBranch            string
+	Notes                     string
+	LoadedMCPNames            []string
+	Plugins                   []string
+	Channels                  []string
+	PluginChannelLinkDisabled bool
+	ExtraArgs                 []string
+	ToolOptionsJSON           []byte
+	Sandbox                   *SandboxConfig
+	SandboxContainer          string
+	SSHHost                   string
+	SSHRemotePath             string
+	TitleLocked               bool
+	NoTransitionNotify        bool
+	DisplaySessionID          string
+	CanFork                   bool
+	ArchivedAt                *time.Time
+}
+
+type HubWindowInfo struct {
+	Index    int
+	Name     string
+	Activity int64
+	Tool     string
 }
 
 // Group represents a group of sessions

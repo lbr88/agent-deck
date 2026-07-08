@@ -17,6 +17,9 @@
 import net from 'node:net'
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 async function pickEphemeralPort() {
   return new Promise((resolve, reject) => {
@@ -35,7 +38,20 @@ const token = randomBytes(16).toString('hex')
 
 console.log(`[run-e2e] AGENT_DECK_WEB_PORT=${port} AGENT_DECK_FIXTURE_TOKEN=${token.slice(0, 8)}…`)
 
-const result = spawnSync('npx', ['playwright', 'test', ...process.argv.slice(2)], {
+const here = dirname(fileURLToPath(import.meta.url))
+const webRoot = join(here, '..')
+const localPlaywright = join(
+  webRoot,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'playwright.cmd' : 'playwright',
+)
+const command = existsSync(localPlaywright) ? localPlaywright : 'npx'
+const args = command === localPlaywright
+  ? ['test', ...process.argv.slice(2)]
+  : ['playwright', 'test', ...process.argv.slice(2)]
+
+const result = spawnSync(command, args, {
   stdio: 'inherit',
   env: {
     ...process.env,

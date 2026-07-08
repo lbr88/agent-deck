@@ -37,7 +37,7 @@ func (f *fixtureMCPManager) ListCatalog() []web.MCPCatalogEntry {
 	return append([]web.MCPCatalogEntry(nil), f.catalog...)
 }
 
-func (f *fixtureMCPManager) ListAttached(projectPath string) (map[string][]string, error) {
+func (f *fixtureMCPManager) ListAttached(_, projectPath string) (map[string][]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make(map[string][]string, 3)
@@ -53,7 +53,7 @@ func (f *fixtureMCPManager) ListAttached(projectPath string) (map[string][]strin
 	return out, nil
 }
 
-func (f *fixtureMCPManager) Attach(projectPath, name, scope string) error {
+func (f *fixtureMCPManager) Attach(_, projectPath, name, scope string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.attached[projectPath] == nil {
@@ -68,7 +68,7 @@ func (f *fixtureMCPManager) Attach(projectPath, name, scope string) error {
 	return nil
 }
 
-func (f *fixtureMCPManager) Detach(projectPath, name, scope string) error {
+func (f *fixtureMCPManager) Detach(_, projectPath, name, scope string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.attached[projectPath] == nil {
@@ -85,11 +85,11 @@ func (f *fixtureMCPManager) Detach(projectPath, name, scope string) error {
 	return nil
 }
 
-func (f *fixtureMCPManager) Move(projectPath, name, fromScope, toScope string) error {
-	if err := f.Detach(projectPath, name, fromScope); err != nil {
+func (f *fixtureMCPManager) Move(sessionID, projectPath, name, fromScope, toScope string) error {
+	if err := f.Detach(sessionID, projectPath, name, fromScope); err != nil {
 		return err
 	}
-	return f.Attach(projectPath, name, toScope)
+	return f.Attach(sessionID, projectPath, name, toScope)
 }
 
 // Reset clears all attached MCPs (called by /__fixture/reset).

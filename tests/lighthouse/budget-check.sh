@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lighthouse CI local budget check.
 # Runs lhci collect + assert against .lighthouserc.json.
-# Requires: make build (Go binary), npx (Node.js).
+# Requires: make build (Go binary), Node.js plus npx or pnpm.
 #
 # Usage:
 #   ./tests/lighthouse/budget-check.sh
@@ -44,8 +44,13 @@ if [ ! -x "$BINARY" ]; then
   exit 2
 fi
 
-if ! command -v npx &>/dev/null; then
-  echo "ERROR: npx not found. Install Node.js (>= 18) first."
+if command -v npx &>/dev/null; then
+  LHCI_CMD=(npx "@lhci/cli@${LHCI_VERSION}")
+elif command -v pnpm &>/dev/null; then
+  echo "[budget-check] npx not found; using pnpm dlx @lhci/cli@${LHCI_VERSION}."
+  LHCI_CMD=(pnpm dlx "@lhci/cli@${LHCI_VERSION}")
+else
+  echo "ERROR: npx not found and pnpm fallback is unavailable. Install Node.js (>= 18) or pnpm first."
   exit 2
 fi
 
@@ -77,11 +82,11 @@ sleep 1
 # --- Run Lighthouse CI ---
 
 echo "[budget-check] Running lhci collect (${LHCI_VERSION})..."
-npx "@lhci/cli@${LHCI_VERSION}" collect --config="$CONFIG"
+"${LHCI_CMD[@]}" collect --config="$CONFIG"
 
 echo "[budget-check] Running lhci assert..."
 ASSERT_EXIT=0
-npx "@lhci/cli@${LHCI_VERSION}" assert --config="$CONFIG" || ASSERT_EXIT=$?
+"${LHCI_CMD[@]}" assert --config="$CONFIG" || ASSERT_EXIT=$?
 
 if [ "$ASSERT_EXIT" -eq 0 ]; then
   echo "[budget-check] All assertions passed."

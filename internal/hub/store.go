@@ -80,10 +80,11 @@ type Node struct {
 }
 
 type NodeSessions struct {
-	Node     Node
-	SentAt   time.Time
-	Sessions []SessionInfo
-	Groups   []GroupInfo
+	Node         Node
+	SentAt       time.Time
+	WebAvailable bool
+	Sessions     []SessionInfo
+	Groups       []GroupInfo
 }
 
 type TrustRequest struct {
@@ -635,10 +636,11 @@ func (s *Store) LatestSessions() ([]NodeSessions, error) {
 			}
 		}
 		out = append(out, NodeSessions{
-			Node:     node,
-			SentAt:   sentAt,
-			Sessions: snapshot.Sessions,
-			Groups:   snapshot.Groups,
+			Node:         node,
+			SentAt:       sentAt,
+			WebAvailable: snapshot.WebAvailable,
+			Sessions:     snapshot.Sessions,
+			Groups:       snapshot.Groups,
 		})
 	}
 	if err := rows.Err(); err != nil {

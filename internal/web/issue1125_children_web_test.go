@@ -113,6 +113,29 @@ func TestSessionChildren_HappyPath_TwoDirectChildren(t *testing.T) {
 	}
 }
 
+func TestSessionChildren_HubIDsUseProjectedParentIDs(t *testing.T) {
+	parentID := HubSessionWebID("node_server", "cond")
+	childID := HubSessionWebID("node_server", "worker")
+	srv := newChildrenTestServer(&MenuSnapshot{
+		Profile: "test",
+		Items: []MenuItem{
+			{Type: MenuItemTypeSession, Session: &MenuSession{ID: parentID, Title: "remote conductor", Source: "hub", HubNodeID: "node_server", HubSessionID: "cond", IsConductor: true, Status: session.StatusRunning, Tool: "claude"}},
+			{Type: MenuItemTypeSession, Session: &MenuSession{ID: childID, Title: "remote worker", Source: "hub", HubNodeID: "node_server", HubSessionID: "worker", ParentSessionID: parentID, Status: session.StatusRunning, Tool: "claude"}},
+		},
+	})
+
+	rr, body := getChildren(t, srv, parentID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if body.SessionID != parentID {
+		t.Fatalf("sessionId = %q, want %q", body.SessionID, parentID)
+	}
+	if len(body.Children) != 1 || body.Children[0].ID != childID {
+		t.Fatalf("hub children = %+v, want one child %q", body.Children, childID)
+	}
+}
+
 // Boundary — deep nesting (conductor → conductor → claude) renders
 // recursively. The grandchild MUST appear under its parent, not at the
 // top level.

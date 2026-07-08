@@ -62,7 +62,11 @@ func (s *Server) handleSessionWorktreeFinish(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.notifyMenuChanged()
+	if _, _, ok := ParseHubSessionWebID(sessionID); ok {
+		s.notifyMenuChangedWithoutInvalidation()
+	} else {
+		s.notifyMenuChanged()
+	}
 	writeJSON(w, http.StatusOK, WorktreeFinishResponse{
 		SessionID:     result.SessionID,
 		Branch:        result.Branch,

@@ -2,6 +2,11 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -32,9 +37,27 @@ type AttachBackend interface {
 	Open(ctx context.Context, sessionID string, size TerminalSize) (AttachStream, error)
 }
 
+type AttachWindowBackend interface {
+	OpenWindow(ctx context.Context, sessionID string, windowIndex int, size TerminalSize) (AttachStream, error)
+}
+
 type TmuxAttachBackend struct {
 	Profile string
 }
+
+type tmuxAttachTarget struct {
+	SocketName  string `json:"socket,omitempty"`
+	SessionName string `json:"session"`
+	ExpiresAt   int64  `json:"exp"`
+}
+
+const tmuxAttachTokenPrefix = "tmuxattach:" // #nosec G101 -- protocol prefix, not a credential.
+
+var (
+	tmuxAttachTokenSecretOnce sync.Once
+	tmuxAttachTokenSecret     []byte
+	tmuxAttachTokenSecretErr  error
+)
 
 func NewTmuxAttachBackend(profile string) TmuxAttachBackend {
 	return TmuxAttachBackend{Profile: profile}
@@ -44,6 +67,29 @@ func (b TmuxAttachBackend) Open(ctx context.Context, sessionID string, size Term
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	return b.open(ctx, sessionID, nil, size)
+}
+
+func (b TmuxAttachBackend) OpenWindow(ctx context.Context, sessionID string, windowIndex int, size TerminalSize) (AttachStream, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if windowIndex < 0 {
+		return nil, fmt.Errorf("tmux window index must be non-negative")
+	}
+	return b.open(ctx, sessionID, &windowIndex, size)
+}
+
+func (b TmuxAttachBackend) open(ctx context.Context, sessionID string, windowIndex *int, size TerminalSize) (AttachStream, error) {
+	if target, ok, err := parseTmuxAttachToken(sessionID); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		if windowIndex != nil {
+			return nil, fmt.Errorf("tmux attach token does not support window selection")
+		}
+		return openTmuxAttachTarget(ctx, target, size)
+	}
 	row, err := b.findSession(sessionID)
 	if err != nil {
 		return nil, err
@@ -51,12 +97,40 @@ func (b TmuxAttachBackend) Open(ctx context.Context, sessionID string, size Term
 	if strings.TrimSpace(row.TmuxSession) == "" {
 		return nil, fmt.Errorf("session %q has no tmux session", sessionID)
 	}
-	if err := tmux.ExecContext(ctx, row.TmuxSocketName, "has-session", "-t", row.TmuxSession).Run(); err != nil {
-		return nil, fmt.Errorf("tmux session %q is not available: %w", row.TmuxSession, err)
+	target := tmuxAttachTarget{SocketName: row.TmuxSocketName, SessionName: row.TmuxSession}
+	if windowIndex != nil {
+		if err := selectTmuxAttachWindow(ctx, target, *windowIndex); err != nil {
+			return nil, err
+		}
 	}
+	return openTmuxAttachTarget(ctx, target, size)
+}
 
+func selectTmuxAttachWindow(ctx context.Context, target tmuxAttachTarget, windowIndex int) error {
+	sessionName := strings.TrimSpace(target.SessionName)
+	if sessionName == "" {
+		return fmt.Errorf("tmux attach target session is required")
+	}
+	if windowIndex < 0 {
+		return fmt.Errorf("tmux window index must be non-negative")
+	}
+	tmuxTarget := fmt.Sprintf("%s:%d", sessionName, windowIndex)
+	if err := tmux.ExecContext(ctx, target.SocketName, "select-window", "-t", tmuxTarget).Run(); err != nil {
+		return fmt.Errorf("select tmux window %s: %w", tmuxTarget, err)
+	}
+	return nil
+}
+
+func openTmuxAttachTarget(ctx context.Context, target tmuxAttachTarget, size TerminalSize) (AttachStream, error) {
+	sessionName := strings.TrimSpace(target.SessionName)
+	if sessionName == "" {
+		return nil, fmt.Errorf("tmux attach target session is required")
+	}
+	if err := tmux.ExecContext(ctx, target.SocketName, "has-session", "-t", sessionName).Run(); err != nil {
+		return nil, fmt.Errorf("tmux session %q is not available: %w", sessionName, err)
+	}
 	attachCtx, cancel := context.WithCancel(ctx)
-	cmd := hubTmuxAttachCommand(attachCtx, row.TmuxSocketName, row.TmuxSession)
+	cmd := hubTmuxAttachCommand(attachCtx, target.SocketName, sessionName)
 	ptmx, err := startPTYWithSize(cmd, size)
 	if err != nil {
 		cancel()
@@ -78,6 +152,82 @@ func (b TmuxAttachBackend) Open(ctx context.Context, sessionID string, size Term
 		close(stream.waitDone)
 	}()
 	return stream, nil
+}
+
+func newTmuxAttachToken(socketName, sessionName string, ttl time.Duration) (string, error) {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return "", fmt.Errorf("tmux attach token session is required")
+	}
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	payload := tmuxAttachTarget{
+		SocketName:  strings.TrimSpace(socketName),
+		SessionName: sessionName,
+		ExpiresAt:   time.Now().Add(ttl).Unix(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	secret, err := tmuxAttachTokenSigningSecret()
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(raw)
+	return tmuxAttachTokenPrefix + base64.RawURLEncoding.EncodeToString(raw) + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func parseTmuxAttachToken(token string) (tmuxAttachTarget, bool, error) {
+	token = strings.TrimSpace(token)
+	if !strings.HasPrefix(token, tmuxAttachTokenPrefix) {
+		return tmuxAttachTarget{}, false, nil
+	}
+	encoded := strings.TrimPrefix(token, tmuxAttachTokenPrefix)
+	parts := strings.Split(encoded, ".")
+	if len(parts) != 2 {
+		return tmuxAttachTarget{}, true, fmt.Errorf("invalid tmux attach token")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return tmuxAttachTarget{}, true, fmt.Errorf("decode tmux attach token: %w", err)
+	}
+	gotSig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return tmuxAttachTarget{}, true, fmt.Errorf("decode tmux attach token signature: %w", err)
+	}
+	secret, err := tmuxAttachTokenSigningSecret()
+	if err != nil {
+		return tmuxAttachTarget{}, true, err
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(raw)
+	if !hmac.Equal(gotSig, mac.Sum(nil)) {
+		return tmuxAttachTarget{}, true, fmt.Errorf("invalid tmux attach token signature")
+	}
+	var payload tmuxAttachTarget
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return tmuxAttachTarget{}, true, fmt.Errorf("decode tmux attach token payload: %w", err)
+	}
+	if strings.TrimSpace(payload.SessionName) == "" {
+		return tmuxAttachTarget{}, true, fmt.Errorf("tmux attach token missing session")
+	}
+	if payload.ExpiresAt > 0 && time.Now().Unix() > payload.ExpiresAt {
+		return tmuxAttachTarget{}, true, fmt.Errorf("tmux attach token expired")
+	}
+	return payload, true, nil
+}
+
+func tmuxAttachTokenSigningSecret() ([]byte, error) {
+	tmuxAttachTokenSecretOnce.Do(func() {
+		tmuxAttachTokenSecret = make([]byte, 32)
+		if _, err := rand.Read(tmuxAttachTokenSecret); err != nil {
+			tmuxAttachTokenSecretErr = fmt.Errorf("generate tmux attach token secret: %w", err)
+		}
+	})
+	return tmuxAttachTokenSecret, tmuxAttachTokenSecretErr
 }
 
 func hubTmuxAttachCommand(ctx context.Context, socketName, sessionName string) *exec.Cmd {

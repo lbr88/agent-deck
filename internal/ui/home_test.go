@@ -3096,9 +3096,9 @@ func TestCuratedFooterLiveSessionShowsAttach(t *testing.T) {
 
 func TestCuratedFooterCapsContextHints(t *testing.T) {
 	home := curatedHome()
-	// A forkable live session would offer attach/restart/fork; verify the
-	// curated footer caps context hints at maxCuratedContextHints and never
-	// exceeds it once settings/help are appended.
+	// A forkable live session offers attach/restart/fork. Verify the curated
+	// footer never pads extra filler hints just to hit maxCuratedContextHints,
+	// and never exceeds it once settings/help are appended.
 	home.flatItems = []session.Item{
 		{Type: session.ItemTypeSession, Session: &session.Instance{
 			ID:               "s1",
@@ -3111,8 +3111,8 @@ func TestCuratedFooterCapsContextHints(t *testing.T) {
 	home.cursor = 0
 
 	hints := home.curatedContextHints(home.flatItems[0])
-	if len(hints) != maxCuratedContextHints {
-		t.Fatalf("forkable live session should yield %d context hints, got %d: %+v",
+	if len(hints) != 3 || len(hints) > maxCuratedContextHints {
+		t.Fatalf("forkable live session should yield attach/restart/fork within cap %d, got %d: %+v",
 			maxCuratedContextHints, len(hints), hints)
 	}
 	result := home.renderHelpBar()
@@ -4468,6 +4468,104 @@ func TestStatusUpdateMsg_ReconcilesAttachedSessionBeforeRender(t *testing.T) {
 	}
 }
 
+func TestStatusUpdateMsgAcknowledgesWaitingAttachedSessionAndClearsHook(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpHome, ".local", "share"))
+
+	h := newAttachReturnTestHome()
+	inst := session.NewInstanceWithGroupAndTool("waiting", t.TempDir(), "work", "codex")
+	inst.ID = "waiting-attached-session"
+	inst.Status = session.StatusWaiting
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
+		tmuxSess.ResetAcknowledged()
+	}
+	setAttachReturnTestInstances(h, []*session.Instance{inst})
+
+	hooksDir := session.GetHooksDir()
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	hookPath := filepath.Join(hooksDir, inst.ID+".json")
+	hookUpdatedAt := time.Now()
+	hookBody := fmt.Sprintf(
+		`{"status":"waiting","session_id":"stale-session","event":"Stop","ts":%d}`,
+		hookUpdatedAt.Unix(),
+	)
+	if err := os.WriteFile(hookPath, []byte(hookBody), 0o644); err != nil {
+		t.Fatalf("write waiting hook: %v", err)
+	}
+	inst.UpdateHookStatus(&session.HookStatus{Status: "waiting", SessionID: "stale-session", Event: "Stop", UpdatedAt: hookUpdatedAt})
+
+	model, _ := h.Update(statusUpdateMsg{attachedSessionID: inst.ID})
+	_ = model.(*Home)
+
+	if status, fresh := inst.GetHookStatus(); status != "" || fresh {
+		t.Fatalf("hook status = %q fresh=%v, want cleared", status, fresh)
+	}
+	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+		t.Fatalf("hook file stat = %v, want removed", err)
+	}
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil && !tmuxSess.IsAcknowledged() {
+		t.Fatal("tmux session was not acknowledged after attach return")
+	}
+}
+
+func TestMoveDialogReparentsLocalGroup(t *testing.T) {
+	h := newAttachReturnTestHome()
+	inst := session.NewInstanceWithGroupAndTool("worker", t.TempDir(), "ops/backend", "claude")
+	inst.ID = "worker"
+	tree := session.NewGroupTree([]*session.Instance{inst})
+	tree.CreateGroup("ops")
+	tree.CreateSubgroup("ops", "backend")
+	tree.CreateGroup("platform")
+
+	h.instancesMu.Lock()
+	h.instances = []*session.Instance{inst}
+	h.instanceByID = map[string]*session.Instance{inst.ID: inst}
+	h.instancesMu.Unlock()
+	h.groupTree = tree
+	h.rebuildFlatItems()
+	h.cursor = indexLocalGroup(t, h, "ops/backend")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("M on local group returned command, want dialog only")
+	}
+	if !h.groupDialog.IsVisible() || h.groupDialog.Mode() != GroupDialogMove {
+		t.Fatal("M on local group did not open move dialog")
+	}
+	targetIdx := -1
+	for i, path := range h.groupDialog.groupPaths {
+		if path == "platform" {
+			targetIdx = i
+		}
+		if path == "ops/backend" || strings.HasPrefix(path, "ops/backend/") {
+			t.Fatalf("move targets include invalid source/descendant path %q: %v", path, h.groupDialog.groupPaths)
+		}
+	}
+	if targetIdx < 0 {
+		t.Fatalf("move targets missing platform: %v", h.groupDialog.groupPaths)
+	}
+	h.groupDialog.selected = targetIdx
+
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("confirm local group move returned command")
+	}
+	if _, ok := h.groupTree.Groups["platform/backend"]; !ok {
+		t.Fatalf("groups after move missing platform/backend: %#v", h.groupTree.Groups)
+	}
+	if got := inst.GroupPath; got != "platform/backend" {
+		t.Fatalf("session group path = %q, want platform/backend", got)
+	}
+	if h.groupDialog.IsVisible() {
+		t.Fatal("move dialog still visible after successful local group move")
+	}
+}
+
 func TestStatusUpdateMsg_FollowsNotificationSwitchSession(t *testing.T) {
 	h := newAttachReturnTestHome()
 	s1 := session.NewInstanceWithGroup("first", "/tmp/first", "work")
@@ -4536,6 +4634,17 @@ func selectedSessionID(h *Home) string {
 		return item.Session.ID
 	}
 	return ""
+}
+
+func indexLocalGroup(t *testing.T, h *Home, groupPath string) int {
+	t.Helper()
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeGroup && item.Path == groupPath {
+			return i
+		}
+	}
+	t.Fatalf("local group %q not found in flatItems", groupPath)
+	return -1
 }
 
 func visibleSessionID(h *Home, id string) bool {

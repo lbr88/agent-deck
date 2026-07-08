@@ -1317,11 +1317,12 @@ func handleSessionAttach(profile string, args []string) {
 	identifier := fs.Arg(0)
 
 	// Load sessions
-	_, instances, _, err := loadSessionData(profile)
+	storage, instances, _, err := loadSessionData(profile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	defer storage.Close()
 
 	// Resolve session (allow current session detection)
 	inst, errMsg, errCode := ResolveSessionOrCurrent(identifier, instances)
@@ -1350,9 +1351,41 @@ func handleSessionAttach(profile string, args []string) {
 	// Create context for attach
 	ctx := context.Background()
 
-	if err := tmuxSession.Attach(ctx, detachByte); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to attach: %v\n", err)
+	acknowledgedOnAttach := acknowledgeSessionForCLIAttach(inst, storage.GetDB())
+	attachErr := tmuxSession.Attach(ctx, detachByte)
+	if acknowledgedOnAttach {
+		refreshSessionAfterCLIAttach(inst, storage.GetDB())
+	}
+	if attachErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to attach: %v\n", attachErr)
 		os.Exit(1)
+	}
+}
+
+func acknowledgeSessionForCLIAttach(inst *session.Instance, db *statedb.StateDB) bool {
+	if inst == nil || inst.GetStatusThreadSafe() != session.StatusWaiting {
+		return false
+	}
+	inst.ClearHookStatus()
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
+		tmuxSess.Acknowledge()
+	}
+	if db != nil {
+		_ = db.SetAcknowledged(inst.ID, true)
+	}
+	inst.ForceNextStatusCheck()
+	return true
+}
+
+func refreshSessionAfterCLIAttach(inst *session.Instance, db *statedb.StateDB) {
+	if inst == nil {
+		return
+	}
+	inst.ForceNextStatusCheck()
+	_ = inst.UpdateStatus()
+	if db != nil {
+		_ = db.SetAcknowledged(inst.ID, true)
+		_ = db.WriteStatus(inst.ID, string(inst.GetStatusThreadSafe()), inst.GetToolThreadSafe())
 	}
 }
 

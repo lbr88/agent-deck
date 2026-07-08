@@ -8,7 +8,35 @@ import { menuModelSignal } from '../dataModel.js'
 import { selectedIdSignal } from '../state.js'
 import { activeTabSignal } from '../uiState.js'
 
+const FLEET_STATUS_PRIORITY = {
+  error: 0,
+  waiting: 1,
+  running: 2,
+  starting: 2,
+  idle: 3,
+  queued: 3,
+  stopped: 4,
+  done: 4,
+}
+
+function fleetStatusPriority(status) {
+  return FLEET_STATUS_PRIORITY[status || ''] ?? 5
+}
+
+function compareFleetSessions(a, b) {
+  const status = fleetStatusPriority(a.status) - fleetStatusPriority(b.status)
+  if (status !== 0) return status
+  const title = (a.title || '').localeCompare(b.title || '')
+  if (title !== 0) return title
+  return (a.id || '').localeCompare(b.id || '')
+}
+
+function sortedFleetItems(items) {
+  return [...items].sort(compareFleetSessions)
+}
+
 function GroupCard({ name, items, onSelect }) {
+  const sortedItems = sortedFleetItems(items)
   const running = items.filter(s => s.status === 'running').length
   const waiting = items.filter(s => s.status === 'waiting').length
   const errors  = items.filter(s => s.status === 'error').length
@@ -21,7 +49,7 @@ function GroupCard({ name, items, onSelect }) {
         <span class="cost"></span>
       </div>
       <div class="gc-tiles">
-        ${items.slice(0, 6).map(s => html`
+        ${sortedItems.slice(0, 6).map(s => html`
           <button key=${s.id} class="tile" data-testid="fleet-session-tile" data-session-id=${s.id} onClick=${() => onSelect(s.id)}>
             <span class=${`tdot ${s.status}`}/>
             <span class="tn">${s.title}</span>

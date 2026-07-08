@@ -23,6 +23,7 @@ const (
 	ConfirmCloseRemoteSession
 	ConfirmDeleteHubSession
 	ConfirmCloseHubSession
+	ConfirmDeleteHubGroup
 	ConfirmArchiveHubSession
 	ConfirmUnarchiveHubSession
 	ConfirmRemoveHubSession
@@ -32,6 +33,7 @@ const (
 	ConfirmUnarchiveSession
 	ConfirmNotice // acknowledge-only message (single OK button), e.g. protected-action blocks
 	ConfirmHubTrustNode
+	ConfirmRevokeHubNode
 )
 
 // ConfirmDialog handles confirmation for destructive actions
@@ -207,6 +209,17 @@ func (c *ConfirmDialog) ShowHubTrustNode(nodeID, nodeName string) {
 	c.focusedButton = 1
 }
 
+func (c *ConfirmDialog) ShowRevokeHubNode(nodeID, nodeName string) {
+	c.visible = true
+	c.confirmType = ConfirmRevokeHubNode
+	c.targetID = nodeID
+	c.targetName = nodeName
+	c.hubNodeID = nodeID
+	c.remoteName = nodeName
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
 // ShowRemoveSession shows confirmation for status-gated registry removal (TUI 'X').
 // Safer than ConfirmDeleteSession: the caller has already verified the
 // session is stopped or errored, and the dialog wording reflects the
@@ -238,6 +251,17 @@ func (c *ConfirmDialog) ShowDeleteGroup(groupPath, groupName string) {
 	c.confirmType = ConfirmDeleteGroup
 	c.targetID = groupPath
 	c.targetName = groupName
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowDeleteHubGroup(nodeID, nodeName, groupPath, groupName string) {
+	c.visible = true
+	c.confirmType = ConfirmDeleteHubGroup
+	c.targetID = groupPath
+	c.targetName = groupName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
 	c.buttonCount = 2
 	c.focusedButton = 1
 }
@@ -577,10 +601,36 @@ func (c *ConfirmDialog) View() string {
 		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
 			hintStyle.Render("y allow · n deny · ←/→ navigate · Enter select · Esc later"))
 
+	case ConfirmRevokeHubNode:
+		title = "⚠  Revoke Hub Node?"
+		label := strings.TrimSpace(c.targetName)
+		if label == "" {
+			label = c.targetID
+		}
+		warning = fmt.Sprintf("Revoke this hub node?\n\n  \"%s\"", label)
+		details = fmt.Sprintf("Node ID: %s\n• The node will be disconnected from the hub\n• It will need a new invite to reconnect\n• Sessions on that machine are not deleted", c.targetID)
+		borderColor = ColorRed
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Revoke", ColorRed, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y revoke · n cancel · ←/→ navigate · Enter select · Esc"))
+
 	case ConfirmDeleteGroup:
 		title = "⚠  Delete Group?"
 		warning = fmt.Sprintf("This will delete the group:\n\n  \"%s\"", c.targetName)
 		details = "• All sessions will be MOVED to 'default' group\n• Sessions will NOT be killed\n• The group structure will be lost"
+		borderColor = ColorRed
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Delete", ColorRed, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y delete · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmDeleteHubGroup:
+		title = "⚠  Delete Hub Group?"
+		warning = fmt.Sprintf("Delete this group on hub node %q?\n\n  \"%s\"", c.remoteName, c.targetName)
+		details = "• Sessions on the remote node will be MOVED to the default group\n• Sessions will NOT be killed\n• The remote group structure will be lost"
 		borderColor = ColorRed
 		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
 			renderButton("Delete", ColorRed, c.focusedButton == 0), "  ",

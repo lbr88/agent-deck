@@ -452,6 +452,7 @@ func PickerToolNames() []string {
 		presets = append(presets, custom...)
 	}
 	filtered := r.FilterVisibleNames(presets)
+	filtered = r.ensureConfiguredDefaultTool(filtered)
 	out := make([]string, 0, len(filtered))
 	for _, name := range filtered {
 		if name == "" {
@@ -461,4 +462,29 @@ func PickerToolNames() []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+func (r *Registry) ensureConfiguredDefaultTool(names []string) []string {
+	cfg, _ := LoadUserConfig()
+	if cfg == nil {
+		return names
+	}
+	defaultTool := strings.TrimSpace(cfg.DefaultTool)
+	if defaultTool == "" || defaultTool == "shell" {
+		return names
+	}
+	if r.userHidden[defaultTool] {
+		return names
+	}
+	if _, ok := r.builtins[defaultTool]; !ok {
+		if _, ok := r.custom[defaultTool]; !ok {
+			return names
+		}
+	}
+	for _, name := range names {
+		if name == defaultTool {
+			return names
+		}
+	}
+	return append(names, defaultTool)
 }

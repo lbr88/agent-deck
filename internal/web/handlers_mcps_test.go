@@ -33,10 +33,10 @@ type fakeMCPManager struct {
 }
 
 type mcpAttachCall struct {
-	ProjectPath, Name, Scope string
+	SessionID, ProjectPath, Name, Scope string
 }
 type mcpMoveCall struct {
-	ProjectPath, Name, FromScope, ToScope string
+	SessionID, ProjectPath, Name, FromScope, ToScope string
 }
 
 func newFakeMCPManager() *fakeMCPManager {
@@ -49,7 +49,7 @@ func (f *fakeMCPManager) ListCatalog() []MCPCatalogEntry {
 	return append([]MCPCatalogEntry(nil), f.catalog...)
 }
 
-func (f *fakeMCPManager) ListAttached(projectPath string) (map[string][]string, error) {
+func (f *fakeMCPManager) ListAttached(_ string, projectPath string) (map[string][]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
@@ -68,13 +68,27 @@ func (f *fakeMCPManager) ListAttached(projectPath string) (map[string][]string, 
 	return out, nil
 }
 
-func (f *fakeMCPManager) Attach(projectPath, name, scope string) error {
+func (f *fakeMCPManager) ListSessionMCPs(sessionID, projectPath string) (SessionMCPsResponse, error) {
+	attached, err := f.ListAttached(sessionID, projectPath)
+	if err != nil {
+		return SessionMCPsResponse{}, err
+	}
+	return SessionMCPsResponse{
+		SessionID: sessionID,
+		Local:     sortedScope(attached, "local"),
+		Global:    sortedScope(attached, "global"),
+		User:      sortedScope(attached, "user"),
+		Catalog:   f.ListCatalog(),
+	}, nil
+}
+
+func (f *fakeMCPManager) Attach(sessionID, projectPath, name, scope string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.attachErr != nil {
 		return f.attachErr
 	}
-	f.attachCalls = append(f.attachCalls, mcpAttachCall{projectPath, name, scope})
+	f.attachCalls = append(f.attachCalls, mcpAttachCall{sessionID, projectPath, name, scope})
 	if f.attached[projectPath] == nil {
 		f.attached[projectPath] = map[string][]string{}
 	}
@@ -87,13 +101,13 @@ func (f *fakeMCPManager) Attach(projectPath, name, scope string) error {
 	return nil
 }
 
-func (f *fakeMCPManager) Detach(projectPath, name, scope string) error {
+func (f *fakeMCPManager) Detach(sessionID, projectPath, name, scope string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.detachErr != nil {
 		return f.detachErr
 	}
-	f.detachCalls = append(f.detachCalls, mcpAttachCall{projectPath, name, scope})
+	f.detachCalls = append(f.detachCalls, mcpAttachCall{sessionID, projectPath, name, scope})
 	names := f.attached[projectPath][scope]
 	out := names[:0]
 	for _, n := range names {
@@ -108,13 +122,13 @@ func (f *fakeMCPManager) Detach(projectPath, name, scope string) error {
 	return nil
 }
 
-func (f *fakeMCPManager) Move(projectPath, name, fromScope, toScope string) error {
+func (f *fakeMCPManager) Move(sessionID, projectPath, name, fromScope, toScope string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.moveErr != nil {
 		return f.moveErr
 	}
-	f.moveCalls = append(f.moveCalls, mcpMoveCall{projectPath, name, fromScope, toScope})
+	f.moveCalls = append(f.moveCalls, mcpMoveCall{sessionID, projectPath, name, fromScope, toScope})
 	if f.attached[projectPath] == nil {
 		f.attached[projectPath] = map[string][]string{}
 	}
@@ -213,6 +227,7 @@ func TestMCPCatalog_NoManagerReturns503(t *testing.T) {
 
 func TestSessionMCPs_ListHappyPath(t *testing.T) {
 	mgr := newFakeMCPManager()
+	mgr.catalog = []MCPCatalogEntry{{Name: "exa", Description: "search"}}
 	mgr.attached["/srv/alpha"] = map[string][]string{
 		"local": {"exa"}, "global": {"youtube"}, "user": {},
 	}
@@ -231,6 +246,9 @@ func TestSessionMCPs_ListHappyPath(t *testing.T) {
 	}
 	if !slicesEqual(resp.Local, []string{"exa"}) || !slicesEqual(resp.Global, []string{"youtube"}) {
 		t.Fatalf("scopes: %+v", resp)
+	}
+	if len(resp.Catalog) != 1 || resp.Catalog[0].Name != "exa" {
+		t.Fatalf("catalog: %+v", resp.Catalog)
 	}
 }
 

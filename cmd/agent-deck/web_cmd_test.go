@@ -56,10 +56,36 @@ func (noopMutator) MarkSessionUnread(string) error {
 func (noopMutator) CreateGroup(string, string) (string, error) {
 	return "", nil
 }
-func (noopMutator) RenameGroup(string, string) error { return nil }
-func (noopMutator) DeleteGroup(string) error         { return nil }
+func (noopMutator) RenameGroup(string, string) error                    { return nil }
+func (noopMutator) DeleteGroup(string) error                            { return nil }
+func (noopMutator) ReparentGroup(string, string) (string, error)        { return "", nil }
+func (noopMutator) ReorderGroup(string, string, *int) (int, int, error) { return 0, 0, nil }
 func (noopMutator) FinishWorktree(string, web.WorktreeFinishOptions) (web.WorktreeFinishResult, error) {
 	return web.WorktreeFinishResult{}, nil
+}
+func (noopMutator) ListSkillCatalog() ([]session.SkillCandidate, error) {
+	return nil, nil
+}
+func (noopMutator) ListSessionSkills(string, string) (web.SkillSessionState, error) {
+	return web.SkillSessionState{}, nil
+}
+func (noopMutator) AttachSkill(string, string, string, string, string) (*session.ProjectSkillAttachment, error) {
+	return nil, nil
+}
+func (noopMutator) DetachSkill(string, string, string, string) (*session.ProjectSkillAttachment, error) {
+	return nil, nil
+}
+func (noopMutator) ListPluginCatalog() []web.PluginCatalogEntry {
+	return nil
+}
+func (noopMutator) ListSessionPlugins(string, *web.MenuSession) (web.SessionPluginsResponse, error) {
+	return web.SessionPluginsResponse{}, nil
+}
+func (noopMutator) AttachPlugin(string, *web.MenuSession, string, bool) (web.PluginMutateResponse, error) {
+	return web.PluginMutateResponse{}, nil
+}
+func (noopMutator) DetachPlugin(string, *web.MenuSession, string) (web.PluginMutateResponse, error) {
+	return web.PluginMutateResponse{}, nil
 }
 
 // Compile-time guard that ui.WebMutator continues to satisfy
@@ -156,12 +182,21 @@ func TestBuildWebServer_WiresMutator(t *testing.T) {
 	if !server.HasMutator() {
 		t.Fatal("buildWebServer returned a Server with no mutator wired — main.go's POST/PATCH/DELETE handlers will 503 NOT_IMPLEMENTED at runtime")
 	}
+	if !server.HasMCPManager() {
+		t.Fatal("buildWebServer returned a Server with no MCP manager wired — MCP endpoints will 503 NOT_IMPLEMENTED at runtime")
+	}
+	if !server.HasSkillsService() {
+		t.Fatal("buildWebServer returned a Server with no skills service wired — skill endpoints would mutate local state for hub sessions")
+	}
+	if !server.HasPluginManager() {
+		t.Fatal("buildWebServer returned a Server with no plugin manager wired — plugin endpoints would not route hub sessions")
+	}
 }
 
-// TestBuildWebServer_NilMutator_StaysUnwired verifies the test-only escape
-// hatch: passing nil leaves HasMutator() false. Documents that production
-// callers must pass a real mutator; the nil branch exists for tests that
-// don't exercise mutations.
+// TestBuildWebServer_NilMutator_StaysUnwired verifies the mutator test-only
+// escape hatch: passing nil leaves HasMutator() false. MCP endpoints still get
+// the default manager because they are safe production endpoints independent of
+// the session mutator seam.
 func TestBuildWebServer_NilMutator_StaysUnwired(t *testing.T) {
 	withTempHomeAndConfig(t, "")
 
@@ -171,5 +206,11 @@ func TestBuildWebServer_NilMutator_StaysUnwired(t *testing.T) {
 	}
 	if server.HasMutator() {
 		t.Fatal("buildWebServer wired a mutator when nil was passed — nil should be a no-op for the test escape hatch")
+	}
+	if !server.HasMCPManager() {
+		t.Fatal("buildWebServer should wire the default MCP manager even when the session mutator is nil")
+	}
+	if !server.HasPluginManager() {
+		t.Fatal("buildWebServer should wire the default plugin manager even when the session mutator is nil")
 	}
 }

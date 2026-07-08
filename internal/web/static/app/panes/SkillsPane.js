@@ -33,6 +33,7 @@ export function SkillsPane() {
       if (session) {
         const att = await apiFetch('GET', `/api/sessions/${encodeURIComponent(session.id)}/skills`)
         setAttached(att?.skills || [])
+        if (att?.catalog) setCatalog(att.catalog)
       } else {
         setAttached([])
       }

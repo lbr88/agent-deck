@@ -10,11 +10,24 @@ export const sessionsSignal = signal([])
 // Connected hub nodes from GET /api/menu / SSE snapshots.
 export const hubNodesSignal = signal([])
 
+// Whether the configured hub node for this web server is an admin. Hydrated
+// from GET /api/settings and used to hide admin-only controls for normal users.
+export const hubAdminSignal = signal(false)
+
+// Hub node admin dialog state. The dialog uses /api/hub/nodes and requires
+// the local web server to be configured with an admin hub node token.
+export const hubNodesDialogSignal = signal(false)
+
 // Archived sessions from GET /api/sessions/archived
 export const archivedSessionsSignal = signal([])
 
 // Currently selected session ID
 export const selectedIdSignal = signal(null)
+
+// Terminal attach mode for selectedIdSignal. "session" attaches the normal
+// session tmux pane; "sandbox" opens a sandbox/container shell for that
+// selected session via /ws/session/:id?shell=sandbox.
+export const terminalModeSignal = signal('session')
 
 // SSE connection state: 'connecting' | 'connected' | 'disconnected'
 export const connectionSignal = signal('connecting')
@@ -89,6 +102,10 @@ export const confirmDialogSignal = signal(null)
 // groupNameDialogSignal: null or { mode: 'create'|'rename', groupPath: string, currentName: string, onSubmit: function }
 export const groupNameDialogSignal = signal(null)
 
+// groupMoveDialogSignal: null or { groupPath: string }
+// Opens a modal that POSTs /api/groups/{path}/change.
+export const groupMoveDialogSignal = signal(null)
+
 // editSessionDialogSignal: null or { sessionId: string }
 // Mirrors the TUI EditSessionDialog (internal/ui/edit_session_dialog.go) —
 // opens a modal that PATCHes /api/sessions/{id}. Closes "Edit session
@@ -114,6 +131,10 @@ export const notesSessionDialogSignal = signal(null)
 // pathsSessionDialogSignal: null or { sessionId: string }
 // Web parity for the TUI `p` multi-repo path editor.
 export const pathsSessionDialogSignal = signal(null)
+
+// forkSessionDialogSignal: null or { sessionId: string }
+// Web parity for the TUI Shift+F fork dialog.
+export const forkSessionDialogSignal = signal(null)
 
 // WebSocket connection state for terminal: 'disconnected' | 'connecting' | 'connected' | 'error'
 export const wsStateSignal = signal('disconnected')

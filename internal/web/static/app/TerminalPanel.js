@@ -2,7 +2,7 @@
 // Ports createTerminalUI, connectWS, installTerminalTouchScroll from app.js
 import { html } from 'htm/preact'
 import { useEffect, useRef, useCallback, useState } from 'preact/hooks'
-import { selectedIdSignal, authTokenSignal, wsStateSignal, readOnlySignal } from './state.js'
+import { selectedIdSignal, terminalModeSignal, authTokenSignal, wsStateSignal, readOnlySignal } from './state.js'
 import { apiFetch } from './api.js'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -16,13 +16,14 @@ function isMobileDevice() {
 }
 
 // Build WebSocket URL for a session (same pattern as app.js wsURLForSession)
-function wsURLForSession(sessionId, token) {
-  const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-  const url = new URL(
-    wsProto + '://' + window.location.host + '/ws/session/' + encodeURIComponent(sessionId)
-  )
-  if (token) url.searchParams.set('token', token)
-  return url.toString()
+function wsURLForSession(sessionId, token, mode) {
+	const wsProto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+	const url = new URL(
+		wsProto + '://' + window.location.host + '/ws/session/' + encodeURIComponent(sessionId)
+	)
+	if (token) url.searchParams.set('token', token)
+	if (mode === 'sandbox') url.searchParams.set('shell', 'sandbox')
+	return url.toString()
 }
 
 function terminalBufferText(terminal) {
@@ -82,9 +83,10 @@ function installTouchScroll(container, xtermEl, controller) {
 }
 
 export function TerminalPanel() {
-  const containerRef = useRef(null)
-  const ctxRef = useRef(null)  // { terminal, fitAddon, ws, resizeObserver, controller, decoder, reconnectTimer, reconnectAttempt, wsReconnectEnabled, terminalAttached }
-  const sessionId = selectedIdSignal.value
+	const containerRef = useRef(null)
+	const ctxRef = useRef(null)  // { terminal, fitAddon, ws, resizeObserver, controller, decoder, reconnectTimer, reconnectAttempt, wsReconnectEnabled, terminalAttached }
+	const sessionId = selectedIdSignal.value
+	const terminalMode = terminalModeSignal.value || 'session'
   // #782: terminal-fatal errors (e.g. TMUX_SESSION_NOT_FOUND) render as a
   // banner overlay rather than a `[error:CODE]` line on every WS reconnect.
   // null when there's no fatal error; an object { code, message, hint }
@@ -130,10 +132,11 @@ export function TerminalPanel() {
     // the #782 fatal banner) forces a fresh terminal + ws even though
     // sessionId is unchanged.
     if (
-      ctxRef.current &&
-      ctxRef.current.sessionId === sessionId &&
-      ctxRef.current.reconnectKey === reconnectKey
-    ) return
+			ctxRef.current &&
+			ctxRef.current.sessionId === sessionId &&
+			ctxRef.current.terminalMode === terminalMode &&
+			ctxRef.current.reconnectKey === reconnectKey
+		) return
     cleanup()
     // #782: a fresh session connection clears any prior fatal banner.
     setFatalError(null)
@@ -216,8 +219,9 @@ export function TerminalPanel() {
 
     // Context object for this session
     const ctx = {
-      sessionId,
-      reconnectKey, // #782: stamp the key so the double-init guard can detect a forced reconnect
+		sessionId,
+		terminalMode,
+		reconnectKey, // #782: stamp the key so the double-init guard can detect a forced reconnect
       terminal,
       fitAddon,
       ws: null,
@@ -324,7 +328,7 @@ export function TerminalPanel() {
       ctx.wsReconnectEnabled = true
       wsStateSignal.value = 'connecting'
 
-      const ws = new WebSocket(wsURLForSession(sessionId, token))
+			const ws = new WebSocket(wsURLForSession(sessionId, token, terminalMode))
       ws.binaryType = 'arraybuffer'
       ctx.ws = ws
 
@@ -419,7 +423,7 @@ export function TerminalPanel() {
       clearTimeout(resizeTimer)
       cleanup()
     }
-  }, [sessionId, reconnectKey, cleanup])
+  }, [sessionId, terminalMode, reconnectKey, cleanup])
 
   if (!sessionId) {
     return html`<${EmptyStateDashboard} />`
@@ -453,7 +457,7 @@ export function TerminalPanel() {
     <div class="term-frame" style="position: relative;">
       <div class="term-strip">
         <span class="tdots"><i/><i/><i/></span>
-        <span class="tpath">session · ${sessionId}</span>
+        <span class="tpath">${terminalMode === 'sandbox' ? 'sandbox shell' : 'session'} · ${sessionId}</span>
         <span style="flex: 1;"/>
       </div>
       <div style="flex: 1; min-height: 0; min-width: 0; overflow: hidden; padding: 14px 16px;">

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,6 +76,7 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 		var sessionID string
 		var err error
 		hubCreate := false
+		req.AdditionalPaths = normalizeCreateSessionAdditionalPaths(req.AdditionalPaths)
 		if hubNodeID := strings.TrimSpace(req.HubNodeID); hubNodeID != "" {
 			hubCreator, ok := s.mutator.(HubSessionCreator)
 			if !ok {
@@ -85,9 +87,27 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			if strings.TrimSpace(req.ProjectPath) == "" {
 				req.ProjectPath = "."
 			}
-			sessionID, err = hubCreator.CreateHubSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID, hubNodeID)
+			if len(req.AdditionalPaths) > 0 {
+				optionsCreator, ok := s.mutator.(SessionOptionsMutator)
+				if !ok {
+					writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "multi-repo session creation not available")
+					return
+				}
+				sessionID, err = optionsCreator.CreateSessionWithOptions(req)
+			} else {
+				sessionID, err = hubCreator.CreateHubSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID, hubNodeID)
+			}
 		} else {
-			sessionID, err = s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+			if len(req.AdditionalPaths) > 0 {
+				optionsCreator, ok := s.mutator.(SessionOptionsMutator)
+				if !ok {
+					writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "multi-repo session creation not available")
+					return
+				}
+				sessionID, err = optionsCreator.CreateSessionWithOptions(req)
+			} else {
+				sessionID, err = s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+			}
 		}
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
@@ -103,6 +123,20 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 	default:
 		writeAPIError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed, "method not allowed")
 	}
+}
+
+func normalizeCreateSessionAdditionalPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
 }
 
 func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +194,35 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 	// PATCH /api/sessions/{id} — partial field edit (matches TUI EditSessionDialog).
 	if r.Method == http.MethodPatch && action == "" {
 		s.handleSessionPatch(w, r, sessionID)
+		return
+	}
+
+	// GET /api/sessions/{id}/output — read-only copy-output source used by
+	// the web `c` shortcut when no terminal buffer is mounted. Hub IDs route
+	// through the owner's preview command in WebMutator.
+	if r.Method == http.MethodGet && action == "output" {
+		provider, ok := s.mutator.(SessionOutputProvider)
+		if !ok || provider == nil {
+			writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "session output not available")
+			return
+		}
+		result, err := provider.SessionOutput(sessionID)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+				return
+			}
+			if strings.Contains(err.Error(), "output") || strings.Contains(err.Error(), "preview") {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+				return
+			}
+			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+			return
+		}
+		if strings.TrimSpace(result.SessionID) == "" {
+			result.SessionID = sessionID
+		}
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 
@@ -428,7 +491,25 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID, Status: session.StatusWaiting})
 		case "fork":
-			newID, err := s.mutator.ForkSession(sessionID)
+			var forkReq ForkSessionRequest
+			if r.Body != nil {
+				if err := json.NewDecoder(r.Body).Decode(&forkReq); err != nil && !errors.Is(err, io.EOF) {
+					writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid fork request body")
+					return
+				}
+			}
+			var newID string
+			var err error
+			if forkReq.HasOptions() {
+				forker, ok := s.mutator.(SessionForkOptionsMutator)
+				if !ok {
+					writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "fork options not available")
+					return
+				}
+				newID, err = forker.ForkSessionWithOptions(sessionID, forkReq)
+			} else {
+				newID, err = s.mutator.ForkSession(sessionID)
+			}
 			if err != nil {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return

@@ -29,13 +29,14 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Unarchive session | `internal/ui/home.go` (`shift+u` in archived view) | POST `/api/sessions/{id}/unarchive` | `UnarchiveSession` | `handlers_sessions_test.go`, `tests/e2e/session-lifecycle.spec.ts` | Clears `archived_at`; does not auto-start |
 | View archived sessions | `internal/ui/home.go` (`^` filter) | GET `/api/sessions/archived` | `LoadArchivedMenuSnapshot` | `handlers_sessions_test.go`, `tests/e2e/session-lifecycle.spec.ts` | Web Archived tab + TUI archived-only list |
 | Fork session | `internal/ui/home.go` (`f` key, quick) | POST `/api/sessions/{id}/fork` | `ForkSession` | `handlers_sessions_test.go`, WebUI action tests | Web creates a plain tool-native fork; TUI quick fork also applies `[fork]` defaults |
-| Fork with dialog | `internal/ui/home.go` (`F`/`shift+f`) | MISSING | N/A | N/A | Shift+F title/group/branch/worktree controls are TUI-only until Web gets a dedicated async fork workflow |
+| Fork with dialog | `internal/ui/home.go` (`F`/`shift+f`) | POST `/api/sessions/{id}/fork` | `ForkSessionWithOptions` | `handlers_sessions_test.go`, `static_files_test.go` | Web ForkSessionDialog mirrors Shift+F title/group/branch/worktree/state/sandbox controls; hub sessions route through hub fork options |
 | Rename session | `internal/ui/home.go:6119` (`r` key) | PATCH `/api/sessions/{id}` | `UpdateSession` | `handlers_sessions_test.go`, `tests/web/e2e/edit-session.spec.js`, `tests/web/e2e/keyboard-parity.spec.js` | Title edit via web EditSessionDialog; `r` opens the same dialog |
 | Undo delete | `internal/ui/home.go:6572` (`ctrl+z`) | POST `/api/sessions/undelete` | `UndoDelete` | `handlers_sessions_test.go`, `tests/web/e2e/close-undo.spec.js` | Chrome-style undo within 30s window (web.DefaultUndoWindow); Ctrl+Z in web UI |
 | **GROUP OPERATIONS** |
 | Create group | `internal/ui/home.go:6094` (`g` key) | POST `/api/groups` | `CreateGroup` | `handlers_groups_test.go` | Root or as subgroup |
 | Rename group | `internal/ui/home.go:6119` (`r` key, group) | PATCH `/api/groups/{path}` | `RenameGroup` | `handlers_groups_test.go` | Via GroupDialog |
 | Delete group | `internal/ui/home.go:6302` (`d` key, group) | DELETE `/api/groups/{path}` | `DeleteGroup` | `handlers_groups_test.go` | Moves children to default group |
+| Reorder group | `internal/ui/home.go` (`K`/`J`/`+`/`-`, group) | POST `/api/groups/{path}/reorder` | `ReorderGroup` | `handlers_groups_test.go`, `hub_integration_test.go` | Moves groups among siblings; hub group paths route through hub `group_reorder` |
 | Move session to group | `internal/ui/home.go:6028` (`M`/`shift+m`) | POST `/api/sessions/{id}/group` | `MoveSessionToGroup` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/parity-actions.spec.js` | Web Move dialog and Shift+M shortcut; routes hub sessions through hub command `move` |
 | **MCP MANAGEMENT** |
 | Attach MCP | `internal/ui/home.go:5965` (`m` key → MCPDialog) | POST `/api/sessions/{id}/mcps/{name}` | `MCPManager.Attach` | `handlers_mcps_test.go` | Body `{scope?}`; default scope=local; writes `.mcp.json` via session helpers |
@@ -57,11 +58,11 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Prompt session | `internal/ui/home.go` (`o` key) | POST `/api/sessions/{id}/send` | `SendSessionPrompt` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | One-line prompt without attaching; web `o` opens PromptSessionDialog and supports hub sessions |
 | Mark session unread | `internal/ui/home.go:6366` (`u` key) | POST `/api/sessions/{id}/unread` | `MarkSessionUnread` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | idle → waiting transition; routes hub sessions through hub command `mark_unread` |
 | Quick approve | `internal/ui/home.go:6387` (default hotkey) | POST `/api/sessions/{id}/approve` | `QuickApproveSession` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Send "1"+Enter without attach; routes hub sessions through hub `send` |
-| Copy output | `internal/ui/home.go:6511` (`c` key) | UI `c` shortcut | `TerminalPanel` buffer → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Copies focused terminal scrollback to clipboard |
+| Copy output | `internal/ui/home.go:6511` (`c` key) | UI `c` shortcut + GET `/api/sessions/{id}/output` fallback | `TerminalPanel` buffer / `SessionOutputProvider` → clipboard | `static_files_test.go`, `handlers_sessions_test.go`, `hub_integration_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Copies focused terminal scrollback when mounted; otherwise reads local output or hub preview for the focused session |
 | Copy session info | `internal/ui/home.go:6521` (`C`/`shift+c`) | UI `Shift+C` shortcut | `sessionInfoText` → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Repo/path/branch/session metadata → clipboard |
 | Send output to session | `internal/ui/home.go:6532` (`x` key) | POST `/api/sessions/{id}/send-output` | `SendSessionOutput` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `static_files_test.go` | Web `x` opens a target picker; works with hub session IDs through preview/send commands |
-| Exec shell | `internal/ui/home.go:6161` (`E` key) | MISSING | N/A | N/A | Sandbox container shell only |
-| Toggle preview mode | `internal/ui/home.go:6413` (`v` key) | MISSING | N/A | N/A | Cycle: both → output → analytics |
+| Exec shell | `internal/ui/home.go:6161` (`E` key) | WS `/ws/session/{id}?shell=sandbox` | `OpenLocalSandboxShell` / `OpenHubSandboxShellTerminal` | `handlers_ws_test.go`, `static_files_test.go` | Sandbox container shell for local and hub sessions; web Shift+E and row More → Sandbox shell open the sandbox terminal mode |
+| Toggle preview mode | `internal/ui/home.go:6413` (`v` key) | UI `v` shortcut | `previewModeSignal` / `cyclePreviewMode` | `static_files_test.go` | Web maps both → terminal+rail, output → terminal-only, analytics → costs+usage rail |
 | Open search | `internal/ui/home.go:6133` (`/` key) | UI `/` shortcut | Sidebar filter/search UI | `tests/web/e2e/keyboard-parity.spec.js` | Web `/` focuses the session filter; search pane covers session search navigation |
 | Open global search | `internal/ui/home.go:5691` (`G` key) | GET `/api/search/global?q=...` + UI `G` shortcut | `GlobalSearchIndex` | `handlers_search_test.go`, `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Claude conversation index search; web Search pane Global mode |
 | Open help | `internal/ui/home.go:6143` (`?` key) | UI `?` shortcut | `KeyboardShortcuts.js` | `tests/web/e2e/keyboard-parity.spec.js` | Web `?` toggles the keyboard shortcuts overlay |
@@ -69,7 +70,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Jump mode | `internal/ui/home.go:6406` (`space` key) | UI `Space` shortcut | `jumpModeSignal` / `JumpOverlay` | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Vimium-style hint navigation over current sessions |
 | Attach session | `internal/ui/home.go:5744` (`enter` key) | WS `/ws/session/{id}` | `TerminalBridge` / `OpenHubTerminal` | `handlers_ws_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Enter switches to the terminal pane; TerminalPanel streams local and hub sessions through the websocket bridge |
 | **WORKTREE OPERATIONS** |
-| Finish worktree | `internal/ui/home.go:6038` (`W`/`shift+w`) | POST `/api/sessions/{id}/worktree/finish` | `FinishWorktree` | `issue1126_worktree_finish_test.go`, `tests/web/e2e/worktree-finish.spec.js` | Merge + cleanup; body accepts `into`, `noMerge`, `keepBranch`, `force` (mirrors CLI flags). Issue #1126. |
+| Finish worktree | `internal/ui/home.go:6038` (`W`/`shift+w`) | POST `/api/sessions/{id}/worktree/finish` | `FinishWorktree` | `issue1126_worktree_finish_test.go`, `tests/web/e2e/worktree-finish.spec.js` | Merge + cleanup; body accepts `into`, `noMerge`, `keepBranch`, `force` (mirrors CLI flags). Hub sessions route through hub `worktree_finish`. Issue #1126. |
 | **COST TRACKING** |
 | View costs dashboard | `internal/ui/home.go` (TUI only) | GET `/api/costs/summary` | N/A | `handlers_costs_test.go` | Sessions cost aggregation. **e2e parity: degraded-only** — fixture omits the SQLite cost store, so the e2e probe asserts the documented 503 `UNAVAILABLE` response. Happy-path (200 + payload) coverage is `parity-test-deferred` to PR-B fixture wiring. |
 | Cost export | N/A | GET `/api/costs/export` | N/A | `handlers_costs_test.go` | Web-only; CSV/JSON export. **e2e parity: degraded-only** (503 without cost store). Happy-path `parity-test-deferred` to PR-B. |
@@ -167,20 +168,16 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  3 MISSING actions have plausible URL patterns probed by
-  `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  3 are TUI-UX-only (exec shell, preview cycling, …) where no plausible web
-  endpoint exists — those rows are matrix-tracked but not URL-probed.
+  0 MISSING actions have plausible URL patterns probed by
+  `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`.
 
 ## Summary Statistics
 
 ### Action Parity
-- **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web/API/UI surfaces implemented:** 49
-- **MISSING web actions:** 3 (~6% gap)
-- **Key gaps:**
-  - Fork-with-options dialog
-  - Exec shell and TUI-only preview toggles
+- **Total TUI actions:** 53 (session/group/MCP/skills/settings/workflow/costs/push)
+- **Web/API/UI surfaces implemented:** 53
+- **MISSING web actions:** 0
+- **Key gaps:** none in the tracked TUI action matrix
 
 ### State Field Parity
 - **Total TUI-visible fields:** ~50
@@ -198,7 +195,7 @@ tiers:
 
 1. **Session Metadata Parity**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, POST `/api/sessions/{id}/group` for group moves, and POST `/api/sessions/{id}/paths` for multi-repo path editing.
 
-2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: fork-with-options, exec-shell, and preview-mode cycling.
+2. **Workflow Action Gaps**: No tracked TUI action rows remain missing in the web/API/UI parity matrix.
 
 3. **Implemented Non-HTTP Surfaces**: Some parity rows are intentionally UI/WS rather than HTTP: `/` search focus, `?` help overlay, Enter terminal attach via `/ws/session/{id}`, and Ctrl/Cmd+R manual refresh via GET `/api/menu`.
 
@@ -220,6 +217,90 @@ tiers:
 
 ## Recommendations
 
-1. Add web UX for the remaining fork-with-options workflow.
-2. Decide whether preview-mode cycling and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
-3. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.
+1. Decide whether exec-shell should be a true web parity feature or explicitly documented TUI-only surface.
+2. Add/update API documentation for the current HTTP, UI, WS, and hub-proxy parity surfaces.
+
+---
+
+## Hub Native Parity Audit (2026-07-08)
+
+This section tracks whether sessions owned by connected Agent Deck hub nodes feel
+native across TUI, web, and CLI. It is intentionally broader than web↔TUI local
+parity above.
+
+### Implemented hub-native surfaces
+
+- **Hub session projection:** remote hub sessions and empty hub nodes/groups are
+  projected into the TUI and web menu snapshots with short node names.
+- **Hub create:** TUI `n`/`N`, web new-session dialog, and CLI
+  `agent-deck hub sessions create` can create sessions on selected hub nodes.
+- **Hub attach:** TUI Enter, web terminal websocket, and CLI attach relay
+  interactive attach through the hub.
+- **Hub lifecycle/actions:** start, stop/close, restart, restart fresh, delete,
+  archive, unarchive, metadata remove, mark unread, quick approve, prompt/send,
+  preview, notes, move group, rename, edit paths, YOLO toggle, fork, fork with
+  dialog/options, and worktree finish route through hub commands.
+- **Hub group CRUD/settings:** TUI `g`/`r`/`d` on hub groups, web `/api/groups`
+  for `hub/<node>/<group>` paths, and CLI `agent-deck hub groups` support group
+  list, create, rename, update `default_path`/`max_concurrent`, and delete.
+- **Hub group reparent/reorder:** hub command dispatch and the local
+  owner backend support remote group reparent/reorder. CLI exposes
+  `agent-deck hub groups change` and `agent-deck hub groups reorder`; web API
+  exposes `POST /api/groups/{path}/change` and `/reorder`; TUI group-order keys
+  (`K`/`J`/`+`/`-`) reorder hub groups through the hub command channel and
+  preserve remote group order in TUI/web menu projections. TUI `M` on a local
+  or hub group opens a reparent dialog with root/self/descendant safeguards, and
+  the web sidebar exposes visible group create/rename/move/reorder/delete
+  controls that route hub group paths through the hub command channel.
+- **Hub MCP management foundation:** hub command dispatch and owner backend
+  support remote MCP list/attach/detach/move across local/global/user scopes.
+  TUI `m` on a hub session loads/applies MCP state through the hub command
+  channel, web MCP endpoints route `hub/<node>/<session>` ids through the hub
+  command channel using the remote node catalog, and CLI exposes
+  `agent-deck hub mcps attached|catalog|attach|detach|move`.
+- **Hub plugin management:** hub command dispatch and owner backend support
+  remote plugin catalog/list/attach/detach with channel auto-link state. TUI
+  `L`, the web Plugins pane/endpoints, and CLI `agent-deck hub plugins` route
+  hub sessions through the hub command channel.
+- **Hub undo delete:** hub session deletes now push an owner-local undo window;
+  TUI Ctrl+Z, web `POST /api/sessions/undelete`, and CLI
+  `agent-deck hub sessions undo-delete <node>` route restore through the owner
+  node without exporting deleted session internals over the hub.
+- **Hub sandbox shell:** TUI `E`, web Shift+E / row More → Sandbox shell, and
+  CLI `agent-deck hub sessions sandbox-shell` open the owner-side container
+  shell via `sandbox_shell` and attach through a short-lived signed tmux
+  attach token over the existing hub relay.
+- **Hub web dashboard proxy:** the local web UI can proxy/switch to another
+  node's native web dashboard through the hub command channel; the switcher only
+  lists nodes whose latest snapshot reports `web_available`, and direct proxy
+  requests to known-unavailable nodes return a structured unavailable response.
+- **Hub management basics:** CLI covers serving, invites, join, status, node
+  listing/rename/promote/revoke flows, trust requests/decisions, shell, sessions,
+  groups, MCPs, skills, bundled skill install, and installing/removing/statusing
+  `hub connect` as either a per-user or system-wide systemd service.
+- **Hub web admin management:** when the local web server is configured as a hub
+  admin node, the web Hub Nodes dialog lists/renames/promotes/demotes/revokes
+  nodes, creates/revokes invites without exposing stored invite tokens, and
+  lists/allows/denies pending trust requests through the local server proxy.
+- **Hub TUI admin management:** when the local TUI node is an admin hub node,
+  `H` opens a hub admin dialog for node-management-adjacent flows: listing
+  pending trust requests, allowing/denying missed trust requests, listing
+  invites, creating user/admin invites, and revoking invites. Non-admin TUI
+  nodes hide/deny these controls with explicit admin-required guidance.
+
+### Still missing for full hub/native parity
+
+1. **Hub rich live/status metadata:** hub snapshots now carry edit/dialog
+   metadata such as color, command/wrapper, channels/plugins, extra args, tool
+   options JSON, sandbox config/container, multi-repo/worktree details, loaded
+   MCP names, title-lock/no-transition flags, display session ids, and
+   Honest-Status-v2 substate, and conductor parent/child topology. Remaining
+   gaps are richer live telemetry such as tmux window lists and analytics beyond
+   current projected fields.
+2. **Hub web-dashboard proxy hardening:** the dashboard switcher/proxy now hides
+   and rejects nodes whose latest snapshot reports no remote web server, but
+   still needs broader route coverage, error UX, and security/permission review
+   before it should be considered complete parity.
+3. **Hub CLI breadth:** CLI now covers hub sessions, groups, MCP
+    attach/detach/list/catalog/move, skills attach/detach/list/catalog, and remote
+    plugins, but richer admin workflows remain incomplete.

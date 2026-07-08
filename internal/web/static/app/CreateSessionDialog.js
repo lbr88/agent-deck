@@ -74,12 +74,54 @@ function modelIDsForTool(tool) {
   return MODEL_ID_CATALOG[tool] || []
 }
 
+function stringValue(value) {
+  if (value == null) return ''
+  return String(value).trim()
+}
+
+function pushPath(paths, seen, value) {
+  const path = stringValue(value)
+  if (!path || seen.has(path)) return
+  seen.add(path)
+  paths.push(path)
+}
+
+function pathSuggestionsForTarget(targetHubNodeId, groups, sessions) {
+  const paths = []
+  const seen = new Set()
+  const target = stringValue(targetHubNodeId)
+  for (const g of groups || []) {
+    if (!g) continue
+    if (target) {
+      if (!g.isHub || g.hubNodeId !== target) continue
+    } else if (g.isHub) {
+      continue
+    }
+    pushPath(paths, seen, g.defaultPath)
+  }
+  for (const s of sessions || []) {
+    if (!s) continue
+    if (target) {
+      if (!s.isHub || s.hubNodeId !== target) continue
+    } else if (s.isHub) {
+      continue
+    }
+    pushPath(paths, seen, s.path || s.projectPath || s.raw?.projectPath)
+    pushPath(paths, seen, s.worktreePath || s.raw?.worktreePath)
+    for (const p of s.additionalPaths || s.raw?.additionalPaths || []) pushPath(paths, seen, p)
+  }
+  return paths.sort((a, b) => a.localeCompare(b))
+}
+
 export function CreateSessionDialog() {
   const [title, setTitle] = useState('')
   const [tool, setTool] = useState('claude')
   const [modelId, setModelId] = useState('')
   const [customModel, setCustomModel] = useState('')
   const [path, setPath] = useState('')
+  const [multiRepo, setMultiRepo] = useState(false)
+  const [additionalPaths, setAdditionalPaths] = useState([])
+  const [additionalPathInput, setAdditionalPathInput] = useState('')
   const [hubNodeId, setHubNodeId] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -89,22 +131,23 @@ export function CreateSessionDialog() {
   // preserved by placing this guard AFTER all useState calls.
   if (!mutationsEnabledSignal.value) return null
 
-  async function handleSubmit(e) {
+  function handleSubmit(e) {
     e.preventDefault()
     setError(null)
     setSubmitting(true)
     try {
       const targetHubNode = hubNodeId.trim()
+      const pendingAdditional = additionalPathValues()
       const payload = { title, tool, projectPath: targetHubNode ? (path || '.') : path }
+      if (pendingAdditional.length > 0) payload.additionalPaths = pendingAdditional
       if (targetHubNode) payload.hubNodeId = targetHubNode
       const modelId = selectedModelId()
       if (modelId) payload.modelId = modelId
-      await apiFetch('POST', '/api/sessions', payload)
       createSessionDialogSignal.value = false
+      void apiFetch('POST', '/api/sessions', payload).catch(() => {})
     } catch (err) {
-      setError(err.message)
-    } finally {
       setSubmitting(false)
+      setError(err.message || 'failed to create session')
     }
   }
 
@@ -117,6 +160,34 @@ export function CreateSessionDialog() {
   function selectedModelId() {
     if (modelId === CUSTOM_MODEL) return customModel.trim()
     return modelId || ''
+  }
+
+
+  function additionalPathValues() {
+    if (!multiRepo) return []
+    const values = []
+    const seen = new Set([stringValue(path)])
+    for (const p of additionalPaths) {
+      const value = stringValue(p)
+      if (!value || seen.has(value)) continue
+      seen.add(value)
+      values.push(value)
+    }
+    const pending = stringValue(additionalPathInput)
+    if (pending && !seen.has(pending)) values.push(pending)
+    return values
+  }
+
+  function addAdditionalPath(value = additionalPathInput) {
+    const next = stringValue(value)
+    if (!next) return
+    const existing = new Set([stringValue(path), ...additionalPaths.map(stringValue)])
+    if (!existing.has(next)) setAdditionalPaths(paths => [...paths, next])
+    setAdditionalPathInput('')
+  }
+
+  function removeAdditionalPath(pathToRemove) {
+    setAdditionalPaths(paths => paths.filter(p => p !== pathToRemove))
   }
 
   const close = () => (createSessionDialogSignal.value = false)
@@ -144,7 +215,10 @@ export function CreateSessionDialog() {
   }
   hubNodes.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   const creatingOnHub = !!hubNodeId.trim()
-  const submitDisabled = submitting || !title || (!creatingOnHub && !path) || (needsCustomModel && !customModel.trim())
+  const pathSuggestions = pathSuggestionsForTarget(hubNodeId, groups, sessions)
+  const pathListID = creatingOnHub ? 'create-session-hub-paths' : 'create-session-local-paths'
+  const additionalSuggestions = pathSuggestions.filter(p => p !== stringValue(path) && !additionalPaths.includes(p))
+  const submitDisabled = submitting || !title || (!creatingOnHub && !path) || (multiRepo && additionalPathValues().length === 0) || (needsCustomModel && !customModel.trim())
 
   return html`
     <div class="overlay" onClick=${handleBackdropClick}>
@@ -171,11 +245,58 @@ export function CreateSessionDialog() {
           <div class="field">
             <label>WORKING DIR</label>
             <input required=${!creatingOnHub} value=${path} onInput=${e => setPath(e.target.value)}
+                   list=${pathSuggestions.length ? pathListID : undefined}
                    placeholder=${creatingOnHub ? ". on selected hub node" : "/absolute/path/to/project"}/>
+            ${pathSuggestions.length > 0 && html`
+              <datalist id=${pathListID}>
+                ${pathSuggestions.map(p => html`<option key=${p} value=${p}>${p}</option>`)}
+              </datalist>
+              <div style="font-family: var(--mono); font-size: 11px; color: var(--tn-comment, #888);
+                          margin-top: 5px;">
+                ${creatingOnHub ? 'Suggestions come from the selected hub node.' : 'Suggestions come from known local sessions and group defaults.'}
+              </div>
+            `}
           </div>
           <div class="field">
+            <label>PATH MODE</label>
+            <label style="display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; color:var(--muted);">
+              <input type="checkbox" checked=${multiRepo} onChange=${e => setMultiRepo(e.currentTarget.checked)}/>
+              Multi-repo session
+            </label>
+          </div>
+          ${multiRepo && html`
+            <div class="field">
+              <label>ADDITIONAL PATHS</label>
+              ${additionalPaths.length > 0 && html`
+                <div class="path-chip-row">
+                  ${additionalPaths.map(p => html`
+                    <button type="button" key=${p} class="path-chip" title="Remove path" onClick=${() => removeAdditionalPath(p)}>${p} ×</button>
+                  `)}
+                </div>
+              `}
+              <div style=${{ display: 'flex', gap: '6px' }}>
+                <input value=${additionalPathInput}
+                       onInput=${e => setAdditionalPathInput(e.target.value)}
+                       onKeyDown=${e => { if (e.key === 'Enter') { e.preventDefault(); addAdditionalPath() } }}
+                       list=${pathSuggestions.length ? pathListID : undefined}
+                       placeholder=${creatingOnHub ? "/path/on/selected/hub/node" : "/absolute/path/to/another/repo"}/>
+                <button type="button" class="btn ghost" onClick=${() => addAdditionalPath()} disabled=${!stringValue(additionalPathInput)}>Add</button>
+              </div>
+              ${additionalSuggestions.length > 0 && html`
+                <div class="path-chip-row suggestions" data-testid="create-session-path-suggestions">
+                  ${additionalSuggestions.slice(0, 8).map(p => html`
+                    <button type="button" key=${p} class="path-chip" onClick=${() => addAdditionalPath(p)}>+ ${p}</button>
+                  `)}
+                </div>
+              `}
+              <div style="font-family: var(--mono); font-size: 11px; color: var(--tn-comment, #888); margin-top: 5px;">
+                Multi-repo creates use the working dir as the primary repo and these paths as additional repos.
+              </div>
+            </div>
+          `}
+          <div class="field">
             <label>TOOL</label>
-            <div class="seg-row">
+            <div class="seg-row tool-picker-row">
               ${shownTools.map(t => html`
                 <button type="button" key=${t}
                         class=${`seg-btn ${tool === t ? 'on' : ''}`}

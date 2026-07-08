@@ -7,7 +7,7 @@
 import { html } from 'htm/preact'
 import { Logo, Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
-import { connectionSignal, profilesSignal, commandCenterSignal, hubNodesSignal } from './state.js'
+import { connectionSignal, profilesSignal, commandCenterSignal, hubNodesSignal, hubNodesDialogSignal, hubAdminSignal } from './state.js'
 import {
   activeTabSignal, paletteOpenSignal, tweaksOpenSignal,
   railSignal, profileSignal,
@@ -20,6 +20,7 @@ const TABS = [
   { id: 'terminal',  label: 'Terminal'  },
   { id: 'mcp',       label: 'MCPs'      },
   { id: 'skills',    label: 'Skills'    },
+  { id: 'plugins',   label: 'Plugins'   },
   { id: 'conductor', label: 'Conductor' },
   { id: 'watchers',  label: 'Watchers'  },
   { id: 'costs',     label: 'Costs'     },
@@ -32,8 +33,9 @@ export function Topbar() {
   const conn = connectionSignal.value
   const rail = railSignal.value
   const { sessions } = menuModelSignal.value
-  const dashboardNodes = dashboardHubNodes(menuModelSignal.value, hubNodesSignal.value)
+  const dashboardNodes = dashboardHubNodes(hubNodesSignal.value)
   const currentDashboardNode = currentHubDashboardNode()
+  const hubAdmin = hubAdminSignal.value === true
   const sessionsBadge = sessions.filter(s => s.status === 'waiting' || s.status === 'error').length
   const pendingNeeds = sessions.reduce((n, s) => n + (s.pendingNeeds || 0), 0)
   const cc = commandCenterSignal.value
@@ -71,7 +73,7 @@ export function Topbar() {
       </div>
       <div class="top-right">
         <select
-          class="icon-btn"
+          class="icon-btn dashboard-switch"
           style=${{ width: 'auto', padding: '0 8px', fontFamily: 'var(--mono)', fontSize: '11px' }}
           value=${currentDashboardNode || '__local__'}
           title="Switch dashboard"
@@ -82,6 +84,18 @@ export function Topbar() {
             <option key=${node.id} value=${node.id}>${node.name}</option>
           `)}
         </select>
+        ${hubAdmin && html`
+          <button
+            type="button"
+            class="icon-btn hub-nodes-top-btn"
+            style=${{ width: 'auto', padding: '0 8px', fontFamily: 'var(--mono)', fontSize: '11px' }}
+            title="Manage hub nodes"
+            aria-label="Manage hub nodes"
+            data-testid="hub-nodes-btn"
+            onClick=${() => (hubNodesDialogSignal.value = true)}>
+            hub nodes
+          </button>
+        `}
         <div class=${`conn-pill ${connClass}`}>
           <span class="dot" style=${connDotStyle}/>ws · ${conn === 'connected' ? 'live' : conn}
         </div>
@@ -99,7 +113,7 @@ export function Topbar() {
           // profileSignal, which AppShell seeds from /api/profiles' `current`.
           const current = profileSignal.value || p.current || list[0]
           return html`
-            <span class="icon-btn"
+            <span class="icon-btn profile-pill"
               style=${{ width: 'auto', padding: '0 8px', fontFamily: 'var(--mono)', fontSize: '11px', cursor: 'default' }}
               title="Active profile (bound at startup; not switchable from the web UI)">
               ${current}
@@ -108,7 +122,7 @@ export function Topbar() {
         })()}
         <${ToastHistoryDrawerToggle}/>
         <button
-          class=${`icon-btn ${rail === 'visible' ? 'active' : ''}`}
+          class=${`icon-btn rail-toggle ${rail === 'visible' ? 'active' : ''}`}
           onClick=${() => (railSignal.value = rail === 'visible' ? 'hidden' : 'visible')}
           title=${rail === 'visible' ? 'Hide right rail (])' : 'Show right rail (])'}
           aria-label="Toggle right rail">
@@ -119,7 +133,7 @@ export function Topbar() {
             ${rail === 'visible' && html`<line x1="18" y1="8" x2="18" y2="16" opacity="0.5"/>`}
           </svg>
         </button>
-        <button class="icon-btn" onClick=${() => (tweaksOpenSignal.value = !tweaksOpenSignal.value)} title="Tweaks" aria-label="Tweaks">
+        <button class="icon-btn tweaks-toggle" onClick=${() => (tweaksOpenSignal.value = !tweaksOpenSignal.value)} title="Tweaks" aria-label="Tweaks">
           <${Icon} d=${ICONS.settings}/>
         </button>
       </div>
@@ -127,18 +141,10 @@ export function Topbar() {
   `
 }
 
-function dashboardHubNodes(model, hubNodes) {
+function dashboardHubNodes(hubNodes) {
   const nodes = new Map()
-  const groups = model && Array.isArray(model.groups) ? model.groups : []
-  const sessions = model && Array.isArray(model.sessions) ? model.sessions : []
   for (const n of hubNodes || []) {
-    if (n && n.id) nodes.set(n.id, n.name || n.id)
-  }
-  for (const g of groups) {
-    if (g && g.isHub && g.hubNodeId) nodes.set(g.hubNodeId, g.hubNodeName || g.hubNodeId)
-  }
-  for (const s of sessions) {
-    if (s && s.isHub && s.hubNodeId) nodes.set(s.hubNodeId, s.hubNodeName || s.hubNodeId)
+    if (n && n.id && n.webAvailable === true) nodes.set(n.id, n.name || n.id)
   }
   return Array.from(nodes.entries())
     .map(([id, name]) => ({ id, name }))

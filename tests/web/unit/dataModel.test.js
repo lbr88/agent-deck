@@ -41,4 +41,45 @@ describe('menuModelSignal session projection', () => {
     expect(byID.get('oc-1').canFork).toBe(true)
     expect(byID.get('claude-1').canFork).toBe(false)
   })
+
+  it('preserves sandbox metadata so local and hub shell actions are visible', async () => {
+    const { sessionsSignal } = await import(stateModulePath)
+    const { menuModelSignal } = await import(dataModelModulePath)
+
+    sessionsSignal.value = [
+      {
+        type: 'session',
+        session: {
+          id: 'local-sandbox',
+          title: 'Local sandbox',
+          tool: 'claude',
+          groupPath: 'default',
+          sandbox: { enabled: true },
+          sandboxContainer: 'agentdeck-local',
+        },
+      },
+      {
+        type: 'session',
+        session: {
+          id: 'hub:node_gpu:remote-sandbox',
+          title: 'Remote sandbox',
+          tool: 'codex',
+          groupPath: 'gpu',
+          source: 'hub',
+          hubNodeId: 'node_gpu',
+          hubNodeName: 'gpu',
+          hubSessionId: 'remote-sandbox',
+          sandbox: { enabled: true },
+          sandboxContainer: 'agentdeck-remote',
+        },
+      },
+    ]
+
+    const byID = new Map(menuModelSignal.value.sessions.map((s) => [s.id, s]))
+    expect(byID.get('local-sandbox').sandbox).toBe(true)
+    expect(byID.get('local-sandbox').sandboxContainer).toBe('agentdeck-local')
+    expect(byID.get('hub:node_gpu:remote-sandbox').isHub).toBe(true)
+    expect(byID.get('hub:node_gpu:remote-sandbox').sandbox).toBe(true)
+    expect(byID.get('hub:node_gpu:remote-sandbox').sandboxContainer).toBe('agentdeck-remote')
+  })
 })

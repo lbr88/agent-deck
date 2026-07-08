@@ -698,6 +698,30 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	}
 }
 
+func TestServerSnapshotEnvelopeIncludesGroupsAndWebAvailability(t *testing.T) {
+	server := newTestServer(t)
+	env, err := server.snapshotEnvelope(NodeSessions{
+		Node:         Node{ID: "node_1", Name: "laptop"},
+		SentAt:       time.Unix(126, 0).UTC(),
+		WebAvailable: true,
+		Sessions:     []SessionInfo{{ID: "s1", Title: "worker", Status: "waiting"}},
+		Groups:       []GroupInfo{{Name: "ops", Path: "ops", DefaultPath: "/srv/ops"}},
+	}, true)
+	if err != nil {
+		t.Fatalf("snapshotEnvelope: %v", err)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if !payload.WebAvailable {
+		t.Fatal("WebAvailable = false, want true")
+	}
+	if len(payload.Groups) != 1 || payload.Groups[0].DefaultPath != "/srv/ops" {
+		t.Fatalf("groups = %+v, want /srv/ops default path", payload.Groups)
+	}
+}
+
 func TestHubNodeWebSocketClearsUntrustedSnapshotFanout(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret_1"), "1.0.0", "linux", "amd64"); err != nil {

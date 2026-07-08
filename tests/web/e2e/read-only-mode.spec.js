@@ -151,14 +151,17 @@ test.describe('read-only mode (webMutations=false)', () => {
     await expect(page.locator('.work-head .actions')).toHaveCount(0)
   })
 
-  test('sidebar row action buttons stay rendered but are click-gated with a toast', async ({ page, request }) => {
+  test('sidebar row action menu stays rendered but is click-gated with a toast', async ({ page, request }) => {
     await gotoHydratedReadOnlyApp(page)
-    // Per Sidebar.js the per-row hover buttons are NOT gated at render time;
+    // Per Sidebar.js the per-row action surface is NOT gated at render time;
     // doAction() rejects with addToast('mutations disabled') before any
-    // apiFetch. Hover to reveal the action bar (CSS: .sess:hover .actions).
+    // apiFetch. Hover/focus to reveal the action bar and More menu.
     const row = page.locator('.sess').first()
     await row.hover()
-    const delBtn = row.locator('.actions button[title="Delete"]')
+    const more = row.locator('[data-testid="session-more-btn"]')
+    await more.focus()
+    await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
+    const delBtn = row.locator('[data-testid="session-delete-btn"]')
     await expect(delBtn).toBeVisible()
     await delBtn.click()
     // Toast surfaces the gate; no confirm dialog opens.

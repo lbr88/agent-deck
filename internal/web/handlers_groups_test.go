@@ -138,6 +138,70 @@ func TestGroupDeleteOK(t *testing.T) {
 	}
 }
 
+func TestGroupChangeOK(t *testing.T) {
+	var gotGroup, gotDest string
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeMutator{
+		reparentGroupFn: func(groupPath, destParentPath string) (string, error) {
+			gotGroup = groupPath
+			gotDest = destParentPath
+			return "platform/backend", nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/groups/ops/backend/change", strings.NewReader(`{"destParentPath":"platform"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotGroup != "ops/backend" || gotDest != "platform" {
+		t.Fatalf("reparent call = %q -> %q", gotGroup, gotDest)
+	}
+	if !strings.Contains(rr.Body.String(), "platform/backend") {
+		t.Fatalf("response missing new group path: %s", rr.Body.String())
+	}
+}
+
+func TestGroupReorderOK(t *testing.T) {
+	var gotGroup, gotDirection string
+	var gotPosition *int
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeMutator{
+		reorderGroupFn: func(groupPath, direction string, position *int) (int, int, error) {
+			gotGroup = groupPath
+			gotDirection = direction
+			gotPosition = position
+			return 2, 1, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/groups/platform/backend/reorder", strings.NewReader(`{"direction":"up"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotGroup != "platform/backend" || gotDirection != "up" || gotPosition != nil {
+		t.Fatalf("reorder call = group %q direction %q position %v", gotGroup, gotDirection, gotPosition)
+	}
+	if !strings.Contains(rr.Body.String(), `"fromPosition":2`) || !strings.Contains(rr.Body.String(), `"toPosition":1`) {
+		t.Fatalf("response missing positions: %s", rr.Body.String())
+	}
+}
+
 func TestGroupDeleteDefaultGroupReturns400(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr:   "127.0.0.1:0",

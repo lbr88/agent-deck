@@ -20,10 +20,20 @@ function deriveKind(s) {
   return 'agent'
 }
 
+function stringValue(value) {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ')
+  if (typeof value === 'object') {
+    return stringValue(value.path || value.projectPath || value.value || value.label || value.name || '')
+  }
+  return String(value)
+}
+
 function projectSession(item) {
   const s = item.session || {}
-  const id = s.id || ''
-  const groupPath = s.groupPath || ''
+  const id = stringValue(s.id)
+  const groupPath = stringValue(s.groupPath)
   return {
     id,
     kind: deriveKind(s),
@@ -34,7 +44,7 @@ function projectSession(item) {
     hubSessionId: s.hubSessionId || '',
     hubGroupPath: s.hubGroupPath || '',
     readOnly: !!s.readOnly,
-    title: s.title || id,
+    title: stringValue(s.title) || id,
     group: groupPath,
     tool: s.tool || '',
     modelId: s.modelId || '',
@@ -43,7 +53,7 @@ function projectSession(item) {
     canFork: !!s.canFork,
     status: s.status || 'idle',
     branch: s.branch || '—',
-    path: s.projectPath || '',
+    path: stringValue(s.projectPath),
     multiRepoEnabled: !!s.multiRepoEnabled,
     additionalPaths: Array.isArray(s.additionalPaths) ? s.additionalPaths : [],
     cost: 0,            // hydrated separately via sessionCostsSignal
@@ -57,7 +67,8 @@ function projectSession(item) {
     // back to the TUI.
     worktree: !!(s.worktreeBranch && s.worktreeRepoRoot),
     worktreeBranch: s.worktreeBranch || '',
-    sandbox: false,     // not exposed by API
+    sandbox: !!s.sandbox,
+    sandboxContainer: s.sandboxContainer || '',
     parent: null,
     pendingNeeds: 0,
     watcherType: null,
@@ -72,10 +83,12 @@ function projectGroup(item) {
   const g = item.group || {}
   return {
     path: g.path || '',
+    name: g.name || g.path || '',
     label: (g.name || g.path || '').toUpperCase(),
     expanded: !!g.expanded,
     sessionCount: g.sessionCount || 0,
     order: g.order || 0,
+    defaultPath: stringValue(g.defaultPath),
     source: g.source || '',
     isHub: g.source === 'hub',
     hubNodeId: g.hubNodeId || '',

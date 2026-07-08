@@ -7,7 +7,7 @@
 export const DEFAULT_PICKER_TOOLS = ['claude', 'codex', 'gemini', 'opencode', 'shell']
 
 export const TOOL_DISPLAY_LABELS = {
-  codex: 'ChatGPT',
+  codex: 'Codex',
 }
 
 export function displayLabelForTool(tool) {

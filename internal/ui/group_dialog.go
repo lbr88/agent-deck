@@ -17,6 +17,7 @@ const (
 	GroupDialogRename
 	GroupDialogMove
 	GroupDialogRenameSession
+	GroupDialogRenameNode
 )
 
 // GroupDialog handles group creation, renaming, and moving sessions
@@ -31,6 +32,7 @@ type GroupDialog struct {
 	groupPath     string   // Current group being edited (for rename) or parent path (for create subgroup)
 	parentName    string   // Display name of parent group (for subgroup creation)
 	groupPaths    []string // Available target group paths (for move)
+	moveTitle     string   // Dialog title for move mode
 	selected      int      // Selected group index (for move)
 	sessionID     string   // Session ID being renamed (for rename session)
 	validationErr string   // Inline validation error displayed inside the dialog
@@ -166,11 +168,34 @@ func (g *GroupDialog) ShowRename(currentPath, currentName string) {
 	g.focusName()
 }
 
+// ShowRenameNode shows the dialog for renaming a hub node.
+func (g *GroupDialog) ShowRenameNode(nodeID, currentName string) {
+	g.visible = true
+	g.mode = GroupDialogRenameNode
+	g.groupPath = nodeID
+	g.validationErr = ""
+	g.nameInput.SetValue(currentName)
+	g.nameInput.CursorEnd()
+	g.focusName()
+}
+
 // ShowMove shows the dialog for moving a session to a group path.
 func (g *GroupDialog) ShowMove(groupPaths []string) {
 	g.visible = true
 	g.mode = GroupDialogMove
 	g.validationErr = ""
+	g.moveTitle = "Move to Group"
+	g.groupPaths = groupPaths
+	g.selected = 0
+}
+
+// ShowMoveGroup shows the dialog for moving/reparenting a group. groupPaths
+// may include an empty string, which represents root level.
+func (g *GroupDialog) ShowMoveGroup(groupPaths []string) {
+	g.visible = true
+	g.mode = GroupDialogMove
+	g.validationErr = ""
+	g.moveTitle = "Move Group To"
 	g.groupPaths = groupPaths
 	g.selected = 0
 }
@@ -256,6 +281,9 @@ func (g *GroupDialog) Validate() string {
 		if g.mode == GroupDialogRenameSession {
 			return "Session name cannot be empty"
 		}
+		if g.mode == GroupDialogRenameNode {
+			return "Node name cannot be empty"
+		}
 		return "Group name cannot be empty"
 	}
 
@@ -265,8 +293,11 @@ func (g *GroupDialog) Validate() string {
 	}
 
 	// Check for "/" in group names (would break path hierarchy)
-	if g.mode == GroupDialogCreate || g.mode == GroupDialogRename {
+	if g.mode == GroupDialogCreate || g.mode == GroupDialogRename || g.mode == GroupDialogRenameNode {
 		if strings.Contains(name, "/") {
+			if g.mode == GroupDialogRenameNode {
+				return "Node name cannot contain '/' character"
+			}
 			return "Group name cannot contain '/' character"
 		}
 	}
@@ -305,6 +336,13 @@ func (g *GroupDialog) GetSelectedGroup() string {
 		return g.groupPaths[g.selected]
 	}
 	return ""
+}
+
+func (g *GroupDialog) GetSelectedGroupOK() (string, bool) {
+	if g.selected >= 0 && g.selected < len(g.groupPaths) {
+		return g.groupPaths[g.selected], true
+	}
+	return "", false
 }
 
 // SetSize sets the dialog size
@@ -414,26 +452,36 @@ func (g *GroupDialog) View() string {
 		title = "Rename Group"
 		content = g.nameInput.View()
 	case GroupDialogMove:
-		title = "Move to Group"
+		title = g.moveTitle
+		if title == "" {
+			title = "Move to Group"
+		}
 		var items []string
 		for i, groupPath := range g.groupPaths {
+			label := groupPath
+			if label == "" {
+				label = "Root"
+			}
 			if i == g.selected {
 				items = append(items, lipgloss.NewStyle().
 					Foreground(ColorBg).
 					Background(ColorAccent).
 					Bold(true).
 					Padding(0, 1).
-					Render(groupPath))
+					Render(label))
 			} else {
 				items = append(items, lipgloss.NewStyle().
 					Foreground(ColorText).
 					Padding(0, 1).
-					Render(groupPath))
+					Render(label))
 			}
 		}
 		content = strings.Join(items, "\n")
 	case GroupDialogRenameSession:
 		title = "Rename Session"
+		content = g.nameInput.View()
+	case GroupDialogRenameNode:
+		title = "Rename Hub Node"
 		content = g.nameInput.View()
 	}
 

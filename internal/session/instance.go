@@ -4856,7 +4856,9 @@ func (i *Instance) PostStartSync(maxWait time.Duration) {
 	switch {
 	case IsClaudeCompatible(i.Tool):
 		i.WaitForClaudeSession(maxWait)
-		i.autoConfirmClaudeResumePicker()
+		if maxWait > 0 {
+			i.autoConfirmClaudeResumePicker()
+		}
 	case i.Tool == "gemini":
 		i.UpdateGeminiSession(nil)
 	case i.Tool == "copilot":

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,14 +81,54 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 				Path: "empty",
 			}},
 			Sessions: []hub.SessionInfo{{
-				ID:          "r1",
-				Title:       "deploy",
-				Tool:        "claude",
-				Status:      "waiting",
-				GroupPath:   "ops",
-				ProjectPath: "/srv/app",
-				Notes:       "remote runbook",
-				CanFork:     true,
+				ID:             "r1",
+				Title:          "deploy",
+				Tool:           "claude",
+				Status:         "waiting",
+				Substate:       "idle-at-empty-prompt",
+				GroupPath:      "ops",
+				ProjectPath:    "/srv/app",
+				IsConductor:    true,
+				Command:        "claude --model sonnet",
+				Wrapper:        "direnv exec .",
+				TmuxSession:    "tmux-r1",
+				TmuxSocketName: "agent-deck",
+				Windows: []hub.WindowInfo{{
+					Index:    0,
+					Name:     "main",
+					Activity: 123,
+					Tool:     "claude",
+				}, {
+					Index: 1,
+					Name:  "logs",
+					Tool:  "shell",
+				}},
+				Color:            "cyan",
+				ClaudeSessionID:  "claude-r1",
+				LatestPrompt:     "ship it",
+				WorktreePath:     "/srv/app/.worktrees/deploy",
+				WorktreeRepoRoot: "/srv/app",
+				WorktreeBranch:   "fork/deploy",
+				Notes:            "remote runbook",
+				LoadedMCPNames:   []string{"github"},
+				Plugins:          []string{"review"},
+				Channels:         []string{"code"},
+				ExtraArgs:        []string{"--verbose"},
+				ToolOptionsJSON:  json.RawMessage(`{"model":"sonnet"}`),
+				Sandbox:          json.RawMessage(`{"enabled":true,"image":"sandbox:latest"}`),
+				SandboxContainer: "container-r1",
+				SSHHost:          "server1",
+				SSHRemotePath:    "/srv/app",
+				TitleLocked:      true,
+				CanFork:          true,
+			}, {
+				ID:              "r1-child",
+				Title:           "deploy child",
+				Tool:            "claude",
+				Status:          "running",
+				GroupPath:       "ops",
+				ProjectPath:     "/srv/app",
+				ParentSessionID: "r1",
 			}, {
 				ID:         "archived",
 				Title:      "old",
@@ -113,6 +154,45 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	}
 	if got := webSnapshotHubSessionNotes(active, "node_server", "r1"); got != "remote runbook" {
 		t.Fatalf("active web snapshot hub notes = %q, want remote runbook", got)
+	}
+	if got := webSnapshotHubSessionWorktree(active, "node_server", "r1"); got != "fork/deploy" {
+		t.Fatalf("active web snapshot hub worktree branch = %q, want fork/deploy", got)
+	}
+	projected := webSnapshotHubSession(active, "node_server", "r1")
+	if projected == nil {
+		t.Fatal("active web snapshot hub session missing projected metadata")
+	}
+	if projected.Command != "claude --model sonnet" || projected.Wrapper != "direnv exec ." ||
+		projected.TmuxSession != "tmux-r1" || projected.TmuxSocketName != "agent-deck" ||
+		projected.Color != "cyan" || projected.ClaudeSessionID != "claude-r1" || projected.LatestPrompt != "ship it" {
+		t.Fatalf("active web snapshot hub rich metadata missing: %+v", projected)
+	}
+	if projected.Substate != "idle-at-empty-prompt" {
+		t.Fatalf("active web snapshot hub substate = %q, want idle-at-empty-prompt", projected.Substate)
+	}
+	if !projected.IsConductor {
+		t.Fatalf("active web snapshot hub isConductor = false, want true: %+v", projected)
+	}
+	if len(projected.Windows) != 2 || projected.Windows[1].Index != 1 || projected.Windows[1].Name != "logs" || projected.Windows[1].Tool != "shell" {
+		t.Fatalf("active web snapshot hub windows missing: %+v", projected.Windows)
+	}
+	child := webSnapshotHubSession(active, "node_server", "r1-child")
+	if child == nil {
+		t.Fatal("active web snapshot missing hub child session")
+	}
+	if child.ParentSessionID != web.HubSessionWebID("node_server", "r1") {
+		t.Fatalf("active web snapshot hub child parentSessionId = %q, want %q", child.ParentSessionID, web.HubSessionWebID("node_server", "r1"))
+	}
+	if len(projected.LoadedMCPNames) != 1 || projected.LoadedMCPNames[0] != "github" ||
+		len(projected.Plugins) != 1 || projected.Plugins[0] != "review" ||
+		len(projected.Channels) != 1 || projected.Channels[0] != "code" ||
+		len(projected.ExtraArgs) != 1 || projected.ExtraArgs[0] != "--verbose" {
+		t.Fatalf("active web snapshot hub list metadata missing: %+v", projected)
+	}
+	if string(projected.ToolOptionsJSON) != `{"model":"sonnet"}` || projected.Sandbox == nil || !projected.Sandbox.Enabled ||
+		projected.SandboxContainer != "container-r1" || projected.SSHHost != "server1" || projected.SSHRemotePath != "/srv/app" ||
+		!projected.TitleLocked {
+		t.Fatalf("active web snapshot hub config metadata missing: %+v", projected)
 	}
 	if webSnapshotHasHubSession(active, "node_server", "archived") {
 		t.Fatalf("active web snapshot included archived hub session: %+v", active.Items)
@@ -140,6 +220,7 @@ func TestHubRemoteEmptyGroupAppearsAsCreateTarget(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
 	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = true
 	client := &fakeHubAttachClient{}
 	h.hubClient = client
 	h.hubSessions = map[string]hub.NodeSessions{
@@ -269,6 +350,85 @@ func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
 	}
 }
 
+func TestHubSessionRenderUsesRemoteSubstateGlyph(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	item := session.Item{
+		Type:        session.ItemTypeHubSession,
+		HubNodeID:   "node_server",
+		HubNodeName: "server1",
+		HubSession: &session.HubSessionInfo{
+			ID:       "r1",
+			Title:    "deploy",
+			Tool:     "claude",
+			Status:   string(session.StatusError),
+			Substate: string(session.SubstateAuth401),
+		},
+	}
+
+	var row strings.Builder
+	h.renderHubSessionItem(&row, item, false)
+	if got := stripANSIForHubTest(row.String()); !strings.Contains(got, "🔒") {
+		t.Fatalf("hub row did not render auth substate glyph:\n%s", got)
+	}
+	preview := stripANSIForHubTest(h.renderHubPreview(item, 80, 24))
+	if !strings.Contains(preview, "🔒 error") {
+		t.Fatalf("hub preview did not render auth substate glyph:\n%s", preview)
+	}
+}
+
+func stripANSIForHubTest(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) {
+			switch s[i+1] {
+			case '[':
+				j := i + 2
+				for j < len(s) && !((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z')) {
+					j++
+				}
+				i = j
+				continue
+			case ']':
+				j := i + 2
+				for j < len(s) && s[j] != 0x07 && !(s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\') {
+					j++
+				}
+				if j < len(s) && s[j] == 0x1b {
+					j++
+				}
+				i = j
+				continue
+			}
+		}
+		out.WriteByte(s[i])
+	}
+	return out.String()
+}
+
+func TestHubStatusCallbackWakesUpdateLoop(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+
+	cmd := h.listenForHubStatus()
+	if cmd == nil {
+		t.Fatal("hub status listener command is nil")
+	}
+	h.handleHubStatus("hub connected")
+
+	msg, ok := cmd().(hubStatusMsg)
+	if !ok {
+		t.Fatalf("listener msg type = %T, want hubStatusMsg", msg)
+	}
+	model, next := h.Update(msg)
+	h = model.(*Home)
+	if got := h.hubStatusText(); got != "hub connected" {
+		t.Fatalf("hub status = %q, want hub connected", got)
+	}
+	if next == nil {
+		t.Fatal("hub status handler did not re-arm the listener")
+	}
+}
+
 func TestHubTrustRequestShowsConfirmation(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
@@ -322,6 +482,189 @@ func TestHubTrustAllowSendsDecisionThroughHubClient(t *testing.T) {
 	}
 	if h.confirmDialog.IsVisible() {
 		t.Fatal("trust dialog still visible after allow")
+	}
+}
+
+func TestHubAdminDialogLoadsInvitesAndTrustForAdmin(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{
+		invites: []hub.AdminInvite{{
+			ID:        "invite_1",
+			NodeName:  "gpu",
+			ExpiresAt: time.Unix(456, 0).UTC(),
+			Status:    "active",
+		}},
+		trustRequests: []hub.TrustRequestPayload{{
+			NodeID:   "node_pending",
+			NodeName: "pending gpu",
+			Version:  "1.0.0",
+			OS:       "linux",
+			Arch:     "amd64",
+		}},
+	}
+	h.hubClient = client
+
+	cmd := h.openHubAdminDialog()
+	if cmd == nil {
+		t.Fatal("admin hub dialog returned no load command")
+	}
+	msg, ok := cmd().(hubAdminDialogLoadedMsg)
+	if !ok {
+		t.Fatalf("load command returned %T, want hubAdminDialogLoadedMsg", msg)
+	}
+	model, _ := h.Update(msg)
+	h = model.(*Home)
+
+	if !h.hubAdminDialog.IsVisible() {
+		t.Fatal("hub admin dialog is not visible after load")
+	}
+	view := h.hubAdminDialog.View()
+	for _, want := range []string{"Trust pending gpu", "Invite gpu", "active"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("hub admin dialog missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestHubAdminDialogRequiresAdmin(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeAdmin = false
+	h.hubClient = &fakeHubAttachClient{}
+
+	cmd := h.openHubAdminDialog()
+	if cmd != nil {
+		t.Fatal("non-admin hub admin dialog returned a command")
+	}
+	if h.hubAdminDialog.IsVisible() {
+		t.Fatal("non-admin hub admin dialog should not be visible")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "admin") {
+		t.Fatalf("non-admin hub admin error = %v, want admin guidance", h.err)
+	}
+}
+
+func TestHubAdminDialogAllowsDeniesTrustAndRevokesInvite(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{
+		invites: []hub.AdminInvite{{
+			ID:        "invite_1",
+			NodeName:  "gpu",
+			ExpiresAt: time.Unix(456, 0).UTC(),
+			Status:    "active",
+		}},
+		trustRequests: []hub.TrustRequestPayload{{
+			NodeID:   "node_pending",
+			NodeName: "pending gpu",
+		}},
+	}
+	h.hubClient = client
+	model, _ := h.Update(h.openHubAdminDialog()().(hubAdminDialogLoadedMsg))
+	h = model.(*Home)
+
+	model, cmd := h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("allow trust key returned no command")
+	}
+	if result := cmd().(hubAdminActionResultMsg); result.err != nil || result.action != "trust_allow" || result.id != "node_pending" {
+		t.Fatalf("allow trust result = %+v", result)
+	}
+
+	model, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("deny trust key returned no command")
+	}
+	if result := cmd().(hubAdminActionResultMsg); result.err != nil || result.action != "trust_deny" || result.id != "node_pending" {
+		t.Fatalf("deny trust result = %+v", result)
+	}
+
+	model, _ = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyDown})
+	h = model.(*Home)
+	_, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	if cmd == nil {
+		t.Fatal("revoke invite key returned no command")
+	}
+	if result := cmd().(hubAdminActionResultMsg); result.err != nil || result.action != "invite_revoke" || result.id != "invite_1" {
+		t.Fatalf("revoke invite result = %+v", result)
+	}
+
+	if len(client.trustDecisions) != 2 ||
+		client.trustDecisions[0] != (hubTrustDecisionCall{nodeID: "node_pending", allow: true}) ||
+		client.trustDecisions[1] != (hubTrustDecisionCall{nodeID: "node_pending", allow: false}) {
+		t.Fatalf("trust decisions = %+v", client.trustDecisions)
+	}
+	if len(client.revokedInvites) != 1 || client.revokedInvites[0] != "invite_1" {
+		t.Fatalf("revoked invites = %+v", client.revokedInvites)
+	}
+}
+
+func TestHubAdminDialogCreatesUserAndAdminInvites(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubAdminDialog.SetSize(100, 40)
+	h.hubAdminDialog.Show(nil, nil)
+
+	model, cmd := h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("c should enter invite create mode without a command")
+	}
+	if !h.hubAdminDialog.IsCreatingInvite() {
+		t.Fatal("c did not enter invite create mode")
+	}
+	h.hubAdminDialog.createNameInput.SetValue("gpu-worker")
+	h.hubAdminDialog.createTTLInput.SetValue("12")
+	_, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("create invite enter returned no command")
+	}
+	result, ok := cmd().(hubAdminActionResultMsg)
+	if !ok {
+		t.Fatalf("create invite command returned %T", result)
+	}
+	if result.err != nil || result.inviteResp == nil || result.action != "invite_create" || result.id != "gpu-worker" {
+		t.Fatalf("create invite result = %+v", result)
+	}
+	if len(client.createdInvites) != 1 {
+		t.Fatalf("created invites = %d, want 1", len(client.createdInvites))
+	}
+	if got := client.createdInvites[0]; got.NodeName != "gpu-worker" || got.TTLSeconds != 12*3600 || got.Admin {
+		t.Fatalf("created user invite = %+v", got)
+	}
+	model, reload := h.Update(result)
+	h = model.(*Home)
+	if reload == nil {
+		t.Fatal("create invite result did not schedule admin dialog reload")
+	}
+	if !strings.Contains(h.hubAdminDialog.View(), "agent-deck hub join") {
+		t.Fatalf("created invite join command missing from dialog:\n%s", h.hubAdminDialog.View())
+	}
+
+	model, _ = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	h = model.(*Home)
+	h.hubAdminDialog.createNameInput.SetValue("admin-gpu")
+	h.hubAdminDialog.createTTLInput.SetValue("1.5")
+	_, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("create admin invite enter returned no command")
+	}
+	if result := cmd().(hubAdminActionResultMsg); result.err != nil {
+		t.Fatalf("create admin invite command error = %v", result.err)
+	}
+	if len(client.createdInvites) != 2 {
+		t.Fatalf("created invites = %d, want 2", len(client.createdInvites))
+	}
+	if got := client.createdInvites[1]; got.NodeName != "admin-gpu" || got.TTLSeconds != 5400 || !got.Admin {
+		t.Fatalf("created admin invite = %+v", got)
 	}
 }
 
@@ -385,18 +728,25 @@ func TestHubSessionNOpensNewSessionDialog(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
 	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = true
 	client := &fakeHubAttachClient{}
 	h.hubClient = client
 	h.hubSessions = map[string]hub.NodeSessions{
 		"node_server": {
 			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{{
+				Path:        "ops",
+				Name:        "ops",
+				DefaultPath: "/srv/ops",
+			}},
 			Sessions: []hub.SessionInfo{{
-				ID:          "r1",
-				Title:       "deploy",
-				Tool:        "claude",
-				Status:      "waiting",
-				GroupPath:   "ops",
-				ProjectPath: "/srv/app",
+				ID:              "r1",
+				Title:           "deploy",
+				Tool:            "claude",
+				Status:          "waiting",
+				GroupPath:       "ops",
+				ProjectPath:     "/srv/app",
+				AdditionalPaths: []string{"/srv/lib"},
 			}},
 		},
 	}
@@ -420,6 +770,12 @@ func TestHubSessionNOpensNewSessionDialog(t *testing.T) {
 	_, path, command := h.newDialog.GetRemoteValues()
 	if path != "/srv/app" {
 		t.Fatalf("dialog path = %q, want /srv/app", path)
+	}
+	if want := []string{"/srv/app", "/srv/lib", "/srv/ops"}; !slices.Equal(h.newDialog.allPathSuggestions, want) {
+		t.Fatalf("hub path suggestions = %#v, want %#v", h.newDialog.allPathSuggestions, want)
+	}
+	if !h.newDialog.remotePathSuggestions {
+		t.Fatal("hub dialog should use remote path suggestion mode")
 	}
 	if command != "claude" {
 		t.Fatalf("dialog command = %q, want claude", command)
@@ -484,6 +840,75 @@ func TestHubEmptyNodeNOpensNewSessionDialog(t *testing.T) {
 	}
 }
 
+func TestHubGroupNewSessionDialogUsesRemotePathSuggestions(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{
+				{Path: "ops", Name: "ops", DefaultPath: "/srv/ops"},
+				{Path: "ml", Name: "ml", DefaultPath: "/srv/ml"},
+			},
+			Sessions: []hub.SessionInfo{
+				{ID: "r1", Title: "deploy", Tool: "claude", Status: "waiting", GroupPath: "ops", ProjectPath: "/srv/app", AdditionalPaths: []string{"/srv/lib", "/srv/ops"}},
+				{ID: "r2", Title: "worker", Tool: "codex", Status: "idle", GroupPath: "ml", ProjectPath: "/srv/ml/worker"},
+			},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubGroup(t, h, "node_server", "ops")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("n on hub node should open dialog without command")
+	}
+	if !h.newDialog.IsVisible() {
+		t.Fatal("hub node new-session dialog not visible")
+	}
+	want := []string{"/srv/app", "/srv/lib", "/srv/ml", "/srv/ml/worker", "/srv/ops"}
+	if !slices.Equal(h.newDialog.allPathSuggestions, want) {
+		t.Fatalf("hub node path suggestions = %#v, want %#v", h.newDialog.allPathSuggestions, want)
+	}
+	if _, path, _ := h.newDialog.GetRemoteValues(); path != "/srv/ops" {
+		t.Fatalf("hub group default path = %q, want /srv/ops", path)
+	}
+}
+
+func TestHubGroupNewSessionDialogUsesGroupDefaultPath(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{{
+				Path:        "ops",
+				Name:        "ops",
+				DefaultPath: "/srv/ops",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubGroup(t, h, "node_server", "ops")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("n on hub group should open dialog without command")
+	}
+	if got := h.newDialog.GetSelectedGroup(); got != "ops" {
+		t.Fatalf("selected group = %q, want ops", got)
+	}
+	if _, path, _ := h.newDialog.GetRemoteValues(); path != "/srv/ops" {
+		t.Fatalf("hub group default path = %q, want /srv/ops", path)
+	}
+}
+
 func TestHubEmptyNodeShiftNQuickCreatesThroughHubCommand(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
@@ -518,6 +943,260 @@ func TestHubEmptyNodeShiftNQuickCreatesThroughHubCommand(t *testing.T) {
 	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "create" ||
 		req.GroupPath != session.DefaultGroupPath || req.ProjectPath != "." || strings.TrimSpace(req.Title) == "" {
 		t.Fatalf("quick hub node create = command=%+v req=%+v", client.commands[0], req)
+	}
+}
+
+func TestHubNodeRenameUsesAdminClient(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("r on hub node should open rename dialog without command")
+	}
+	if !h.groupDialog.IsVisible() || h.groupDialog.Mode() != GroupDialogRenameNode {
+		t.Fatalf("hub node rename dialog mode=%v visible=%v", h.groupDialog.Mode(), h.groupDialog.IsVisible())
+	}
+	h.groupDialog.nameInput.SetValue("desktop")
+
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub node rename submit returned no command")
+	}
+	msg := cmd()
+	result, ok := msg.(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("rename msg type = %T, want hubActionResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("rename hub node command error = %v", result.err)
+	}
+	if len(client.renamedNodes) != 1 || client.renamedNodes[0].nodeID != "node_server" || client.renamedNodes[0].name != "desktop" {
+		t.Fatalf("renamed nodes = %+v, want node_server/desktop", client.renamedNodes)
+	}
+	if got := h.hubSessions["node_server"].Node.Name; got != "desktop" {
+		t.Fatalf("cached node name = %q, want desktop", got)
+	}
+	if h.groupDialog.IsVisible() {
+		t.Fatal("rename dialog should hide after submit")
+	}
+}
+
+func TestHubNodeRenameRequiresAdmin(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = false
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("r on non-admin hub node should not return a command")
+	}
+	if h.groupDialog.IsVisible() {
+		t.Fatal("non-admin hub node rename should not open dialog")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "admin") {
+		t.Fatalf("non-admin rename error = %v, want admin guidance", h.err)
+	}
+}
+
+func TestHubNodePromoteDemoteUsesAdminClientAndUpdatesCache(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1", Admin: false},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	cmd := h.setHubNodeAdmin(h.flatItems[h.cursor], true)
+	if cmd == nil {
+		t.Fatal("promote hub node returned no command")
+	}
+	result, ok := cmd().(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("promote command msg = %T, want hubActionResultMsg", result)
+	}
+	if result.err != nil {
+		t.Fatalf("promote command error = %v", result.err)
+	}
+	model, _ := h.Update(result)
+	h = model.(*Home)
+	if len(client.promotedNodes) != 1 || client.promotedNodes[0] != "node_server" {
+		t.Fatalf("promoted nodes = %+v", client.promotedNodes)
+	}
+	if !h.hubNodeIsAdmin("node_server") {
+		t.Fatal("promoted hub node cache admin=false, want true")
+	}
+
+	h.cursor = indexHubNode(t, h, "node_server")
+	cmd = h.setHubNodeAdmin(h.flatItems[h.cursor], false)
+	if cmd == nil {
+		t.Fatal("demote hub node returned no command")
+	}
+	result, ok = cmd().(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("demote command msg = %T, want hubActionResultMsg", result)
+	}
+	if result.err != nil {
+		t.Fatalf("demote command error = %v", result.err)
+	}
+	model, _ = h.Update(result)
+	h = model.(*Home)
+	if len(client.demotedNodes) != 1 || client.demotedNodes[0] != "node_server" {
+		t.Fatalf("demoted nodes = %+v", client.demotedNodes)
+	}
+	if h.hubNodeIsAdmin("node_server") {
+		t.Fatal("demoted hub node cache admin=true, want false")
+	}
+}
+
+func TestHubNodeAdminActionsRequireAdmin(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = false
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	if cmd := h.setHubNodeAdmin(h.flatItems[h.cursor], true); cmd != nil {
+		t.Fatal("non-admin promote returned command")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "admin") {
+		t.Fatalf("non-admin promote error = %v, want admin guidance", h.err)
+	}
+
+	h.clearError()
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("non-admin revoke returned command")
+	}
+	if h.confirmDialog.IsVisible() {
+		t.Fatal("non-admin revoke opened confirmation dialog")
+	}
+	if h.err == nil || !strings.Contains(h.err.Error(), "admin") {
+		t.Fatalf("non-admin revoke error = %v, want admin guidance", h.err)
+	}
+}
+
+func TestHubNodeRevokeConfirmsAndUsesAdminClient(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubLocalNodeAdmin = true
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("d on hub node returned command before confirmation")
+	}
+	if !h.confirmDialog.IsVisible() || h.confirmDialog.GetConfirmType() != ConfirmRevokeHubNode {
+		t.Fatalf("revoke confirmation visible/type = %v/%v", h.confirmDialog.IsVisible(), h.confirmDialog.GetConfirmType())
+	}
+
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("confirm revoke returned no command")
+	}
+	result, ok := cmd().(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("revoke command msg = %T, want hubActionResultMsg", result)
+	}
+	if result.err != nil {
+		t.Fatalf("revoke command error = %v", result.err)
+	}
+	model, _ = h.Update(result)
+	h = model.(*Home)
+	if len(client.revokedNodes) != 1 || client.revokedNodes[0] != "node_server" {
+		t.Fatalf("revoked nodes = %+v", client.revokedNodes)
+	}
+	if hasHubNode(h, "node_server") {
+		t.Fatalf("revoked hub node still present: %+v", h.flatItems)
+	}
+}
+
+func TestHubCreateResultImmediatelyAddsSessionToCache(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{commandResult: mustJSON(t, map[string]string{"session_id": "remote_new"})}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+
+	cmd := h.hubCreateCommand("node_server", "server1", hub.CreateSessionRequest{
+		Title:       "worker",
+		Tool:        "codex",
+		ProjectPath: ".",
+		GroupPath:   "ops",
+	})
+	if cmd == nil {
+		t.Fatal("hub create command is nil")
+	}
+	msg := cmd()
+	result, ok := msg.(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("create msg type = %T, want hubActionResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("create result error = %v", result.err)
+	}
+	model, _ := h.Update(result)
+	h = model.(*Home)
+
+	info, ok := h.findHubSessionInfo("node_server", "remote_new")
+	if !ok {
+		t.Fatal("created hub session was not inserted into cache")
+	}
+	if info.Title != "worker" || info.Tool != "codex" || info.GroupPath != "ops" || info.ProjectPath != "." {
+		t.Fatalf("created hub session info = %+v", info)
 	}
 }
 
@@ -568,6 +1247,47 @@ func TestHubSessionQuickForkUsesHubCommand(t *testing.T) {
 	})
 }
 
+func TestHubSessionForkWithOptionsUsesHubForkRequest(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.hubSessions["node_server"].Sessions[0].CanFork = true
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("Shift+F should open fork dialog without returning a command")
+	}
+	if !h.forkDialog.IsVisible() {
+		t.Fatal("Shift+F on hub session did not open fork dialog")
+	}
+
+	model, cmd = h.handleForkDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("submitting hub fork dialog returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub fork options command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if h.forkDialog.IsVisible() {
+		t.Fatal("fork dialog still visible after submit")
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("commands = %d, want 1", len(client.commands))
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "fork" {
+		t.Fatalf("hub command = %+v", client.commands[0])
+	}
+	req, ok := client.commands[0].payload.(hub.ForkSessionRequest)
+	if !ok {
+		t.Fatalf("hub fork payload type = %T, want hub.ForkSessionRequest", client.commands[0].payload)
+	}
+	if req.SessionID != "r1" || req.Title == "" || req.GroupPath != "ops" {
+		t.Fatalf("hub fork request = %+v", req)
+	}
+}
+
 func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	h, client := newHubActionHome(t)
 
@@ -583,13 +1303,45 @@ func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("confirm hub delete returned no command")
 	}
-	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
-		t.Fatalf("delete hub command error = %v", msg.(hubActionResultMsg).err)
+	msg := cmd()
+	result, ok := msg.(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("delete hub command msg type = %T, want hubActionResultMsg", msg)
 	}
+	if result.err != nil {
+		t.Fatalf("delete hub command error = %v", result.err)
+	}
+	model, _ = h.Update(msg)
+	h = model.(*Home)
 	assertHubCommand(t, client.commands[0], "node_server", "delete", map[string]string{
 		"session_id": "r1",
 	})
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
+		t.Fatal("confirmed hub delete did not optimistically remove the session from cache")
+	}
+	if len(h.undoStack) != 1 || h.undoStack[0].hubNodeID != "node_server" || h.undoStack[0].hubSessionID != "r1" {
+		t.Fatalf("hub undo stack after delete = %+v", h.undoStack)
+	}
+	_, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if cmd == nil {
+		t.Fatal("ctrl+z after hub delete returned no command")
+	}
+	msg = cmd()
+	result, ok = msg.(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("undo hub command msg type = %T, want hubActionResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("undo hub delete command error = %v", result.err)
+	}
+	if len(client.commands) != 2 {
+		t.Fatalf("commands = %d, want 2", len(client.commands))
+	}
+	if client.commands[1].nodeID != "node_server" || client.commands[1].action != "undo_delete" {
+		t.Fatalf("undo hub command = %+v", client.commands[1])
+	}
 
+	h, client = newHubActionHome(t)
 	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
 	h = model.(*Home)
 	if cmd != nil {
@@ -605,7 +1357,7 @@ func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
 		t.Fatalf("close hub command error = %v", msg.(hubActionResultMsg).err)
 	}
-	assertHubCommand(t, client.commands[1], "node_server", "stop", map[string]string{
+	assertHubCommand(t, client.commands[0], "node_server", "stop", map[string]string{
 		"session_id": "r1",
 	})
 }
@@ -734,8 +1486,7 @@ func TestHubSessionArchiveUnarchiveAndRemoveUseConfirmations(t *testing.T) {
 	if h.confirmDialog.GetConfirmType() != ConfirmArchiveHubSession {
 		t.Fatalf("archive confirm type = %v, want ConfirmArchiveHubSession", h.confirmDialog.GetConfirmType())
 	}
-	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	h = model.(*Home)
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirm hub archive returned no command")
 	}
@@ -758,8 +1509,7 @@ func TestHubSessionArchiveUnarchiveAndRemoveUseConfirmations(t *testing.T) {
 	if h.confirmDialog.GetConfirmType() != ConfirmUnarchiveHubSession {
 		t.Fatalf("unarchive confirm type = %v, want ConfirmUnarchiveHubSession", h.confirmDialog.GetConfirmType())
 	}
-	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	h = model.(*Home)
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirm hub unarchive returned no command")
 	}
@@ -785,8 +1535,7 @@ func TestHubSessionArchiveUnarchiveAndRemoveUseConfirmations(t *testing.T) {
 	if h.confirmDialog.GetConfirmType() != ConfirmRemoveHubSession {
 		t.Fatalf("remove confirm type = %v, want ConfirmRemoveHubSession", h.confirmDialog.GetConfirmType())
 	}
-	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	h = model.(*Home)
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("confirm hub remove returned no command")
 	}
@@ -831,6 +1580,125 @@ func TestArchivedHubSessionsOnlyRenderInArchiveView(t *testing.T) {
 	}
 	if strings.Contains(got, "active remote") {
 		t.Fatalf("archive view included active hub session:\n%s", got)
+	}
+}
+
+func TestHubGroupReorderKeyUsesHubCommandAndRemoteOrder(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	client := &fakeHubAttachClient{}
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{
+				{Name: "alpha", Path: "alpha", Order: 0},
+				{Name: "beta", Path: "beta", Order: 1},
+			},
+		},
+	}
+	h.rebuildFlatItems()
+	alphaBefore := indexHubGroup(t, h, "node_server", "alpha")
+	betaBefore := indexHubGroup(t, h, "node_server", "beta")
+	if alphaBefore >= betaBefore {
+		t.Fatalf("initial hub group order alpha=%d beta=%d, want alpha before beta", alphaBefore, betaBefore)
+	}
+	h.cursor = betaBefore
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'K'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("K on hub group returned no command")
+	}
+	betaAfter := indexHubGroup(t, h, "node_server", "beta")
+	alphaAfter := indexHubGroup(t, h, "node_server", "alpha")
+	if betaAfter >= alphaAfter {
+		t.Fatalf("hub group order after K beta=%d alpha=%d, want beta before alpha", betaAfter, alphaAfter)
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub group reorder command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_server" || client.commands[0].action != "group_reorder" {
+		t.Fatalf("hub commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(hub.GroupReorderRequest)
+	if !ok {
+		t.Fatalf("hub reorder payload type = %T, want hub.GroupReorderRequest", client.commands[0].payload)
+	}
+	if payload.GroupPath != "beta" || payload.Direction != "up" {
+		t.Fatalf("hub reorder payload = %+v", payload)
+	}
+}
+
+func TestHubGroupMoveDialogUsesGroupReparentCommand(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	client := &fakeHubAttachClient{}
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{
+				{Name: "ops", Path: "ops", Order: 0},
+				{Name: "backend", Path: "ops/backend", Order: 1},
+				{Name: "platform", Path: "platform", Order: 2},
+			},
+			Sessions: []hub.SessionInfo{{
+				ID: "r1", Title: "worker", Tool: "claude", Status: "waiting", GroupPath: "ops/backend",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubGroup(t, h, "node_server", "ops/backend")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("M on hub group returned command, want dialog only")
+	}
+	if !h.groupDialog.IsVisible() || h.groupDialog.Mode() != GroupDialogMove {
+		t.Fatal("M on hub group did not open move dialog")
+	}
+	targetIdx := -1
+	for i, path := range h.groupDialog.groupPaths {
+		if path == "platform" {
+			targetIdx = i
+		}
+		if path == "ops/backend" || strings.HasPrefix(path, "ops/backend/") {
+			t.Fatalf("hub move targets include invalid source/descendant path %q: %v", path, h.groupDialog.groupPaths)
+		}
+	}
+	if targetIdx < 0 {
+		t.Fatalf("hub move targets missing platform: %v", h.groupDialog.groupPaths)
+	}
+	h.groupDialog.selected = targetIdx
+
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("confirm hub group move returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub group reparent command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_server" || client.commands[0].action != "group_reparent" {
+		t.Fatalf("hub commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(hub.GroupReparentRequest)
+	if !ok {
+		t.Fatalf("hub reparent payload type = %T, want hub.GroupReparentRequest", client.commands[0].payload)
+	}
+	if payload.GroupPath != "ops/backend" || payload.DestParentPath != "platform" {
+		t.Fatalf("hub reparent payload = %+v", payload)
+	}
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); !ok {
+		t.Fatal("hub session disappeared from cache after group reparent")
+	}
+	info, _ := h.findHubSessionInfo("node_server", "r1")
+	if info.GroupPath != "platform/backend" {
+		t.Fatalf("hub session group path = %q, want platform/backend", info.GroupPath)
 	}
 }
 
@@ -1046,6 +1914,20 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}
+	client.commandResult = json.RawMessage(`{"session_id":"r1"}`)
+	restoredID, err := mutator.UndoDelete()
+	if err != nil {
+		t.Fatalf("UndoDelete: %v", err)
+	}
+	if restoredID != webID {
+		t.Fatalf("UndoDelete restored id = %q, want %q", restoredID, webID)
+	}
+	if len(client.commands) != 11 {
+		t.Fatalf("commands = %d, want 11", len(client.commands))
+	}
+	if client.commands[10].nodeID != "node_server" || client.commands[10].action != "undo_delete" {
+		t.Fatalf("undo command = %+v", client.commands[10])
+	}
 }
 
 func TestWebMutatorRemovesHubSessionThroughHubClient(t *testing.T) {
@@ -1059,6 +1941,651 @@ func TestWebMutatorRemovesHubSessionThroughHubClient(t *testing.T) {
 	assertHubCommand(t, client.commands[0], "node_server", "remove", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("RemoveSession did not remove hub session from cache")
+	}
+}
+
+func TestWebMutatorFinishesHubWorktreeThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.WorktreeFinishResponse{
+		SessionID:     "r1",
+		Branch:        "fork/deploy",
+		MergedInto:    "main",
+		Merged:        true,
+		BranchDeleted: true,
+	})
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	result, err := mutator.FinishWorktree(webID, web.WorktreeFinishOptions{Into: "main", KeepBranch: true, Force: true})
+	if err != nil {
+		t.Fatalf("FinishWorktree: %v", err)
+	}
+	if result.SessionID != webID || result.Branch != "fork/deploy" || result.MergedInto != "main" || !result.Merged || !result.BranchDeleted {
+		t.Fatalf("FinishWorktree result = %+v", result)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("commands length = %d, want 1", len(client.commands))
+	}
+	got := client.commands[0]
+	if got.nodeID != "node_server" || got.action != "worktree_finish" {
+		t.Fatalf("worktree finish command = %+v", got)
+	}
+	req, ok := got.payload.(hub.WorktreeFinishRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want hub.WorktreeFinishRequest", got.payload)
+	}
+	if req.SessionID != "r1" || req.Into != "main" || !req.KeepBranch || !req.Force {
+		t.Fatalf("worktree finish request = %+v", req)
+	}
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
+		t.Fatal("FinishWorktree did not remove hub session from cache")
+	}
+}
+
+func TestWebMutatorRoutesHubGroupActionsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.GroupCreateResponse{Path: "ops/api", Name: "api", MaxConcurrent: 1})
+	mutator := NewWebMutator(h)
+
+	path, err := mutator.CreateGroup("api", hubWebGroupPath("node_server", "ops"))
+	if err != nil {
+		t.Fatalf("CreateGroup hub: %v", err)
+	}
+	if path != hubWebGroupPath("node_server", "ops/api") {
+		t.Fatalf("hub CreateGroup path = %q, want hub group path", path)
+	}
+	createReq, ok := client.commands[0].payload.(hub.GroupCreateRequest)
+	if !ok {
+		t.Fatalf("create group payload type = %T, want hub.GroupCreateRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "group_create" || createReq.Name != "api" || createReq.ParentPath != "ops" {
+		t.Fatalf("create group command = %+v req=%+v", client.commands[0], createReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.GroupRenameResponse{OldPath: "ops/api", Path: "ops/backend", Name: "backend"})
+	if err := mutator.RenameGroup(hubWebGroupPath("node_server", "ops/api"), "backend"); err != nil {
+		t.Fatalf("RenameGroup hub: %v", err)
+	}
+	renameReq, ok := client.commands[1].payload.(hub.GroupRenameRequest)
+	if !ok {
+		t.Fatalf("rename group payload type = %T, want hub.GroupRenameRequest", client.commands[1].payload)
+	}
+	if client.commands[1].nodeID != "node_server" || client.commands[1].action != "group_rename" || renameReq.GroupPath != "ops/api" || renameReq.Name != "backend" {
+		t.Fatalf("rename group command = %+v req=%+v", client.commands[1], renameReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.GroupReparentResponse{OldPath: "ops/backend", Path: "platform/backend", DestParentPath: "platform"})
+	reparented, err := mutator.ReparentGroup(hubWebGroupPath("node_server", "ops/backend"), hubWebGroupPath("node_server", "platform"))
+	if err != nil {
+		t.Fatalf("ReparentGroup hub: %v", err)
+	}
+	if reparented != hubWebGroupPath("node_server", "platform/backend") {
+		t.Fatalf("hub ReparentGroup path = %q", reparented)
+	}
+	reparentReq, ok := client.commands[2].payload.(hub.GroupReparentRequest)
+	if !ok {
+		t.Fatalf("reparent group payload type = %T, want hub.GroupReparentRequest", client.commands[2].payload)
+	}
+	if client.commands[2].nodeID != "node_server" || client.commands[2].action != "group_reparent" || reparentReq.GroupPath != "ops/backend" || reparentReq.DestParentPath != "platform" {
+		t.Fatalf("reparent group command = %+v req=%+v", client.commands[2], reparentReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.GroupReorderResponse{Path: "platform/backend", FromPosition: 2, ToPosition: 1})
+	from, to, err := mutator.ReorderGroup(hubWebGroupPath("node_server", "platform/backend"), "up", nil)
+	if err != nil {
+		t.Fatalf("ReorderGroup hub: %v", err)
+	}
+	if from != 2 || to != 1 {
+		t.Fatalf("hub ReorderGroup positions = %d -> %d", from, to)
+	}
+	reorderReq, ok := client.commands[3].payload.(hub.GroupReorderRequest)
+	if !ok {
+		t.Fatalf("reorder group payload type = %T, want hub.GroupReorderRequest", client.commands[3].payload)
+	}
+	if client.commands[3].nodeID != "node_server" || client.commands[3].action != "group_reorder" || reorderReq.GroupPath != "platform/backend" || reorderReq.Direction != "up" {
+		t.Fatalf("reorder group command = %+v req=%+v", client.commands[3], reorderReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.GroupDeleteResponse{Path: "platform/backend", SessionsMoved: 0, MovedTo: session.DefaultGroupPath})
+	if err := mutator.DeleteGroup(hubWebGroupPath("node_server", "platform/backend")); err != nil {
+		t.Fatalf("DeleteGroup hub: %v", err)
+	}
+	deleteReq, ok := client.commands[4].payload.(hub.GroupDeleteRequest)
+	if !ok {
+		t.Fatalf("delete group payload type = %T, want hub.GroupDeleteRequest", client.commands[4].payload)
+	}
+	if client.commands[4].nodeID != "node_server" || client.commands[4].action != "group_delete" || deleteReq.GroupPath != "platform/backend" || !deleteReq.Force {
+		t.Fatalf("delete group command = %+v req=%+v", client.commands[4], deleteReq)
+	}
+}
+
+func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	mutator := NewWebMutator(h)
+	hubSessionID := web.HubSessionWebID("node_server", "r1")
+
+	client.commandResult = mustJSON(t, hub.MCPListResponse{
+		SessionID: "r1",
+		Local:     []string{"exa"},
+		Global:    []string{"memory"},
+		User:      []string{"github"},
+		Catalog:   []hub.MCPCatalogEntry{{Name: "remote-search", Description: "remote catalog", Transport: "stdio", Command: "npx"}},
+	})
+	attached, err := mutator.ListAttached(hubSessionID, "/srv/app")
+	if err != nil {
+		t.Fatalf("ListAttached hub: %v", err)
+	}
+	if attached["local"][0] != "exa" || attached["global"][0] != "memory" || attached["user"][0] != "github" {
+		t.Fatalf("attached MCPs = %+v", attached)
+	}
+	listReq, ok := client.commands[0].payload.(hub.MCPListRequest)
+	if !ok {
+		t.Fatalf("mcp list payload type = %T, want hub.MCPListRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "mcp_list" || listReq.SessionID != "r1" {
+		t.Fatalf("mcp list command = %+v req=%+v", client.commands[0], listReq)
+	}
+	client.commands = nil
+	state, err := mutator.ListSessionMCPs(hubSessionID, "/srv/app")
+	if err != nil {
+		t.Fatalf("ListSessionMCPs hub: %v", err)
+	}
+	if len(state.Catalog) != 1 || state.Catalog[0].Name != "remote-search" || state.Catalog[0].Command != "npx" {
+		t.Fatalf("hub mcp catalog = %+v", state.Catalog)
+	}
+	client.commands = nil
+
+	client.commandResult = mustJSON(t, hub.MCPMutateResponse{SessionID: "r1", Name: "exa", Scope: "local"})
+	if err := mutator.Attach(hubSessionID, "/srv/app", "exa", "local"); err != nil {
+		t.Fatalf("Attach hub: %v", err)
+	}
+	attachReq, ok := client.commands[0].payload.(hub.MCPMutateRequest)
+	if !ok {
+		t.Fatalf("mcp attach payload type = %T, want hub.MCPMutateRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "mcp_attach" || attachReq.SessionID != "r1" || attachReq.Name != "exa" || attachReq.Scope != "local" {
+		t.Fatalf("mcp attach command = %+v req=%+v", client.commands[0], attachReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.MCPMutateResponse{SessionID: "r1", Name: "exa", Scope: "local"})
+	if err := mutator.Detach(hubSessionID, "/srv/app", "exa", "local"); err != nil {
+		t.Fatalf("Detach hub: %v", err)
+	}
+	detachReq, ok := client.commands[1].payload.(hub.MCPMutateRequest)
+	if !ok {
+		t.Fatalf("mcp detach payload type = %T, want hub.MCPMutateRequest", client.commands[1].payload)
+	}
+	if client.commands[1].action != "mcp_detach" || detachReq.SessionID != "r1" || detachReq.Name != "exa" || detachReq.Scope != "local" {
+		t.Fatalf("mcp detach command = %+v req=%+v", client.commands[1], detachReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.MCPMoveResponse{SessionID: "r1", Name: "exa", FromScope: "local", ToScope: "global"})
+	if err := mutator.Move(hubSessionID, "/srv/app", "exa", "local", "global"); err != nil {
+		t.Fatalf("Move hub: %v", err)
+	}
+	moveReq, ok := client.commands[2].payload.(hub.MCPMoveRequest)
+	if !ok {
+		t.Fatalf("mcp move payload type = %T, want hub.MCPMoveRequest", client.commands[2].payload)
+	}
+	if client.commands[2].action != "mcp_move" || moveReq.SessionID != "r1" || moveReq.Name != "exa" || moveReq.FromScope != "local" || moveReq.ToScope != "global" {
+		t.Fatalf("mcp move command = %+v req=%+v", client.commands[2], moveReq)
+	}
+}
+
+func TestWebMutatorRoutesHubSkillActionsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	mutator := NewWebMutator(h)
+	hubSessionID := web.HubSessionWebID("node_server", "r1")
+
+	client.commandResult = mustJSON(t, hub.SkillListResponse{
+		SessionID: "r1",
+		Catalog:   []session.SkillCandidate{{ID: "pool/alpha", Name: "alpha", Source: "pool", Kind: "dir"}},
+		Attached:  []session.ProjectSkillAttachment{{ID: "pool/beta", Name: "beta", Source: "pool"}},
+	})
+	state, err := mutator.ListSessionSkills(hubSessionID, "/srv/app")
+	if err != nil {
+		t.Fatalf("ListSessionSkills hub: %v", err)
+	}
+	if state.Catalog[0].Name != "alpha" || state.Attached[0].Name != "beta" {
+		t.Fatalf("skill state = %+v", state)
+	}
+	listReq, ok := client.commands[0].payload.(hub.SkillListRequest)
+	if !ok {
+		t.Fatalf("skill list payload type = %T, want hub.SkillListRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "skill_list" || listReq.SessionID != "r1" {
+		t.Fatalf("skill list command = %+v req=%+v", client.commands[0], listReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.SkillMutateResponse{SessionID: "r1", Skill: &session.ProjectSkillAttachment{ID: "pool/alpha", Name: "alpha", Source: "pool"}})
+	if _, err := mutator.AttachSkill(hubSessionID, "/srv/app", "claude", "alpha", "pool"); err != nil {
+		t.Fatalf("AttachSkill hub: %v", err)
+	}
+	attachReq, ok := client.commands[1].payload.(hub.SkillMutateRequest)
+	if !ok {
+		t.Fatalf("skill attach payload type = %T, want hub.SkillMutateRequest", client.commands[1].payload)
+	}
+	if client.commands[1].nodeID != "node_server" || client.commands[1].action != "skill_attach" || attachReq.SessionID != "r1" || attachReq.Name != "alpha" || attachReq.Source != "pool" {
+		t.Fatalf("skill attach command = %+v req=%+v", client.commands[1], attachReq)
+	}
+
+	client.commandResult = mustJSON(t, hub.SkillMutateResponse{SessionID: "r1", Skill: &session.ProjectSkillAttachment{ID: "pool/beta", Name: "beta", Source: "pool"}})
+	if _, err := mutator.DetachSkill(hubSessionID, "/srv/app", "beta", "pool"); err != nil {
+		t.Fatalf("DetachSkill hub: %v", err)
+	}
+	detachReq, ok := client.commands[2].payload.(hub.SkillMutateRequest)
+	if !ok {
+		t.Fatalf("skill detach payload type = %T, want hub.SkillMutateRequest", client.commands[2].payload)
+	}
+	if client.commands[2].action != "skill_detach" || detachReq.SessionID != "r1" || detachReq.Name != "beta" || detachReq.Source != "pool" {
+		t.Fatalf("skill detach command = %+v req=%+v", client.commands[2], detachReq)
+	}
+}
+
+func TestHubMCPKeyLoadsRemoteAttachedState(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.MCPListResponse{
+		SessionID: "r1",
+		Local:     []string{"exa"},
+		Global:    []string{"memory"},
+		User:      []string{"github"},
+	})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("m on hub session returned no command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(hubMCPDialogLoadedMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubMCPDialogLoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("load hub mcp dialog err = %v", loaded.err)
+	}
+	model, _ = h.Update(loaded)
+	h = model.(*Home)
+
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_server" || client.commands[0].action != "mcp_list" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	req, ok := client.commands[0].payload.(hub.MCPListRequest)
+	if !ok || req.SessionID != "r1" {
+		t.Fatalf("mcp list payload = %T %+v", client.commands[0].payload, client.commands[0].payload)
+	}
+	if !h.mcpDialog.IsVisible() {
+		t.Fatal("hub mcp dialog did not open")
+	}
+	if h.hubMCPDialogNodeID != "node_server" || h.hubMCPDialogSessionID != "r1" {
+		t.Fatalf("hub mcp state node=%q session=%q", h.hubMCPDialogNodeID, h.hubMCPDialogSessionID)
+	}
+	names := h.mcpDialog.AttachedNamesByScope()
+	if names["local"][0] != "exa" || names["global"][0] != "memory" || names["user"][0] != "github" {
+		t.Fatalf("dialog attached names = %+v", names)
+	}
+}
+
+func TestHubMCPDialogApplyUsesHubCommandsAndRestarts(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.mcpDialog.visible = true
+	h.mcpDialog.sessionID = "r1"
+	h.mcpDialog.tool = "claude"
+	h.mcpDialog.localAttached = nil
+	h.mcpDialog.globalAttached = []MCPItem{{Name: "exa"}, {Name: "slack"}}
+	h.mcpDialog.localChanged = true
+	h.mcpDialog.globalChanged = true
+	h.hubMCPDialogNodeID = "node_server"
+	h.hubMCPDialogNodeName = "server1"
+	h.hubMCPDialogSessionID = "r1"
+	h.hubMCPDialogInitial = map[string][]string{
+		"local":  {"exa"},
+		"global": nil,
+		"user":   nil,
+	}
+
+	model, cmd := h.handleMCPDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub mcp apply returned no command")
+	}
+	msg := cmd()
+	applied, ok := msg.(hubMCPApplyResultMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubMCPApplyResultMsg", msg)
+	}
+	if applied.err != nil {
+		t.Fatalf("apply hub mcp err = %v", applied.err)
+	}
+
+	if got := len(client.commands); got != 4 {
+		t.Fatalf("command count = %d, want 4: %+v", got, client.commands)
+	}
+	detachReq, ok := client.commands[0].payload.(hub.MCPMutateRequest)
+	if !ok || client.commands[0].action != "mcp_detach" || detachReq.SessionID != "r1" || detachReq.Name != "exa" || detachReq.Scope != "local" {
+		t.Fatalf("detach command = %+v payload=%+v", client.commands[0], client.commands[0].payload)
+	}
+	attachReq, ok := client.commands[1].payload.(hub.MCPMutateRequest)
+	if !ok || client.commands[1].action != "mcp_attach" || attachReq.Name != "exa" || attachReq.Scope != "global" {
+		t.Fatalf("first attach command = %+v payload=%+v", client.commands[1], client.commands[1].payload)
+	}
+	attachReq, ok = client.commands[2].payload.(hub.MCPMutateRequest)
+	if !ok || client.commands[2].action != "mcp_attach" || attachReq.Name != "slack" || attachReq.Scope != "global" {
+		t.Fatalf("second attach command = %+v payload=%+v", client.commands[2], client.commands[2].payload)
+	}
+	restartReq, ok := client.commands[3].payload.(map[string]string)
+	if !ok || client.commands[3].action != "restart" || restartReq["session_id"] != "r1" {
+		t.Fatalf("restart command = %+v payload=%+v", client.commands[3], client.commands[3].payload)
+	}
+
+	model, _ = h.Update(applied)
+	h = model.(*Home)
+	if h.hubMCPDialogNodeID != "" || h.hubMCPDialogInitial != nil {
+		t.Fatalf("hub mcp dialog state was not cleared: node=%q initial=%+v", h.hubMCPDialogNodeID, h.hubMCPDialogInitial)
+	}
+}
+
+func TestHubPluginKeyLoadsRemoteAttachedState(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PluginListResponse{
+		SessionID: "r1",
+		Catalog: []hub.PluginCatalogEntry{
+			{Name: "octopus", ID: "octopus@local", Description: "octo"},
+			{Name: "discord", ID: "discord@local", Description: "chat"},
+		},
+		Plugins: []string{"octopus"},
+	})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("L")})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("L on hub session returned no command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(hubPluginDialogLoadedMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubPluginDialogLoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("load hub plugin dialog err = %v", loaded.err)
+	}
+	model, _ = h.Update(loaded)
+	h = model.(*Home)
+
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_server" || client.commands[0].action != "plugin_list" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	req, ok := client.commands[0].payload.(hub.PluginListRequest)
+	if !ok || req.SessionID != "r1" {
+		t.Fatalf("plugin list payload = %T %+v", client.commands[0].payload, client.commands[0].payload)
+	}
+	if !h.pluginDialog.IsVisible() {
+		t.Fatal("hub plugin dialog did not open")
+	}
+	if h.hubPluginDialogNodeID != "node_server" || h.hubPluginDialogSessionID != "r1" {
+		t.Fatalf("hub plugin state node=%q session=%q", h.hubPluginDialogNodeID, h.hubPluginDialogSessionID)
+	}
+	if got := h.pluginDialog.SelectedPluginNames(); len(got) != 1 || got[0] != "octopus" {
+		t.Fatalf("attached plugins = %+v", got)
+	}
+}
+
+func TestHubPluginDialogApplyUsesHubCommandsAndRestarts(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.pluginDialog.visible = true
+	h.pluginDialog.sessionID = "r1"
+	h.pluginDialog.tool = "claude"
+	h.pluginDialog.items = []pluginDialogItem{
+		{name: "octopus", enabled: false},
+		{name: "discord", enabled: true},
+	}
+	h.pluginDialog.initialEnabled = map[string]bool{"octopus": true, "discord": false}
+	h.hubPluginDialogNodeID = "node_server"
+	h.hubPluginDialogNodeName = "server1"
+	h.hubPluginDialogSessionID = "r1"
+	h.hubPluginDialogInitial = []string{"octopus"}
+
+	model, cmd := h.handlePluginDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub plugin apply returned no command")
+	}
+	msg := cmd()
+	applied, ok := msg.(hubPluginApplyResultMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubPluginApplyResultMsg", msg)
+	}
+	if applied.err != nil {
+		t.Fatalf("apply hub plugin err = %v", applied.err)
+	}
+
+	if got := len(client.commands); got != 3 {
+		t.Fatalf("command count = %d, want 3: %+v", got, client.commands)
+	}
+	detachReq, ok := client.commands[0].payload.(hub.PluginMutateRequest)
+	if !ok || client.commands[0].action != "plugin_detach" || detachReq.SessionID != "r1" || detachReq.Name != "octopus" {
+		t.Fatalf("detach command = %+v payload=%+v", client.commands[0], client.commands[0].payload)
+	}
+	attachReq, ok := client.commands[1].payload.(hub.PluginMutateRequest)
+	if !ok || client.commands[1].action != "plugin_attach" || attachReq.SessionID != "r1" || attachReq.Name != "discord" {
+		t.Fatalf("attach command = %+v payload=%+v", client.commands[1], client.commands[1].payload)
+	}
+	restartReq, ok := client.commands[2].payload.(map[string]string)
+	if !ok || client.commands[2].action != "restart" || restartReq["session_id"] != "r1" {
+		t.Fatalf("restart command = %+v payload=%+v", client.commands[2], client.commands[2].payload)
+	}
+
+	model, _ = h.Update(applied)
+	h = model.(*Home)
+	if h.hubPluginDialogNodeID != "" || h.hubPluginDialogInitial != nil {
+		t.Fatalf("hub plugin dialog state was not cleared: node=%q initial=%+v", h.hubPluginDialogNodeID, h.hubPluginDialogInitial)
+	}
+}
+
+func TestWebMutatorRoutesHubPluginActionsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PluginListResponse{
+		Catalog:  []hub.PluginCatalogEntry{{Name: "octopus", PluginName: "octopus", Source: "nyldn/claude-octopus"}},
+		Plugins:  []string{"discord"},
+		Channels: []string{"plugin:discord"},
+	})
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	state, err := mutator.ListSessionPlugins(webID, &web.MenuSession{ID: webID, Tool: "claude"})
+	if err != nil {
+		t.Fatalf("ListSessionPlugins: %v", err)
+	}
+	if len(state.Catalog) != 1 || state.Catalog[0].Name != "octopus" || len(state.Plugins) != 1 || state.Plugins[0] != "discord" {
+		t.Fatalf("plugin state = %+v", state)
+	}
+	if len(client.commands) != 1 || client.commands[0].action != "plugin_list" {
+		t.Fatalf("list commands = %+v", client.commands)
+	}
+
+	client.commands = nil
+	client.commandResult = mustJSON(t, hub.PluginMutateResponse{SessionID: "r1", Plugins: []string{"discord", "octopus"}, Channels: []string{"plugin:discord"}})
+	if _, err := mutator.AttachPlugin(webID, &web.MenuSession{ID: webID, Tool: "claude"}, "octopus", true); err != nil {
+		t.Fatalf("AttachPlugin: %v", err)
+	}
+	if len(client.commands) != 1 || client.commands[0].action != "plugin_attach" {
+		t.Fatalf("attach commands = %+v", client.commands)
+	}
+	attachReq, ok := client.commands[0].payload.(hub.PluginMutateRequest)
+	if !ok || attachReq.SessionID != "r1" || attachReq.Name != "octopus" || !attachReq.NoChannelLink {
+		t.Fatalf("attach payload = %#v", client.commands[0].payload)
+	}
+
+	client.commands = nil
+	client.commandResult = mustJSON(t, hub.PluginMutateResponse{SessionID: "r1", Plugins: []string{"discord"}, Channels: []string{"plugin:discord"}})
+	if _, err := mutator.DetachPlugin(webID, &web.MenuSession{ID: webID, Tool: "claude"}, "octopus"); err != nil {
+		t.Fatalf("DetachPlugin: %v", err)
+	}
+	if len(client.commands) != 1 || client.commands[0].action != "plugin_detach" {
+		t.Fatalf("detach commands = %+v", client.commands)
+	}
+}
+
+func TestHubSkillKeyLoadsRemoteAttachedState(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.SkillListResponse{
+		SessionID: "r1",
+		Catalog: []session.SkillCandidate{
+			{ID: "pool/alpha", Name: "alpha", Source: "pool", Kind: "dir"},
+			{ID: "pool/beta", Name: "beta", Source: "pool", Kind: "dir"},
+		},
+		Attached: []session.ProjectSkillAttachment{{ID: "pool/alpha", Name: "alpha", Source: "pool"}},
+	})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("s on hub session returned no command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(hubSkillDialogLoadedMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubSkillDialogLoadedMsg", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("load hub skill dialog err = %v", loaded.err)
+	}
+	model, _ = h.Update(loaded)
+	h = model.(*Home)
+
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_server" || client.commands[0].action != "skill_list" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	req, ok := client.commands[0].payload.(hub.SkillListRequest)
+	if !ok || req.SessionID != "r1" {
+		t.Fatalf("skill list payload = %T %+v", client.commands[0].payload, client.commands[0].payload)
+	}
+	if !h.skillDialog.IsVisible() {
+		t.Fatal("hub skill dialog did not open")
+	}
+	if h.hubSkillDialogNodeID != "node_server" || h.hubSkillDialogSessionID != "r1" {
+		t.Fatalf("hub skill state node=%q session=%q", h.hubSkillDialogNodeID, h.hubSkillDialogSessionID)
+	}
+	if got := h.skillDialog.AttachedCandidates(); len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("attached skills = %+v", got)
+	}
+}
+
+func TestHubSkillDialogApplyUsesHubCommandsAndRestarts(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.skillDialog.visible = true
+	h.skillDialog.sessionID = "r1"
+	h.skillDialog.tool = "claude"
+	h.skillDialog.attached = []SkillDialogItem{{Candidate: session.SkillCandidate{ID: "pool/beta", Name: "beta", Source: "pool", Kind: "dir"}}}
+	h.skillDialog.available = []SkillDialogItem{{Candidate: session.SkillCandidate{ID: "pool/alpha", Name: "alpha", Source: "pool", Kind: "dir"}}}
+	h.skillDialog.hasChanges = true
+	h.hubSkillDialogNodeID = "node_server"
+	h.hubSkillDialogNodeName = "server1"
+	h.hubSkillDialogSessionID = "r1"
+	h.hubSkillDialogInitial = map[string]session.SkillCandidate{
+		"pool/alpha": {ID: "pool/alpha", Name: "alpha", Source: "pool", Kind: "dir"},
+	}
+
+	model, cmd := h.handleSkillDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub skill apply returned no command")
+	}
+	msg := cmd()
+	applied, ok := msg.(hubSkillApplyResultMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubSkillApplyResultMsg", msg)
+	}
+	if applied.err != nil {
+		t.Fatalf("apply hub skill err = %v", applied.err)
+	}
+
+	if got := len(client.commands); got != 3 {
+		t.Fatalf("command count = %d, want 3: %+v", got, client.commands)
+	}
+	detachReq, ok := client.commands[0].payload.(hub.SkillMutateRequest)
+	if !ok || client.commands[0].action != "skill_detach" || detachReq.SessionID != "r1" || detachReq.Name != "alpha" || detachReq.Source != "pool" {
+		t.Fatalf("detach command = %+v payload=%+v", client.commands[0], client.commands[0].payload)
+	}
+	attachReq, ok := client.commands[1].payload.(hub.SkillMutateRequest)
+	if !ok || client.commands[1].action != "skill_attach" || attachReq.SessionID != "r1" || attachReq.Name != "beta" || attachReq.Source != "pool" {
+		t.Fatalf("attach command = %+v payload=%+v", client.commands[1], client.commands[1].payload)
+	}
+	restartReq, ok := client.commands[2].payload.(map[string]string)
+	if !ok || client.commands[2].action != "restart" || restartReq["session_id"] != "r1" {
+		t.Fatalf("restart command = %+v payload=%+v", client.commands[2], client.commands[2].payload)
+	}
+
+	model, _ = h.Update(applied)
+	h = model.(*Home)
+	if h.hubSkillDialogNodeID != "" || h.hubSkillDialogInitial != nil {
+		t.Fatalf("hub skill dialog state was not cleared: node=%q initial=%+v", h.hubSkillDialogNodeID, h.hubSkillDialogInitial)
+	}
+}
+
+func TestHubWorktreeFinishKeyUsesHubCommandAndRemovesOnSuccess(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.WorktreeFinishResponse{SessionID: "r1", Branch: "fork/deploy", MergedInto: "main", Merged: true})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("W")})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("W on hub worktree returned no command")
+	}
+	msg := cmd()
+	result, ok := msg.(hubActionResultMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want hubActionResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("hub worktree finish command error = %v", result.err)
+	}
+	model, _ = h.Update(result)
+	h = model.(*Home)
+
+	if len(client.commands) != 1 {
+		t.Fatalf("commands length = %d, want 1", len(client.commands))
+	}
+	got := client.commands[0]
+	if got.nodeID != "node_server" || got.action != "worktree_finish" {
+		t.Fatalf("worktree finish command = %+v", got)
+	}
+	req, ok := got.payload.(hub.WorktreeFinishRequest)
+	if !ok || req.SessionID != "r1" {
+		t.Fatalf("worktree finish payload = %#v", got.payload)
+	}
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
+		t.Fatal("hub worktree finish success did not remove session from cache")
+	}
+}
+
+func TestHubWorktreeSetupKeyUsesHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.WorktreeSetupResponse{SessionID: "r1"})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("b on hub worktree returned no command")
+	}
+	setupKey := hubPromptTarget("node_server", "r1")
+	if _, running := h.setupRunningSessions[setupKey]; !running {
+		t.Fatalf("setup running key %q was not recorded", setupKey)
+	}
+	msg := cmd()
+	result, ok := msg.(worktreeSetupResultMsg)
+	if !ok {
+		t.Fatalf("command msg type = %T, want worktreeSetupResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("hub worktree setup command error = %v", result.err)
+	}
+	assertHubCommandPayload(t, client.commands[0], "node_server", "worktree_setup", hub.WorktreeSetupRequest{SessionID: "r1"})
+
+	model, _ = h.Update(result)
+	h = model.(*Home)
+	if _, running := h.setupRunningSessions[setupKey]; running {
+		t.Fatalf("setup running key %q was not cleared", setupKey)
 	}
 }
 
@@ -1104,6 +2631,115 @@ func TestWebMutatorSendsHubSessionOutputThroughHubClient(t *testing.T) {
 		"session_id": "r2",
 		"message":    "--- Output from [deploy] ---\nHub answer\n--- End output from [deploy] ---",
 	})
+}
+
+func TestWebMutatorSessionOutputForHubUsesPreviewCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "Hub answer"})
+	mutator := NewWebMutator(h)
+	sourceID := web.HubSessionWebID("node_server", "r1")
+
+	got, err := mutator.SessionOutput(sourceID)
+	if err != nil {
+		t.Fatalf("SessionOutput: %v", err)
+	}
+	if got.SessionID != sourceID || got.Title != "deploy" || got.Content != "Hub answer" {
+		t.Fatalf("SessionOutput response = %+v", got)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("commands length = %d, want 1", len(client.commands))
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{"session_id": "r1"})
+}
+
+func TestHubSessionSendOutputUsesHubPreviewAndSendCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	snapshot := h.hubSessions["node_server"]
+	snapshot.Sessions = append(snapshot.Sessions, hub.SessionInfo{
+		ID:        "r2",
+		Title:     "reviewer",
+		Tool:      "codex",
+		Status:    "waiting",
+		GroupPath: "ops",
+	})
+	h.hubSessions["node_server"] = snapshot
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "Hub answer"})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatalf("x should open picker synchronously, got command %T", cmd)
+	}
+	if !h.sessionPickerDialog.IsVisible() {
+		t.Fatal("x on hub session did not open send-output picker")
+	}
+	if got := h.sessionPickerDialog.GetSourceTarget(); got.hubNodeID != "node_server" || got.hubSessionID != "r1" {
+		t.Fatalf("source target = %+v, want node_server/r1", got)
+	}
+	selected := h.sessionPickerDialog.GetSelectedTarget()
+	if selected.hubNodeID != "node_server" || selected.hubSessionID != "r2" {
+		t.Fatalf("selected target = %+v, want node_server/r2", selected)
+	}
+
+	_, cmd = h.handleSessionPickerDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter in hub send-output picker returned no command")
+	}
+	msg := cmd()
+	result, ok := msg.(sendOutputResultMsg)
+	if !ok {
+		t.Fatalf("send command returned %T, want sendOutputResultMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("hub send output error = %v", result.err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[1], "node_server", "send", map[string]string{
+		"session_id": "r2",
+		"message":    "--- Output from [deploy] ---\nHub answer\n--- End output from [deploy] ---\n",
+	})
+}
+
+func TestLocalSessionSendOutputPickerIncludesHubTargets(t *testing.T) {
+	local := &session.Instance{ID: "local_1", Title: "local worker", Tool: "claude", Status: session.StatusWaiting}
+	h := newHubProjectionHome(t, []*session.Instance{local})
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     "deploy",
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == "local_1" {
+			h.cursor = i
+			break
+		}
+	}
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatalf("x should open picker synchronously, got command %T", cmd)
+	}
+	if !h.sessionPickerDialog.IsVisible() {
+		t.Fatal("x on local session did not open picker with hub target")
+	}
+	selected := h.sessionPickerDialog.GetSelectedTarget()
+	if selected.kind != sendOutputTargetHub || selected.hubNodeID != "node_server" || selected.hubSessionID != "r1" {
+		t.Fatalf("selected target = %+v, want hub node_server/r1", selected)
+	}
 }
 
 func TestWebMutatorForksHubSessionThroughHubClient(t *testing.T) {
@@ -1237,6 +2873,61 @@ func TestFetchHubPreviewUsesHubCommand(t *testing.T) {
 	})
 }
 
+func TestHubSessionCopyOutputUsesHubPreviewCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "   "})
+
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if cmd == nil {
+		t.Fatal("c on hub session returned no command")
+	}
+	msg := cmd()
+	result, ok := msg.(copyResultMsg)
+	if !ok {
+		t.Fatalf("copy command returned %T, want copyResultMsg", msg)
+	}
+	if result.err == nil {
+		t.Fatal("empty hub preview copy unexpectedly succeeded")
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{
+		"session_id": "r1",
+	})
+}
+
+func TestHubSessionShiftYOpensCodeBlockPickerFromHubPreview(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "first\n```sh\necho one\n```\nthen\n```go\nfmt.Println(\"two\")\n```"})
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("Y on hub session returned no command")
+	}
+	msg := cmd()
+	blocks, ok := msg.(hubCodeBlockBlocksMsg)
+	if !ok {
+		t.Fatalf("code block command returned %T, want hubCodeBlockBlocksMsg", msg)
+	}
+	if blocks.err != nil {
+		t.Fatalf("hub code block extraction error = %v", blocks.err)
+	}
+	if len(blocks.blocks) != 2 {
+		t.Fatalf("hub code blocks = %d, want 2", len(blocks.blocks))
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{
+		"session_id": "r1",
+	})
+
+	model, _ = h.Update(blocks)
+	h = model.(*Home)
+	if !h.codeBlockDialog.IsVisible() {
+		t.Fatal("hub code block result did not open picker")
+	}
+	if got := h.codeBlockDialog.sessionTitle; got != "server1/deploy" {
+		t.Fatalf("code block dialog title = %q, want server1/deploy", got)
+	}
+}
+
 func TestRenderHubPreviewIncludesCachedResponse(t *testing.T) {
 	h, _ := newHubActionHome(t)
 	key := hubPreviewCacheKey("node_server", "r1")
@@ -1312,6 +3003,95 @@ func renderedConnectorColumn(row string) int {
 	return -1
 }
 
+func TestHubGroupCreateRenameDeleteUseHubCommands(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.hubSessions["node_server"] = hub.NodeSessions{
+		Node: hub.Node{ID: "node_server", Name: "server1"},
+		Groups: []hub.GroupInfo{
+			{Name: "ops", Path: "ops", Expanded: true},
+			{Name: "empty", Path: "empty", Expanded: true},
+		},
+		Sessions: []hub.SessionInfo{{ID: "r1", Title: "deploy", Tool: "claude", Status: "waiting", GroupPath: "ops"}},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubGroup(t, h, "node_server", "ops")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("g on hub group should open create dialog without command")
+	}
+	if !h.groupDialog.IsVisible() || h.groupDialog.GetParentPath() != "ops" {
+		t.Fatalf("hub group create dialog parent = %q visible=%v", h.groupDialog.GetParentPath(), h.groupDialog.IsVisible())
+	}
+	h.groupDialog.nameInput.SetValue("api")
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub group create submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub group create command error = %v", msg.(hubActionResultMsg).err)
+	}
+	createReq, ok := client.commands[0].payload.(hub.GroupCreateRequest)
+	if !ok {
+		t.Fatalf("group create payload type = %T, want hub.GroupCreateRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "group_create" || createReq.Name != "api" || createReq.ParentPath != "ops" {
+		t.Fatalf("group create command = %+v req=%+v", client.commands[0], createReq)
+	}
+
+	h.cursor = indexHubGroup(t, h, "node_server", "empty")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("r on hub group should open rename dialog without command")
+	}
+	if !h.groupDialog.IsVisible() || h.groupDialog.GetGroupPath() != "empty" {
+		t.Fatalf("hub group rename dialog path = %q visible=%v", h.groupDialog.GetGroupPath(), h.groupDialog.IsVisible())
+	}
+	h.groupDialog.nameInput.SetValue("renamed")
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub group rename submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub group rename command error = %v", msg.(hubActionResultMsg).err)
+	}
+	renameReq, ok := client.commands[1].payload.(hub.GroupRenameRequest)
+	if !ok {
+		t.Fatalf("group rename payload type = %T, want hub.GroupRenameRequest", client.commands[1].payload)
+	}
+	if client.commands[1].nodeID != "node_server" || client.commands[1].action != "group_rename" || renameReq.GroupPath != "empty" || renameReq.Name != "renamed" {
+		t.Fatalf("group rename command = %+v req=%+v", client.commands[1], renameReq)
+	}
+
+	h.cursor = indexHubGroup(t, h, "node_server", "renamed")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("d on hub group should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmDeleteHubGroup {
+		t.Fatalf("delete hub group confirm type = %v, want ConfirmDeleteHubGroup", h.confirmDialog.GetConfirmType())
+	}
+	_, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("confirm hub group delete returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub group delete command error = %v", msg.(hubActionResultMsg).err)
+	}
+	deleteReq, ok := client.commands[2].payload.(hub.GroupDeleteRequest)
+	if !ok {
+		t.Fatalf("group delete payload type = %T, want hub.GroupDeleteRequest", client.commands[2].payload)
+	}
+	if client.commands[2].nodeID != "node_server" || client.commands[2].action != "group_delete" || deleteReq.GroupPath != "renamed" || !deleteReq.Force {
+		t.Fatalf("group delete command = %+v req=%+v", client.commands[2], deleteReq)
+	}
+}
+
 func TestHubAttachCmdCallsClient(t *testing.T) {
 	client := &fakeHubAttachClient{}
 	cmd := hubAttachCmd{
@@ -1326,6 +3106,31 @@ func TestHubAttachCmdCallsClient(t *testing.T) {
 	}
 	if client.nodeID != "node_server" || client.sessionID != "remote_session" {
 		t.Fatalf("attach call = node %q session %q", client.nodeID, client.sessionID)
+	}
+	if client.size.Cols != 120 || client.size.Rows != 40 {
+		t.Fatalf("attach size = %+v, want 120x40", client.size)
+	}
+}
+
+func TestHubAttachCmdCallsClientWindow(t *testing.T) {
+	client := &fakeHubAttachClient{}
+	windowIndex := 1
+	cmd := hubAttachCmd{
+		client:      client,
+		nodeID:      "node_server",
+		sessionID:   "remote_session",
+		windowIndex: &windowIndex,
+		size:        hub.TerminalSize{Cols: 120, Rows: 40},
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !client.attachWindowCalled || client.windowIndex != 1 {
+		t.Fatalf("window attach call = called %v index %d", client.attachWindowCalled, client.windowIndex)
+	}
+	if client.nodeID != "node_server" || client.sessionID != "remote_session" {
+		t.Fatalf("attach window call = node %q session %q", client.nodeID, client.sessionID)
 	}
 	if client.size.Cols != 120 || client.size.Rows != 40 {
 		t.Fatalf("attach size = %+v, want 120x40", client.size)
@@ -1353,6 +3158,54 @@ func TestHubAttachCmdRestartsBeforeAttachWhenRequested(t *testing.T) {
 	})
 	if client.nodeID != "node_server" || client.sessionID != "remote_session" {
 		t.Fatalf("attach call = node %q session %q", client.nodeID, client.sessionID)
+	}
+}
+
+func TestHubSandboxShellAttachCmdOpensShellThenAttachesToken(t *testing.T) {
+	client := &fakeHubAttachClient{
+		commandResult: mustJSON(t, hub.SandboxShellResponse{SessionID: "r1", AttachSessionID: "tmuxattach-token"}),
+	}
+	cmd := hubSandboxShellAttachCmd{
+		client:    client,
+		nodeID:    "node_server",
+		sessionID: "r1",
+		size:      hub.TerminalSize{Cols: 120, Rows: 40},
+	}
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands = %d, want sandbox shell command", len(client.commands))
+	}
+	assertHubCommandPayload(t, client.commands[0], "node_server", "sandbox_shell", hub.SandboxShellRequest{SessionID: "r1"})
+	if client.nodeID != "node_server" || client.sessionID != "tmuxattach-token" {
+		t.Fatalf("attach call = node %q session %q", client.nodeID, client.sessionID)
+	}
+	if client.size.Cols != 120 || client.size.Rows != 40 {
+		t.Fatalf("attach size = %+v, want 120x40", client.size)
+	}
+}
+
+func TestHubEnterOnSandboxSessionStartsSandboxShellAttach(t *testing.T) {
+	h, _ := newHubActionHome(t)
+	snapshot := h.hubSessions["node_server"]
+	snapshot.Sessions[0].Sandbox = json.RawMessage(`{"enabled":true,"image":"sandbox:latest"}`)
+	snapshot.Sessions[0].SandboxContainer = "agent-deck-sbx-r1"
+	h.hubSessions["node_server"] = snapshot
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("E on hub sandbox session returned no command")
+	}
+	if h.err != nil {
+		t.Fatalf("E on hub sandbox session error = %v", h.err)
+	}
+	if !h.isAttaching.Load() {
+		t.Fatal("E on hub sandbox session did not mark Home as attaching")
 	}
 }
 
@@ -1408,6 +3261,124 @@ func TestHubEnterOnSessionStartsAttachCommand(t *testing.T) {
 	}
 }
 
+func TestHubSessionProjectsRemoteWindows(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     "deploy",
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+				Windows: []hub.WindowInfo{{
+					Index: 0,
+					Name:  "main",
+					Tool:  "claude",
+				}, {
+					Index: 1,
+					Name:  "logs",
+					Tool:  "shell",
+				}},
+			}},
+		},
+	}
+
+	h.rebuildFlatItems()
+
+	sessionIdx := indexHubSession(t, h, "r1")
+	if sessionIdx+2 >= len(h.flatItems) {
+		t.Fatalf("flatItems missing projected window rows after session: %+v", h.flatItems)
+	}
+	first := h.flatItems[sessionIdx+1]
+	second := h.flatItems[sessionIdx+2]
+	if first.Type != session.ItemTypeWindow || second.Type != session.ItemTypeWindow {
+		t.Fatalf("projected items after hub session = %v/%v, want windows", first.Type, second.Type)
+	}
+	wantParent := web.HubSessionWebID("node_server", "r1")
+	if first.WindowSessionID != wantParent || second.WindowSessionID != wantParent || second.WindowIndex != 1 || second.WindowName != "logs" || second.WindowTool != "shell" {
+		t.Fatalf("projected hub windows = %+v / %+v", first, second)
+	}
+	if first.HubNodeID != "node_server" || first.HubSession == nil || first.HubSession.ID != "r1" {
+		t.Fatalf("projected hub window lost hub identity: %+v", first)
+	}
+}
+
+func TestHubEnterOnWindowStartsWindowAttachCommand(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubClient = &fakeHubAttachClient{}
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     "deploy",
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+				Windows: []hub.WindowInfo{{
+					Index: 0,
+					Name:  "main",
+				}, {
+					Index: 2,
+					Name:  "logs",
+				}},
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubWindow(t, h, "node_server", "r1", 2)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("Enter on hub window returned no command")
+	}
+	if h.err != nil {
+		t.Fatalf("Enter on hub window error = %v", h.err)
+	}
+	if !h.isAttaching.Load() {
+		t.Fatal("Enter on hub window did not mark Home as attaching")
+	}
+}
+
+func TestHubSessionShiftCCopiesProjectedSessionInfo(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:               "r1",
+				Title:            "deploy",
+				Tool:             "codex",
+				Status:           "waiting",
+				GroupPath:        "ops",
+				ProjectPath:      "/srv/app",
+				CodexSessionID:   "codex-remote",
+				DisplaySessionID: "codex-remote",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("Shift+C on hub session returned no copy command")
+	}
+	if h.err != nil {
+		t.Fatalf("Shift+C on hub session error = %v", h.err)
+	}
+}
+
 func TestHubAttachResultMsgRecordsErrorThroughUpdate(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
@@ -1460,12 +3431,15 @@ func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
 		"node_server": {
 			Node: hub.Node{ID: "node_server", Name: "server1"},
 			Sessions: []hub.SessionInfo{{
-				ID:          "r1",
-				Title:       "deploy",
-				Tool:        "claude",
-				Status:      "waiting",
-				GroupPath:   "ops",
-				ProjectPath: "/srv/app",
+				ID:               "r1",
+				Title:            "deploy",
+				Tool:             "claude",
+				Status:           "waiting",
+				GroupPath:        "ops",
+				ProjectPath:      "/srv/app",
+				WorktreePath:     "/srv/app/.worktrees/deploy",
+				WorktreeRepoRoot: "/srv/app",
+				WorktreeBranch:   "fork/deploy",
 			}},
 		},
 	}
@@ -1475,13 +3449,23 @@ func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
 }
 
 type fakeHubAttachClient struct {
-	nodeID         string
-	sessionID      string
-	size           hub.TerminalSize
-	commands       []hubCommandCall
-	trustDecisions []hubTrustDecisionCall
-	commandErr     error
-	commandResult  json.RawMessage
+	nodeID             string
+	sessionID          string
+	windowIndex        int
+	attachWindowCalled bool
+	size               hub.TerminalSize
+	commands           []hubCommandCall
+	renamedNodes       []hubNodeRenameCall
+	promotedNodes      []string
+	demotedNodes       []string
+	revokedNodes       []string
+	trustDecisions     []hubTrustDecisionCall
+	invites            []hub.AdminInvite
+	createdInvites     []hub.CreateAdminInviteRequest
+	revokedInvites     []string
+	trustRequests      []hub.TrustRequestPayload
+	commandErr         error
+	commandResult      json.RawMessage
 }
 
 func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
@@ -1491,9 +3475,27 @@ func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID stri
 	return nil
 }
 
+func (c *fakeHubAttachClient) AttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size hub.TerminalSize) error {
+	c.nodeID = nodeID
+	c.sessionID = sessionID
+	c.windowIndex = windowIndex
+	c.attachWindowCalled = true
+	c.size = size
+	return nil
+}
+
 func (c *fakeHubAttachClient) OpenAttach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
 	c.nodeID = nodeID
 	c.sessionID = sessionID
+	c.size = size
+	return nil, nil
+}
+
+func (c *fakeHubAttachClient) OpenAttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size hub.TerminalSize) (hub.AttachStream, error) {
+	c.nodeID = nodeID
+	c.sessionID = sessionID
+	c.windowIndex = windowIndex
+	c.attachWindowCalled = true
 	c.size = size
 	return nil, nil
 }
@@ -1506,9 +3508,51 @@ func (c *fakeHubAttachClient) Command(ctx context.Context, nodeID, action string
 	return c.commandResult, nil
 }
 
+func (c *fakeHubAttachClient) RenameNode(ctx context.Context, nodeID, name string) (hub.Node, error) {
+	c.renamedNodes = append(c.renamedNodes, hubNodeRenameCall{nodeID: nodeID, name: name})
+	return hub.Node{ID: nodeID, Name: name}, nil
+}
+
+func (c *fakeHubAttachClient) PromoteNode(ctx context.Context, nodeID string) (hub.Node, error) {
+	c.promotedNodes = append(c.promotedNodes, nodeID)
+	return hub.Node{ID: nodeID, Admin: true}, nil
+}
+
+func (c *fakeHubAttachClient) DemoteNode(ctx context.Context, nodeID string) (hub.Node, error) {
+	c.demotedNodes = append(c.demotedNodes, nodeID)
+	return hub.Node{ID: nodeID, Admin: false}, nil
+}
+
+func (c *fakeHubAttachClient) RevokeNode(ctx context.Context, nodeID string) error {
+	c.revokedNodes = append(c.revokedNodes, nodeID)
+	return nil
+}
+
 func (c *fakeHubAttachClient) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
 	c.trustDecisions = append(c.trustDecisions, hubTrustDecisionCall{nodeID: nodeID, allow: allow})
 	return nil
+}
+
+func (c *fakeHubAttachClient) ListInvites(ctx context.Context) ([]hub.AdminInvite, error) {
+	return append([]hub.AdminInvite(nil), c.invites...), nil
+}
+
+func (c *fakeHubAttachClient) CreateInvite(ctx context.Context, req hub.CreateAdminInviteRequest) (hub.CreateAdminInviteResponse, error) {
+	c.createdInvites = append(c.createdInvites, req)
+	return hub.CreateAdminInviteResponse{
+		URL:         "wss://hub.example",
+		InviteToken: "invite-token",
+		ExpiresAt:   time.Unix(789, 0).UTC(),
+	}, nil
+}
+
+func (c *fakeHubAttachClient) RevokeInvite(ctx context.Context, inviteID string) error {
+	c.revokedInvites = append(c.revokedInvites, inviteID)
+	return nil
+}
+
+func (c *fakeHubAttachClient) ListTrustRequests(ctx context.Context) ([]hub.TrustRequestPayload, error) {
+	return append([]hub.TrustRequestPayload(nil), c.trustRequests...), nil
 }
 
 func (c *fakeHubAttachClient) Close() error {
@@ -1519,6 +3563,11 @@ type hubCommandCall struct {
 	nodeID  string
 	action  string
 	payload any
+}
+
+type hubNodeRenameCall struct {
+	nodeID string
+	name   string
 }
 
 type hubTrustDecisionCall struct {
@@ -1542,6 +3591,20 @@ func assertHubCommand(t *testing.T, got hubCommandCall, nodeID, action string, w
 	}
 }
 
+func assertHubCommandPayload[T comparable](t *testing.T, got hubCommandCall, nodeID, action string, want T) {
+	t.Helper()
+	if got.nodeID != nodeID || got.action != action {
+		t.Fatalf("hub command = %+v, want node=%q action=%q", got, nodeID, action)
+	}
+	payload, ok := got.payload.(T)
+	if !ok {
+		t.Fatalf("hub command payload type = %T, want %T", got.payload, want)
+	}
+	if payload != want {
+		t.Fatalf("hub command payload = %+v, want %+v", payload, want)
+	}
+}
+
 func mustJSON(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -1552,16 +3615,23 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 func webSnapshotHasHubSession(snapshot *web.MenuSnapshot, nodeID, sessionID string) bool {
+	return webSnapshotHubSession(snapshot, nodeID, sessionID) != nil
+}
+
+func webSnapshotHubSession(snapshot *web.MenuSnapshot, nodeID, sessionID string) *web.MenuSession {
 	if snapshot == nil {
-		return false
+		return nil
 	}
 	wantID := web.HubSessionWebID(nodeID, sessionID)
 	for _, item := range snapshot.Items {
 		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
-			return item.Session.Source == "hub" && item.Session.HubNodeID == nodeID && item.Session.HubSessionID == sessionID
+			if item.Session.Source == "hub" && item.Session.HubNodeID == nodeID && item.Session.HubSessionID == sessionID {
+				return item.Session
+			}
+			return nil
 		}
 	}
-	return false
+	return nil
 }
 
 func webSnapshotHubSessionCanFork(snapshot *web.MenuSnapshot, nodeID, sessionID string) bool {
@@ -1585,6 +3655,22 @@ func webSnapshotHubSessionNotes(snapshot *web.MenuSnapshot, nodeID, sessionID st
 	for _, item := range snapshot.Items {
 		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
 			return item.Session.Notes
+		}
+	}
+	return ""
+}
+
+func webSnapshotHubSessionWorktree(snapshot *web.MenuSnapshot, nodeID, sessionID string) string {
+	if snapshot == nil {
+		return ""
+	}
+	wantID := web.HubSessionWebID(nodeID, sessionID)
+	for _, item := range snapshot.Items {
+		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
+			if item.Session.WorktreePath == "" || item.Session.WorktreeRepoRoot == "" {
+				return ""
+			}
+			return item.Session.WorktreeBranch
 		}
 	}
 	return ""
@@ -1628,6 +3714,18 @@ func indexHubSession(t *testing.T, h *Home, id string) int {
 	return -1
 }
 
+func indexHubWindow(t *testing.T, h *Home, nodeID, sessionID string, windowIndex int) int {
+	t.Helper()
+	wantParent := web.HubSessionWebID(nodeID, sessionID)
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeWindow && item.HubNodeID == nodeID && item.WindowSessionID == wantParent && item.WindowIndex == windowIndex {
+			return i
+		}
+	}
+	t.Fatalf("hub window %q/%q:%d not found in flatItems: %+v", nodeID, sessionID, windowIndex, h.flatItems)
+	return -1
+}
+
 func indexHubNode(t *testing.T, h *Home, nodeID string) int {
 	t.Helper()
 	for i, item := range h.flatItems {
@@ -1637,6 +3735,15 @@ func indexHubNode(t *testing.T, h *Home, nodeID string) int {
 	}
 	t.Fatalf("hub node %q not found in flatItems: %+v", nodeID, h.flatItems)
 	return -1
+}
+
+func hasHubNode(h *Home, nodeID string) bool {
+	for _, item := range h.flatItems {
+		if item.Type == session.ItemTypeHubNode && item.HubNodeID == nodeID {
+			return true
+		}
+	}
+	return false
 }
 
 func indexHubGroup(t *testing.T, h *Home, nodeID, groupPath string) int {

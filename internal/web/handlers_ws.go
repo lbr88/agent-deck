@@ -83,6 +83,7 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
+	sandboxShell := terminalSandboxShellRequested(r)
 
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -120,7 +121,12 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 			})
 		} else {
 			attachCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-			stream, err := attacher.OpenHubTerminal(attachCtx, hubNodeID, hubSessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+			var stream hub.AttachStream
+			if sandboxShell {
+				stream, err = attacher.OpenHubSandboxShellTerminal(attachCtx, hubNodeID, hubSessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+			} else {
+				stream, err = attacher.OpenHubTerminal(attachCtx, hubNodeID, hubSessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+			}
 			cancel()
 			if err != nil {
 				logging.ForComponent(logging.CompWeb).Error("hub_terminal_attach_failed",
@@ -155,7 +161,58 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
+	} else if sandboxShell {
+		opener, ok := s.mutator.(LocalSandboxShellOpener)
+		if !ok {
+			_ = writer.WriteJSON(wsServerMessage{
+				Type:      "error",
+				Code:      "SANDBOX_TERMINAL_UNAVAILABLE",
+				Message:   "sandbox terminal shell is not available",
+				SessionID: sessionID,
+				Time:      time.Now().UTC(),
+			})
+		} else {
+			attachCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			tmuxSession, tmuxSocket, err := opener.OpenLocalSandboxShell(attachCtx, sessionID)
+			cancel()
+			if err != nil {
+				logging.ForComponent(logging.CompWeb).Error("sandbox_terminal_attach_failed",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()))
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "error",
+					Code:      "SANDBOX_TERMINAL_ATTACH_FAILED",
+					Message:   "failed to attach sandbox terminal bridge",
+					Hint:      "Make sure the session is sandboxed and its Docker container is still running.",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			} else if bridge, err = newTmuxPTYBridge(tmuxSession, tmuxSocket, sessionID, writer); err != nil {
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "error",
+					Code:      "SANDBOX_TERMINAL_ATTACH_FAILED",
+					Message:   "failed to initialize sandbox terminal bridge",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			} else {
+				defer bridge.Close()
+				_ = writer.WriteJSON(wsServerMessage{
+					Type:      "status",
+					Event:     "terminal_attached",
+					SessionID: sessionID,
+					Time:      time.Now().UTC(),
+				})
+			}
+		}
 	} else if menuSession.TmuxSession != "" {
+		if acknowledger, ok := s.mutator.(LocalTerminalAcknowledger); ok {
+			if err := acknowledger.AcknowledgeLocalTerminal(sessionID); err != nil {
+				logging.ForComponent(logging.CompWeb).Warn("terminal_acknowledge_failed",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()))
+			}
+		}
 		bridge, err = newTmuxPTYBridge(menuSession.TmuxSession, menuSession.TmuxSocketName, sessionID, writer)
 		if err != nil {
 			logging.ForComponent(logging.CompWeb).Error("terminal_attach_failed",
@@ -307,6 +364,15 @@ func hubTerminalTarget(menuSession *MenuSession) (nodeID, sessionID string, ok b
 		return nodeID, sessionID, true
 	}
 	return "", "", false
+}
+
+func terminalSandboxShellRequested(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	q := r.URL.Query()
+	return strings.EqualFold(strings.TrimSpace(q.Get("shell")), "sandbox") ||
+		strings.EqualFold(strings.TrimSpace(q.Get("terminal")), "sandbox")
 }
 
 func snapshotSessionByID(snapshot *MenuSnapshot, sessionID string) (*MenuSession, bool) {

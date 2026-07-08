@@ -171,6 +171,16 @@ func handleHub(profile string, args []string) {
 		err = handleHubShell(profile, args[1:])
 	case "sessions":
 		err = handleHubSessions(profile, args[1:])
+	case "groups":
+		err = handleHubGroups(profile, args[1:])
+	case "mcps", "mcp":
+		err = handleHubMCPs(profile, args[1:])
+	case "skills", "skill":
+		err = handleHubSkills(profile, args[1:])
+	case "plugins", "plugin":
+		err = handleHubPlugins(profile, args[1:])
+	case "service":
+		err = handleHubService(profile, args[1:])
 	case "install-skill":
 		err = handleHubInstallSkill(args[1:])
 	case "connect":
@@ -2107,6 +2117,11 @@ func printHubUsage(w io.Writer) {
 	fmt.Fprintln(w, "  trust   List or answer pending node trust requests")
 	fmt.Fprintln(w, "  shell   Open a shell session on a trusted hub node")
 	fmt.Fprintln(w, "  sessions List/create/control sessions on trusted hub nodes")
+	fmt.Fprintln(w, "  groups  List/create/update/delete groups on trusted hub nodes")
+	fmt.Fprintln(w, "  mcps    List/attach/detach/move MCPs on hub sessions")
+	fmt.Fprintln(w, "  skills  List/attach/detach project skills on hub sessions")
+	fmt.Fprintln(w, "  plugins List/attach/detach Claude plugins on hub sessions")
+	fmt.Fprintln(w, "  service Install/manage hub connect as a systemd service")
 	fmt.Fprintln(w, "  install-skill Install a bundled hub skill into the skill pool")
 	fmt.Fprintln(w, "  connect Connect this node to the configured hub")
 }

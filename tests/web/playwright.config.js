@@ -12,6 +12,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 const PORT = process.env.AGENT_DECK_WEB_PORT || '38291'
 const baseURL = `http://127.0.0.1:${PORT}`
+const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined
 
 export default defineConfig({
   testDir: './e2e',
@@ -46,6 +47,7 @@ export default defineConfig({
       // belt-and-braces fallback for any auth-enabled run.
       'X-Agent-Deck-Test': '1',
     },
+    ...(chromiumExecutablePath ? { launchOptions: { executablePath: chromiumExecutablePath } } : {}),
   },
   // Tablet and phone projects use chromium with overridden viewports so we
   // don't need to install webkit just for layout coverage. This matches the

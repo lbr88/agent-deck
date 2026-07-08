@@ -241,7 +241,12 @@ func TestStoreSnapshotReplacesLatest(t *testing.T) {
 		t.Fatalf("UpsertNode: %v", err)
 	}
 	first := SnapshotPayload{SentAt: time.Now(), Sessions: []SessionInfo{{ID: "s1", Title: "old", Status: "waiting"}}}
-	second := SnapshotPayload{SentAt: time.Now(), Sessions: []SessionInfo{{ID: "s2", Title: "new", Status: "running"}}}
+	second := SnapshotPayload{
+		SentAt:       time.Now(),
+		WebAvailable: true,
+		Sessions:     []SessionInfo{{ID: "s2", Title: "new", Status: "running"}},
+		Groups:       []GroupInfo{{Name: "ops", Path: "ops", DefaultPath: "/srv/ops"}},
+	}
 	if err := store.ReplaceSnapshot(node.ID, first); err != nil {
 		t.Fatalf("ReplaceSnapshot first: %v", err)
 	}
@@ -254,6 +259,12 @@ func TestStoreSnapshotReplacesLatest(t *testing.T) {
 	}
 	if len(got) != 1 || len(got[0].Sessions) != 1 || got[0].Sessions[0].ID != "s2" {
 		t.Fatalf("sessions = %+v", got)
+	}
+	if !got[0].WebAvailable {
+		t.Fatalf("WebAvailable = false, want true: %+v", got[0])
+	}
+	if len(got[0].Groups) != 1 || got[0].Groups[0].DefaultPath != "/srv/ops" {
+		t.Fatalf("groups = %+v, want /srv/ops default path", got[0].Groups)
 	}
 }
 

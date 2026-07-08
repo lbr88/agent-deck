@@ -53,6 +53,7 @@ type ClientConfig struct {
 
 	OnStatus       func(string)
 	OnSnapshot     func(NodeSessions)
+	OnWelcome      func(WelcomePayload)
 	OnTrustRequest func(TrustRequestPayload)
 
 	AttachBackend AttachBackend
@@ -444,10 +445,11 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 			nodeName = nodeID
 		}
 		c.cfg.OnSnapshot(NodeSessions{
-			Node:     Node{ID: nodeID, Name: nodeName},
-			SentAt:   snapshot.SentAt,
-			Sessions: append([]SessionInfo(nil), snapshot.Sessions...),
-			Groups:   append([]GroupInfo(nil), snapshot.Groups...),
+			Node:         Node{ID: nodeID, Name: nodeName},
+			SentAt:       snapshot.SentAt,
+			WebAvailable: snapshot.WebAvailable,
+			Sessions:     append([]SessionInfo(nil), snapshot.Sessions...),
+			Groups:       append([]GroupInfo(nil), snapshot.Groups...),
 		})
 	case MsgAttachOpen:
 		c.handleAttachOpen(ctx, conn, env)
@@ -467,7 +469,16 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 		c.handleCommandResult(env)
 	case MsgTrustRequest:
 		c.handleTrustRequest(env)
-	case MsgWelcome, MsgHeartbeat, MsgError:
+	case MsgWelcome:
+		if c.cfg.OnWelcome == nil {
+			return
+		}
+		var payload WelcomePayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return
+		}
+		c.cfg.OnWelcome(payload)
+	case MsgHeartbeat, MsgError:
 		return
 	default:
 		return
@@ -522,8 +533,52 @@ func (c *Client) handleCommand(ctx context.Context, conn *clientConn, env Envelo
 		result.Error = err.Error()
 	} else {
 		result.Result = raw
+		if commandActionPublishesSnapshot(payload.Action) {
+			_ = c.publishSnapshot(ctx, conn, c.cfg.NodeID, c.cfg.NodeName)
+		}
 	}
 	_ = conn.writeEnvelope(MsgCommandResult, c.cfg.NodeID, result)
+}
+
+func commandActionPublishesSnapshot(action string) bool {
+	switch strings.TrimSpace(action) {
+	case "start",
+		"stop",
+		"restart",
+		"restart_fresh",
+		"fork",
+		"rename",
+		"create",
+		"delete",
+		"undo_delete",
+		"archive",
+		"unarchive",
+		"remove",
+		"move",
+		"update",
+		"update_paths",
+		"worktree_finish",
+		"sandbox_shell",
+		"group_create",
+		"group_rename",
+		"group_update",
+		"group_delete",
+		"group_reparent",
+		"group_reorder",
+		"mcp_attach",
+		"mcp_detach",
+		"mcp_move",
+		"skill_attach",
+		"skill_detach",
+		"plugin_attach",
+		"plugin_detach",
+		"toggle_yolo",
+		"mark_unread",
+		"import_tmux":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Envelope) {
@@ -551,7 +606,19 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 		backend = NewTmuxAttachBackend("")
 	}
 	streamCtx, cancel := context.WithCancel(ctx)
-	stream, err := backend.Open(streamCtx, sessionID, TerminalSize{Cols: payload.Cols, Rows: payload.Rows})
+	size := TerminalSize{Cols: payload.Cols, Rows: payload.Rows}
+	var stream AttachStream
+	var err error
+	if payload.WindowIndex != nil {
+		windowBackend, ok := backend.(AttachWindowBackend)
+		if !ok {
+			err = fmt.Errorf("attach backend does not support window selection")
+		} else {
+			stream, err = windowBackend.OpenWindow(streamCtx, sessionID, *payload.WindowIndex, size)
+		}
+	} else {
+		stream, err = backend.Open(streamCtx, sessionID, size)
+	}
 	if err != nil {
 		cancel()
 		c.unregisterOwnerStream(streamID)
@@ -562,11 +629,12 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 	ownerStream := &ownerAttachStream{streamID: streamID, stream: stream, cancel: cancel}
 	c.setReservedOwnerStream(ownerStream)
 	if err := conn.writeEnvelope(MsgAttachReady, c.cfg.NodeID, AttachOpenPayload{
-		StreamID:  streamID,
-		NodeID:    c.cfg.NodeID,
-		SessionID: sessionID,
-		Cols:      payload.Cols,
-		Rows:      payload.Rows,
+		StreamID:    streamID,
+		NodeID:      c.cfg.NodeID,
+		SessionID:   sessionID,
+		WindowIndex: payload.WindowIndex,
+		Cols:        payload.Cols,
+		Rows:        payload.Rows,
 	}); err != nil {
 		c.unregisterOwnerStream(streamID)
 		ownerStream.close()
@@ -853,6 +921,17 @@ func (c *Client) TrustDecision(ctx context.Context, nodeID string, allow bool) e
 }
 
 func (c *Client) OpenAttach(ctx context.Context, nodeID, sessionID string, size TerminalSize) (AttachStream, error) {
+	return c.openAttach(ctx, nodeID, sessionID, size, nil)
+}
+
+func (c *Client) OpenAttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size TerminalSize) (AttachStream, error) {
+	if windowIndex < 0 {
+		return nil, fmt.Errorf("hub attach window index must be non-negative")
+	}
+	return c.openAttach(ctx, nodeID, sessionID, size, &windowIndex)
+}
+
+func (c *Client) openAttach(ctx context.Context, nodeID, sessionID string, size TerminalSize, windowIndex *int) (AttachStream, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -879,11 +958,12 @@ func (c *Client) OpenAttach(ctx context.Context, nodeID, sessionID string, size 
 	c.registerRequesterStream(stream)
 
 	if err := conn.writeEnvelope(MsgAttachOpen, c.cfg.NodeID, AttachOpenPayload{
-		StreamID:  streamID,
-		NodeID:    nodeID,
-		SessionID: sessionID,
-		Cols:      size.Cols,
-		Rows:      size.Rows,
+		StreamID:    streamID,
+		NodeID:      nodeID,
+		SessionID:   sessionID,
+		WindowIndex: windowIndex,
+		Cols:        size.Cols,
+		Rows:        size.Rows,
 	}); err != nil {
 		c.unregisterRequesterStream(streamID)
 		return nil, err
@@ -911,7 +991,204 @@ func (c *Client) OpenAttach(ctx context.Context, nodeID, sessionID string, size 
 	}
 }
 
+type clientRenameNodeRequest struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+}
+
+type clientNodeIDRequest struct {
+	NodeID string `json:"node_id"`
+}
+
+type clientInviteIDRequest struct {
+	InviteID string `json:"invite_id"`
+}
+
+type nodeAdminResponse struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Version    string     `json:"version,omitempty"`
+	OS         string     `json:"os,omitempty"`
+	Arch       string     `json:"arch,omitempty"`
+	Status     string     `json:"status,omitempty"`
+	Admin      bool       `json:"admin,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+}
+
+type listInvitesClientResponse struct {
+	Invites []AdminInvite `json:"invites"`
+}
+
+type listTrustRequestsClientResponse struct {
+	Requests []TrustRequestPayload `json:"requests"`
+}
+
+func nodeFromAdminResponse(resp nodeAdminResponse) (Node, error) {
+	if strings.TrimSpace(resp.ID) == "" {
+		return Node{}, fmt.Errorf("hub response missing node id")
+	}
+	return Node{
+		ID:         resp.ID,
+		Name:       resp.Name,
+		Version:    resp.Version,
+		OS:         resp.OS,
+		Arch:       resp.Arch,
+		Status:     resp.Status,
+		LastSeenAt: resp.LastSeenAt,
+		Admin:      resp.Admin,
+	}, nil
+}
+
+func (c *Client) RenameNode(ctx context.Context, nodeID, name string) (Node, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	name = strings.TrimSpace(name)
+	if nodeID == "" {
+		return Node{}, fmt.Errorf("hub node id is required")
+	}
+	if name == "" {
+		return Node{}, fmt.Errorf("hub node name is required")
+	}
+	var resp nodeAdminResponse
+	if err := c.authenticatedJSON(ctx, http.MethodPost, "/api/nodes/rename", clientRenameNodeRequest{NodeID: nodeID, Name: name}, &resp); err != nil {
+		return Node{}, err
+	}
+	return nodeFromAdminResponse(resp)
+}
+
+func (c *Client) PromoteNode(ctx context.Context, nodeID string) (Node, error) {
+	return c.setNodeAdmin(ctx, nodeID, true)
+}
+
+func (c *Client) DemoteNode(ctx context.Context, nodeID string) (Node, error) {
+	return c.setNodeAdmin(ctx, nodeID, false)
+}
+
+func (c *Client) setNodeAdmin(ctx context.Context, nodeID string, admin bool) (Node, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return Node{}, fmt.Errorf("hub node id is required")
+	}
+	path := "/api/nodes/promote"
+	if !admin {
+		path = "/api/nodes/demote"
+	}
+	var resp nodeAdminResponse
+	if err := c.authenticatedJSON(ctx, http.MethodPost, path, clientNodeIDRequest{NodeID: nodeID}, &resp); err != nil {
+		return Node{}, err
+	}
+	return nodeFromAdminResponse(resp)
+}
+
+func (c *Client) RevokeNode(ctx context.Context, nodeID string) error {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return fmt.Errorf("hub node id is required")
+	}
+	return c.authenticatedJSON(ctx, http.MethodPost, "/api/nodes/revoke", clientNodeIDRequest{NodeID: nodeID}, nil)
+}
+
+func (c *Client) ListInvites(ctx context.Context) ([]AdminInvite, error) {
+	var resp listInvitesClientResponse
+	if err := c.authenticatedJSON(ctx, http.MethodGet, "/api/invites", nil, &resp); err != nil {
+		return nil, err
+	}
+	return append([]AdminInvite(nil), resp.Invites...), nil
+}
+
+func (c *Client) CreateInvite(ctx context.Context, req CreateAdminInviteRequest) (CreateAdminInviteResponse, error) {
+	req.NodeName = strings.TrimSpace(req.NodeName)
+	if req.NodeName == "" {
+		return CreateAdminInviteResponse{}, fmt.Errorf("hub invite node name is required")
+	}
+	if req.TTLSeconds < 0 {
+		return CreateAdminInviteResponse{}, fmt.Errorf("hub invite ttl must be greater than zero")
+	}
+	var resp CreateAdminInviteResponse
+	if err := c.authenticatedJSON(ctx, http.MethodPost, "/api/invites", req, &resp); err != nil {
+		return CreateAdminInviteResponse{}, err
+	}
+	return resp, nil
+}
+
+func (c *Client) RevokeInvite(ctx context.Context, inviteID string) error {
+	inviteID = strings.TrimSpace(inviteID)
+	if inviteID == "" {
+		return fmt.Errorf("hub invite id is required")
+	}
+	return c.authenticatedJSON(ctx, http.MethodPost, "/api/invites/revoke", clientInviteIDRequest{InviteID: inviteID}, nil)
+}
+
+func (c *Client) ListTrustRequests(ctx context.Context) ([]TrustRequestPayload, error) {
+	var resp listTrustRequestsClientResponse
+	if err := c.authenticatedJSON(ctx, http.MethodGet, "/api/trust/pending", nil, &resp); err != nil {
+		return nil, err
+	}
+	return append([]TrustRequestPayload(nil), resp.Requests...), nil
+}
+
+func (c *Client) authenticatedJSON(ctx context.Context, method, path string, requestBody any, responseBody any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg, err := c.normalizedConfig()
+	if err != nil {
+		return err
+	}
+	endpoint, err := authenticatedAPIURL(cfg.URL, cfg.NodeID, path)
+	if err != nil {
+		return err
+	}
+	var body io.Reader
+	if requestBody != nil {
+		data, err := json.Marshal(requestBody)
+		if err != nil {
+			return fmt.Errorf("marshal hub request: %w", err)
+		}
+		body = strings.NewReader(string(data))
+	}
+	tlsConfig, err := clientTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return err
+	}
+	if requestBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("hub request failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	if responseBody == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
+		return fmt.Errorf("decode hub response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) Attach(ctx context.Context, nodeID, sessionID string, size TerminalSize) error {
+	return c.attach(ctx, nodeID, sessionID, size, nil)
+}
+
+func (c *Client) AttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size TerminalSize) error {
+	if windowIndex < 0 {
+		return fmt.Errorf("hub attach window index must be non-negative")
+	}
+	return c.attach(ctx, nodeID, sessionID, size, &windowIndex)
+}
+
+func (c *Client) attach(ctx context.Context, nodeID, sessionID string, size TerminalSize, windowIndex *int) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -939,11 +1216,12 @@ func (c *Client) Attach(ctx context.Context, nodeID, sessionID string, size Term
 	defer c.unregisterRequesterStream(streamID)
 
 	if err := conn.writeEnvelope(MsgAttachOpen, c.cfg.NodeID, AttachOpenPayload{
-		StreamID:  streamID,
-		NodeID:    nodeID,
-		SessionID: sessionID,
-		Cols:      size.Cols,
-		Rows:      size.Rows,
+		StreamID:    streamID,
+		NodeID:      nodeID,
+		SessionID:   sessionID,
+		WindowIndex: windowIndex,
+		Cols:        size.Cols,
+		Rows:        size.Rows,
 	}); err != nil {
 		return err
 	}
@@ -1186,7 +1464,10 @@ func notifyClientStatus(cfg ClientConfig, status string) {
 }
 
 type LocalSessionSource struct {
-	Profile string
+	Profile      string
+	webAvailable func(context.Context) bool
+	substate     func(context.Context, *statedb.InstanceRow) string
+	windows      func(context.Context, *statedb.InstanceRow) []WindowInfo
 }
 
 func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, error) {
@@ -1198,6 +1479,7 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 		return SnapshotPayload{}, ctx.Err()
 	default:
 	}
+	webAvailable := s.localWebAvailable(ctx)
 
 	effectiveProfile := session.GetEffectiveProfile(s.Profile)
 	profileDir, err := session.GetProfileDir(effectiveProfile)
@@ -1207,7 +1489,7 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 	dbPath := filepath.Join(profileDir, "state.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
-			return SnapshotPayload{SentAt: time.Now().UTC()}, nil
+			return SnapshotPayload{SentAt: time.Now().UTC(), WebAvailable: webAvailable}, nil
 		}
 		return SnapshotPayload{}, fmt.Errorf("stat local session state db: %w", err)
 	}
@@ -1231,7 +1513,10 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 		if row == nil {
 			continue
 		}
-		sessions = append(sessions, sessionInfoFromRow(row))
+		info := sessionInfoFromRow(row)
+		info.Substate = s.rowSubstate(ctx, row)
+		info.Windows = s.rowWindows(ctx, row)
+		sessions = append(sessions, info)
 	}
 	groups := make([]GroupInfo, 0, len(groupRows))
 	for _, row := range groupRows {
@@ -1240,7 +1525,120 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 		}
 		groups = append(groups, groupInfoFromRow(row))
 	}
-	return SnapshotPayload{SentAt: time.Now().UTC(), Sessions: sessions, Groups: groups}, nil
+	return SnapshotPayload{SentAt: time.Now().UTC(), WebAvailable: webAvailable, Sessions: sessions, Groups: groups}, nil
+}
+
+func (s LocalSessionSource) localWebAvailable(ctx context.Context) bool {
+	if s.webAvailable != nil {
+		return s.webAvailable(ctx)
+	}
+	return probeLocalWebAvailable(ctx)
+}
+
+func (s LocalSessionSource) rowSubstate(ctx context.Context, row *statedb.InstanceRow) string {
+	if s.substate != nil {
+		return strings.TrimSpace(s.substate(ctx, row))
+	}
+	return liveSubstateFromRow(ctx, row)
+}
+
+func (s LocalSessionSource) rowWindows(ctx context.Context, row *statedb.InstanceRow) []WindowInfo {
+	if s.windows != nil {
+		return cloneWindowInfo(s.windows(ctx, row))
+	}
+	return liveWindowsFromRow(ctx, row)
+}
+
+func liveSubstateFromRow(ctx context.Context, row *statedb.InstanceRow) string {
+	if row == nil || strings.TrimSpace(row.TmuxSession) == "" {
+		return ""
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ""
+		default:
+		}
+	}
+	tmuxSess := tmux.ReconnectSessionLazy(row.TmuxSession, row.Title, row.ProjectPath, row.Command, row.Status)
+	tmuxSess.SocketName = row.TmuxSocketName
+	return string(tmuxSess.GetSubstate())
+}
+
+const hubWindowFieldSep = "\x1f"
+
+func liveWindowsFromRow(ctx context.Context, row *statedb.InstanceRow) []WindowInfo {
+	if row == nil || strings.TrimSpace(row.TmuxSession) == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+	windowCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	format := strings.Join([]string{"#{window_index}", "#{window_activity}", "#{window_name}"}, hubWindowFieldSep)
+	out, err := tmux.ExecContext(windowCtx, row.TmuxSocketName, "list-windows", "-t", row.TmuxSession, "-F", format).Output()
+	if err != nil {
+		return nil
+	}
+	return parseHubWindowList(string(out))
+}
+
+func parseHubWindowList(output string) []WindowInfo {
+	var windows []WindowInfo
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, hubWindowFieldSep, 3)
+		if len(parts) < 3 {
+			continue
+		}
+		var win WindowInfo
+		if _, err := fmt.Sscanf(parts[0], "%d", &win.Index); err != nil {
+			continue
+		}
+		if _, err := fmt.Sscanf(parts[1], "%d", &win.Activity); err != nil {
+			continue
+		}
+		win.Name = parts[2]
+		windows = append(windows, win)
+	}
+	return windows
+}
+
+func cloneWindowInfo(in []WindowInfo) []WindowInfo {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]WindowInfo, len(in))
+	copy(out, in)
+	return out
+}
+
+func probeLocalWebAvailable(ctx context.Context) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, "http://127.0.0.1:8420/", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-Agent-Deck-Hub-Web-Probe", "1")
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return true
 }
 
 func groupInfoFromRow(row *statedb.GroupRow) GroupInfo {
@@ -1255,17 +1653,59 @@ func groupInfoFromRow(row *statedb.GroupRow) GroupInfo {
 }
 
 func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
+	claudeSessionID, _, geminiSessionID, _, geminiYoloMode, geminiModel,
+		openCodeSessionID, _, codexSessionID, _,
+		latestPrompt, notes, loadedMCPNames,
+		toolOptionsJSON, sandboxJSON, sandboxContainer,
+		sshHost, sshRemotePath,
+		multiRepoEnabled, additionalPaths,
+		multiRepoTempDir, multiRepoWorktrees,
+		channels, extraArgs, plugins,
+		pluginChannelLinkDisabled, _, color := statedb.UnmarshalToolData(row.ToolData)
 	info := SessionInfo{
-		ID:               row.ID,
-		Title:            row.Title,
-		Tool:             row.Tool,
-		Status:           row.Status,
-		GroupPath:        row.GroupPath,
-		ProjectPath:      row.ProjectPath,
-		Notes:            notesFromRow(row),
-		DisplaySessionID: displaySessionIDFromRow(row),
-		CanFork:          canForkFromRow(row),
-		UpdatedAt:        rowUpdatedAt(row),
+		ID:                        row.ID,
+		Title:                     row.Title,
+		Tool:                      row.Tool,
+		Status:                    row.Status,
+		GroupPath:                 row.GroupPath,
+		ProjectPath:               row.ProjectPath,
+		ParentSessionID:           row.ParentSessionID,
+		IsConductor:               row.IsConductor,
+		Command:                   row.Command,
+		Wrapper:                   row.Wrapper,
+		TmuxSession:               row.TmuxSession,
+		TmuxSocketName:            row.TmuxSocketName,
+		Color:                     color,
+		ClaudeSessionID:           claudeSessionID,
+		GeminiSessionID:           geminiSessionID,
+		GeminiModel:               geminiModel,
+		GeminiYoloMode:            geminiYoloMode,
+		OpenCodeSessionID:         openCodeSessionID,
+		CodexSessionID:            codexSessionID,
+		LatestPrompt:              latestPrompt,
+		MultiRepoEnabled:          multiRepoEnabled,
+		AdditionalPaths:           additionalPaths,
+		MultiRepoTempDir:          multiRepoTempDir,
+		MultiRepoWorktrees:        worktreeInfoFromToolData(multiRepoWorktrees),
+		WorktreePath:              row.WorktreePath,
+		WorktreeRepoRoot:          row.WorktreeRepo,
+		WorktreeBranch:            row.WorktreeBranch,
+		Notes:                     notes,
+		LoadedMCPNames:            append([]string(nil), loadedMCPNames...),
+		Plugins:                   append([]string(nil), plugins...),
+		Channels:                  append([]string(nil), channels...),
+		PluginChannelLinkDisabled: pluginChannelLinkDisabled,
+		ExtraArgs:                 append([]string(nil), extraArgs...),
+		ToolOptionsJSON:           cloneRawJSON(toolOptionsJSON),
+		Sandbox:                   cloneRawJSON(sandboxJSON),
+		SandboxContainer:          sandboxContainer,
+		SSHHost:                   sshHost,
+		SSHRemotePath:             sshRemotePath,
+		TitleLocked:               row.TitleLocked,
+		NoTransitionNotify:        row.NoTransitionNotify,
+		DisplaySessionID:          displaySessionIDFromRow(row),
+		CanFork:                   canForkFromRow(row),
+		UpdatedAt:                 rowUpdatedAt(row),
 	}
 	if !row.ArchivedAt.IsZero() {
 		archivedAt := row.ArchivedAt
@@ -1274,12 +1714,24 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 	return info
 }
 
-func notesFromRow(row *statedb.InstanceRow) string {
-	if row == nil {
-		return ""
+func cloneRawJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
 	}
-	_, _, _, _, _, _, _, _, _, _, _, notes, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := statedb.UnmarshalToolData(row.ToolData)
-	return notes
+	return append(json.RawMessage(nil), raw...)
+}
+
+func worktreeInfoFromToolData(rows []statedb.MultiRepoWorktreeData) []Worktree {
+	out := make([]Worktree, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Worktree{
+			OriginalPath: row.OriginalPath,
+			WorktreePath: row.WorktreePath,
+			RepoRoot:     row.RepoRoot,
+			Branch:       row.Branch,
+		})
+	}
+	return out
 }
 
 func canForkFromRow(row *statedb.InstanceRow) bool {
@@ -1388,6 +1840,37 @@ func nodeWebSocketURL(rawURL, nodeID string) (string, error) {
 	}
 	q := u.Query()
 	q.Set("node_id", strings.TrimSpace(nodeID))
+	u.RawQuery = q.Encode()
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+func authenticatedAPIURL(rawURL, nodeID, path string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", fmt.Errorf("parse hub URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		u.Scheme = "https"
+	case "https":
+	default:
+		return "", fmt.Errorf("hub client requires wss://; use TLS even for local deployments")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", fmt.Errorf("hub URL host is required")
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return "", fmt.Errorf("hub node id is required")
+	}
+	path = "/" + strings.TrimLeft(strings.TrimSpace(path), "/")
+	if path == "/" {
+		return "", fmt.Errorf("hub API path is required")
+	}
+	u.Path = path
+	q := u.Query()
+	q.Set("node_id", nodeID)
 	u.RawQuery = q.Encode()
 	u.Fragment = ""
 	return u.String(), nil

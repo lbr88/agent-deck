@@ -11,6 +11,9 @@ build/
 # Test binary
 *.test
 
+# Local scratch/cache dirs
+.tmp/
+
 # Output of go coverage tool
 *.out
 

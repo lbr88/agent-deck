@@ -146,27 +146,6 @@ test.describe('keyboard parity (#780)', () => {
   })
 
   test('Shift+G opens global conversation search', async ({ page }) => {
-    await page.route('**/api/search/global**', async route => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          query: 'observability',
-          count: 1,
-          tier: 'instant',
-          entryCount: 1,
-          loading: false,
-          results: [{
-            sessionId: 'claude-global-1',
-            summary: 'observability metrics',
-            snippet: 'implement observability metrics',
-            cwd: '/srv/agent-deck',
-            score: 10,
-            matchCount: 1,
-          }],
-        }),
-      })
-    })
     await page.keyboard.down('Shift')
     await page.keyboard.press('G')
     await page.keyboard.up('Shift')
@@ -174,7 +153,7 @@ test.describe('keyboard parity (#780)', () => {
     await expect(page.locator('[data-testid="search-mode-toggle"]')).toContainText('Global')
     await expect(page.locator('[data-testid="search-pane"] label').first()).toContainText('GLOBAL CONVERSATION SEARCH')
     await page.locator('[data-testid="search-input"]').fill('observability')
-    await expect(page.locator('[data-testid="global-search-result"]')).toContainText('observability metrics')
+    await expect(page.locator('[data-testid="global-search-result"]').first()).toContainText(/observability/i)
   })
 
   test('n opens the New Session dialog', async ({ page }) => {
@@ -234,6 +213,9 @@ test.describe('keyboard parity (#780)', () => {
   })
 
   test('c copies focused terminal output', async ({ page }) => {
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.sess.sel .tt')).toHaveText('agent-deck')
+    await expect(page.locator('.term-frame .xterm')).toBeVisible()
     await page.evaluate(() => {
       Object.defineProperty(navigator, 'clipboard', {
         configurable: true,
@@ -243,7 +225,9 @@ test.describe('keyboard parity (#780)', () => {
       })
     })
     await page.keyboard.press('c')
-    await expect.poll(() => page.evaluate(() => window.__agentDeckClipboard || '')).toContain('Connecting to terminal')
+    await expect.poll(() => page.evaluate(() =>
+      String(window.__agentDeckClipboard || '').replace(/\s+/g, ' '),
+    )).toContain('Connecting to terminal')
   })
 
   test('Shift+C copies focused session info', async ({ page }) => {
@@ -304,13 +288,26 @@ test.describe('keyboard parity (#780)', () => {
   })
 
   test('Ctrl+R refreshes the menu snapshot without browser reload', async ({ page }) => {
-    let menuRefreshes = 0
-    await page.route('**/api/menu', async (route) => {
-      menuRefreshes += 1
-      await route.continue()
+    await page.evaluate(() => {
+      window.__agentDeckMenuRefreshes = 0
+      const originalFetch = window.fetch.bind(window)
+      window.fetch = (...args) => {
+        const url = String(args[0] || '')
+        if (url.includes('/api/menu')) window.__agentDeckMenuRefreshes += 1
+        return originalFetch(...args)
+      }
     })
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+R' : 'Control+R')
-    await expect.poll(() => menuRefreshes).toBeGreaterThan(0)
+    await page.evaluate(() => {
+      const isMac = navigator.platform && /Mac/.test(navigator.platform)
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'r',
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: !isMac,
+        metaKey: isMac,
+      }))
+    })
+    await expect.poll(() => page.evaluate(() => window.__agentDeckMenuRefreshes || 0)).toBeGreaterThan(0)
     await expect(page.locator('text=Session list refreshed')).toBeVisible()
   })
 

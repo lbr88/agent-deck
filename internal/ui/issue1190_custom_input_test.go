@@ -178,9 +178,10 @@ func TestIssue1190_EscInModelPickerDismissesOnlyPicker(t *testing.T) {
 	h.newDialog.Show()
 	h.newDialog.focusIndex = h.newDialog.indexOf(focusModel)
 	h.newDialog.updateFocus()
+	enter(h)
 
 	if !h.newDialog.IsModelPickerOpen() {
-		t.Fatal("precondition: model picker should be open on the model field")
+		t.Fatal("precondition: Enter should open the model picker on the model field")
 	}
 	escKey(h)
 	if !h.newDialog.IsVisible() {

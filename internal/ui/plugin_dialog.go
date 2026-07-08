@@ -24,6 +24,14 @@ type pluginDialogItem struct {
 	enabled     bool
 }
 
+type PluginDialogCatalogItem struct {
+	Name         string
+	ID           string
+	Description  string
+	EmitsChannel bool
+	AutoInstall  bool
+}
+
 type PluginDialog struct {
 	visible bool
 	width   int
@@ -53,36 +61,59 @@ func (d *PluginDialog) Show(inst *session.Instance) error {
 		d.configError = err.Error()
 	}
 
-	d.sessionID = inst.ID
-	d.tool = inst.Tool
-	d.channelLinkDisabled = inst.PluginChannelLinkDisabled
-	d.cursor = 0
-
 	avail := session.GetAvailablePlugins()
 	names := session.GetAvailablePluginNames()
-
-	enabledSet := map[string]bool{}
-	for _, n := range inst.Plugins {
-		enabledSet[n] = true
-	}
-	d.initialEnabled = make(map[string]bool, len(names))
-
-	d.items = make([]pluginDialogItem, 0, len(names))
+	catalog := make([]PluginDialogCatalogItem, 0, len(names))
 	for _, name := range names {
 		def := avail[name]
+		catalog = append(catalog, PluginDialogCatalogItem{
+			Name:         name,
+			ID:           def.ID(),
+			Description:  def.Description,
+			EmitsChannel: def.EmitsChannel,
+			AutoInstall:  def.AutoInstall,
+		})
+	}
+	d.showWithCatalog(inst.ID, inst.Tool, catalog, inst.Plugins, inst.PluginChannelLinkDisabled)
+	return nil
+}
+
+func (d *PluginDialog) ShowWithData(sessionID, tool string, catalog []PluginDialogCatalogItem, enabled []string, channelLinkDisabled bool) error {
+	d.configError = ""
+	d.err = nil
+	d.showWithCatalog(sessionID, tool, catalog, enabled, channelLinkDisabled)
+	return nil
+}
+
+func (d *PluginDialog) showWithCatalog(sessionID, tool string, catalog []PluginDialogCatalogItem, enabled []string, channelLinkDisabled bool) {
+	d.sessionID = sessionID
+	d.tool = tool
+	d.channelLinkDisabled = channelLinkDisabled
+	d.cursor = 0
+	enabledSet := map[string]bool{}
+	for _, n := range enabled {
+		enabledSet[n] = true
+	}
+	d.initialEnabled = make(map[string]bool, len(catalog))
+
+	d.items = make([]pluginDialogItem, 0, len(catalog))
+	for _, entry := range catalog {
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			continue
+		}
 		d.items = append(d.items, pluginDialogItem{
 			name:        name,
-			id:          def.ID(),
-			description: def.Description,
-			emitsChan:   def.EmitsChannel,
-			autoInstall: def.AutoInstall,
+			id:          entry.ID,
+			description: entry.Description,
+			emitsChan:   entry.EmitsChannel,
+			autoInstall: entry.AutoInstall,
 			enabled:     enabledSet[name],
 		})
 		d.initialEnabled[name] = enabledSet[name]
 	}
 
 	d.visible = true
-	return nil
 }
 
 func (d *PluginDialog) Hide()           { d.visible = false }

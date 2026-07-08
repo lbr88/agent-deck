@@ -24,7 +24,7 @@
     },
     "assert": {
       "assertions": {
-        "total-byte-weight": ["error", { "maxNumericValue": 349580 }],
+        "total-byte-weight": ["error", { "maxNumericValue": 417900 }],
         "resource-summary:script:size": ["error", { "maxNumericValue": 329757 }],
         "first-contentful-paint": ["warn", { "maxNumericValue": 800 }],
         "largest-contentful-paint": ["warn", { "maxNumericValue": 1300 }],

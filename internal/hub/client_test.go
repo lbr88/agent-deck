@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/gorilla/websocket"
 )
 
@@ -50,6 +51,87 @@ func TestClientBuildsEmptySnapshotWithoutSource(t *testing.T) {
 	}
 	if len(snap.Sessions) != 0 {
 		t.Fatalf("Sessions length = %d, want 0", len(snap.Sessions))
+	}
+}
+
+func TestSessionInfoFromRowCarriesRichNativeMetadata(t *testing.T) {
+	yolo := true
+	sandboxJSON := json.RawMessage(`{"enabled":true,"image":"sandbox:latest"}`)
+	toolOptionsJSON := json.RawMessage(`{"approvalPolicy":"never"}`)
+	toolData := statedb.MarshalToolData(
+		"claude-session", time.Unix(10, 0),
+		"gemini-session", time.Unix(20, 0),
+		&yolo, "gemini-3.1",
+		"opencode-session", time.Unix(30, 0),
+		"codex-session", time.Unix(40, 0),
+		"latest prompt", "notes", []string{"github"},
+		toolOptionsJSON,
+		sandboxJSON, "container_1",
+		"ssh-host", "/ssh/path",
+		true, []string{"/repo/lib"},
+		"/tmp/multi", []statedb.MultiRepoWorktreeData{{
+			OriginalPath: "/repo/app",
+			WorktreePath: "/tmp/multi/app",
+			RepoRoot:     "/repo",
+			Branch:       "feature",
+		}},
+		[]string{"reviews"}, []string{"--fast"}, []string{"plugin-a"}, true, nil,
+		"cyan",
+	)
+	row := &statedb.InstanceRow{
+		ID:                 "s1",
+		Title:              "api",
+		ProjectPath:        "/repo/app",
+		GroupPath:          "ops",
+		Command:            "codex --ask-for-approval never",
+		Wrapper:            "wrapper",
+		Tool:               "codex",
+		Status:             "waiting",
+		ParentSessionID:    "conductor-1",
+		IsConductor:        true,
+		TmuxSession:        "tmux-s1",
+		TmuxSocketName:     "agent-deck",
+		NoTransitionNotify: true,
+		TitleLocked:        true,
+		WorktreePath:       "/worktrees/api",
+		WorktreeRepo:       "/repo",
+		WorktreeBranch:     "feature",
+		ToolData:           toolData,
+	}
+
+	got := sessionInfoFromRow(row)
+
+	if got.Command != row.Command || got.Wrapper != row.Wrapper || got.TmuxSession != row.TmuxSession || got.TmuxSocketName != row.TmuxSocketName {
+		t.Fatalf("core rich metadata missing: %+v", got)
+	}
+	if got.Color != "cyan" || got.LatestPrompt != "latest prompt" || got.Notes != "notes" {
+		t.Fatalf("text metadata = color %q prompt %q notes %q", got.Color, got.LatestPrompt, got.Notes)
+	}
+	if got.ClaudeSessionID != "claude-session" || got.GeminiSessionID != "gemini-session" || got.GeminiModel != "gemini-3.1" ||
+		got.OpenCodeSessionID != "opencode-session" || got.CodexSessionID != "codex-session" {
+		t.Fatalf("tool session metadata = %+v", got)
+	}
+	if got.ParentSessionID != "conductor-1" || !got.IsConductor {
+		t.Fatalf("conductor topology = parent %q isConductor %v, want conductor-1/true", got.ParentSessionID, got.IsConductor)
+	}
+	if got.GeminiYoloMode == nil || !*got.GeminiYoloMode {
+		t.Fatalf("GeminiYoloMode = %v, want true", got.GeminiYoloMode)
+	}
+	if len(got.LoadedMCPNames) != 1 || got.LoadedMCPNames[0] != "github" || len(got.Plugins) != 1 || got.Plugins[0] != "plugin-a" ||
+		len(got.Channels) != 1 || got.Channels[0] != "reviews" || len(got.ExtraArgs) != 1 || got.ExtraArgs[0] != "--fast" ||
+		!got.PluginChannelLinkDisabled {
+		t.Fatalf("list metadata not projected: %+v", got)
+	}
+	if string(got.ToolOptionsJSON) != string(toolOptionsJSON) || string(got.Sandbox) != string(sandboxJSON) ||
+		got.SandboxContainer != "container_1" || got.SSHHost != "ssh-host" || got.SSHRemotePath != "/ssh/path" {
+		t.Fatalf("config metadata missing: toolOptions=%s sandbox=%s container=%q ssh=%q/%q", got.ToolOptionsJSON, got.Sandbox, got.SandboxContainer, got.SSHHost, got.SSHRemotePath)
+	}
+	if !got.MultiRepoEnabled || len(got.AdditionalPaths) != 1 || got.AdditionalPaths[0] != "/repo/lib" ||
+		got.MultiRepoTempDir != "/tmp/multi" || len(got.MultiRepoWorktrees) != 1 || got.MultiRepoWorktrees[0].WorktreePath != "/tmp/multi/app" {
+		t.Fatalf("multi-repo metadata missing: %+v", got)
+	}
+	if !got.TitleLocked || !got.NoTransitionNotify {
+		t.Fatalf("flags = titleLocked %v noTransition %v, want true/true", got.TitleLocked, got.NoTransitionNotify)
 	}
 }
 
@@ -224,6 +306,175 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	}
 }
 
+func TestClientDispatchesWelcomeCallback(t *testing.T) {
+	welcomes := make(chan WelcomePayload, 1)
+	client := NewClient(ClientConfig{
+		OnWelcome: func(welcome WelcomePayload) {
+			welcomes <- welcome
+		},
+	}, nil)
+	raw, err := json.Marshal(WelcomePayload{NodeID: "node_admin", NodeName: "admin", Admin: true})
+	if err != nil {
+		t.Fatalf("Marshal welcome: %v", err)
+	}
+
+	client.dispatch(Envelope{Version: ProtocolVersion, Type: MsgWelcome, NodeID: "node_admin", Payload: raw})
+
+	select {
+	case got := <-welcomes:
+		if got.NodeID != "node_admin" || got.NodeName != "admin" || !got.Admin {
+			t.Fatalf("welcome = %+v, want admin node", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for welcome callback")
+	}
+}
+
+func TestClientRenameNodeUsesAuthenticatedAdminAPI(t *testing.T) {
+	var gotAuth, gotNodeIDQuery string
+	var gotReq clientRenameNodeRequest
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/nodes/rename" {
+			t.Fatalf("path = %s, want /api/nodes/rename", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotNodeIDQuery = r.URL.Query().Get("node_id")
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"node_remote","name":"desktop","status":"online","admin":true}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		URL:           "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:        " node_admin ",
+		Token:         " admin_secret ",
+		TLSSkipVerify: true,
+	}, nil)
+	got, err := client.RenameNode(context.Background(), " node_remote ", " desktop ")
+	if err != nil {
+		t.Fatalf("RenameNode: %v", err)
+	}
+	if got.ID != "node_remote" || got.Name != "desktop" || got.Status != "online" || !got.Admin {
+		t.Fatalf("renamed node = %+v", got)
+	}
+	if gotAuth != "Bearer admin_secret" || gotNodeIDQuery != "node_admin" {
+		t.Fatalf("auth/query = %q/%q, want bearer admin_secret/node_admin", gotAuth, gotNodeIDQuery)
+	}
+	if gotReq.NodeID != "node_remote" || gotReq.Name != "desktop" {
+		t.Fatalf("request = %+v, want node_remote/desktop", gotReq)
+	}
+}
+
+func TestClientNodeAdminActionsUseAuthenticatedAdminAPI(t *testing.T) {
+	tests := []struct {
+		name       string
+		call       func(*Client) (Node, error)
+		wantPath   string
+		wantAdmin  bool
+		wantNodeID string
+	}{
+		{
+			name:       "promote",
+			call:       func(c *Client) (Node, error) { return c.PromoteNode(context.Background(), " node_remote ") },
+			wantPath:   "/api/nodes/promote",
+			wantAdmin:  true,
+			wantNodeID: "node_remote",
+		},
+		{
+			name:       "demote",
+			call:       func(c *Client) (Node, error) { return c.DemoteNode(context.Background(), " node_remote ") },
+			wantPath:   "/api/nodes/demote",
+			wantAdmin:  false,
+			wantNodeID: "node_remote",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAuth, gotNodeIDQuery string
+			var gotReq clientNodeIDRequest
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Fatalf("method = %s, want POST", r.Method)
+				}
+				if r.URL.Path != tc.wantPath {
+					t.Fatalf("path = %s, want %s", r.URL.Path, tc.wantPath)
+				}
+				gotAuth = r.Header.Get("Authorization")
+				gotNodeIDQuery = r.URL.Query().Get("node_id")
+				if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"id":"node_remote","name":"desktop","status":"online","admin":%t}`, tc.wantAdmin)
+			}))
+			defer server.Close()
+
+			client := NewClient(ClientConfig{
+				URL:           "wss://" + strings.TrimPrefix(server.URL, "https://"),
+				NodeID:        " node_admin ",
+				Token:         " admin_secret ",
+				TLSSkipVerify: true,
+			}, nil)
+			got, err := tc.call(client)
+			if err != nil {
+				t.Fatalf("%s node: %v", tc.name, err)
+			}
+			if got.ID != "node_remote" || got.Name != "desktop" || got.Status != "online" || got.Admin != tc.wantAdmin {
+				t.Fatalf("node = %+v, want admin=%v", got, tc.wantAdmin)
+			}
+			if gotAuth != "Bearer admin_secret" || gotNodeIDQuery != "node_admin" {
+				t.Fatalf("auth/query = %q/%q, want bearer admin_secret/node_admin", gotAuth, gotNodeIDQuery)
+			}
+			if gotReq.NodeID != tc.wantNodeID {
+				t.Fatalf("request = %+v, want node id %q", gotReq, tc.wantNodeID)
+			}
+		})
+	}
+}
+
+func TestClientRevokeNodeUsesAuthenticatedAdminAPI(t *testing.T) {
+	var gotAuth, gotNodeIDQuery string
+	var gotReq clientNodeIDRequest
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/nodes/revoke" {
+			t.Fatalf("path = %s, want /api/nodes/revoke", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotNodeIDQuery = r.URL.Query().Get("node_id")
+		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		URL:           "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:        " node_admin ",
+		Token:         " admin_secret ",
+		TLSSkipVerify: true,
+	}, nil)
+	if err := client.RevokeNode(context.Background(), " node_remote "); err != nil {
+		t.Fatalf("RevokeNode: %v", err)
+	}
+	if gotAuth != "Bearer admin_secret" || gotNodeIDQuery != "node_admin" {
+		t.Fatalf("auth/query = %q/%q, want bearer admin_secret/node_admin", gotAuth, gotNodeIDQuery)
+	}
+	if gotReq.NodeID != "node_remote" {
+		t.Fatalf("request = %+v, want node_remote", gotReq)
+	}
+}
+
 func TestClientDispatchesTrustRequestCallback(t *testing.T) {
 	requests := make(chan TrustRequestPayload, 1)
 	client := NewClient(ClientConfig{
@@ -351,11 +602,13 @@ func TestClientOwnerAttachOpenUsesBackendAndBridgesFrames(t *testing.T) {
 	assertNextMessageType(t, messages, MsgHello)
 	assertNextMessageType(t, messages, MsgSnapshot)
 
+	windowIndex := 2
 	open, err := MarshalEnvelope(MsgAttachOpen, "node_requester", AttachOpenPayload{
-		StreamID:  "stream_1",
-		SessionID: "sess_1",
-		Cols:      100,
-		Rows:      30,
+		StreamID:    "stream_1",
+		SessionID:   "sess_1",
+		WindowIndex: &windowIndex,
+		Cols:        100,
+		Rows:        30,
 	})
 	if err != nil {
 		t.Fatalf("MarshalEnvelope open: %v", err)
@@ -364,10 +617,17 @@ func TestClientOwnerAttachOpenUsesBackendAndBridgesFrames(t *testing.T) {
 		t.Fatalf("server WriteJSON open: %v", err)
 	}
 	call := backend.waitOpen(t)
-	if call.sessionID != "sess_1" || call.size.Cols != 100 || call.size.Rows != 30 {
+	if call.sessionID != "sess_1" || call.size.Cols != 100 || call.size.Rows != 30 || call.windowIndex == nil || *call.windowIndex != 2 {
 		t.Fatalf("backend open call = %+v", call)
 	}
-	assertNextMessageType(t, messages, MsgAttachReady)
+	ready := assertNextMessageType(t, messages, MsgAttachReady)
+	var readyPayload AttachOpenPayload
+	if err := json.Unmarshal(ready.payload, &readyPayload); err != nil {
+		t.Fatalf("decode ready payload: %v", err)
+	}
+	if readyPayload.WindowIndex == nil || *readyPayload.WindowIndex != 2 {
+		t.Fatalf("ready payload window index = %+v, want 2", readyPayload.WindowIndex)
+	}
 
 	backend.stream.emit([]byte("owner-output"))
 	output := assertNextMessageType(t, messages, MsgAttachData)
@@ -609,6 +869,93 @@ func TestClientOwnerCommandDispatchesActionAndReturnsResult(t *testing.T) {
 	}
 }
 
+func TestClientOwnerCommandPublishesSnapshotBeforeMutatingResult(t *testing.T) {
+	backend := &fakeActionBackend{createSessionID: "created_1"}
+	source := fakeSessionSource{sessions: []SessionInfo{{
+		ID:        "created_1",
+		Title:     "worker",
+		Status:    "running",
+		GroupPath: "ops",
+	}}}
+	messages := make(chan observedMessage, 16)
+	serverReady := make(chan *websocket.Conn, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverReady <- conn
+		defer conn.Close()
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_owner", WelcomePayload{NodeID: "node_owner", NodeName: "workstation"})
+		_ = conn.WriteJSON(welcome)
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+			messages <- observedMessage{envelope: env, payload: env.Payload}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:            "node_owner",
+		NodeName:          "workstation",
+		Token:             "node_secret",
+		TLSSkipVerify:     true,
+		HeartbeatInterval: time.Hour,
+		SnapshotInterval:  time.Hour,
+		ActionBackend:     backend,
+	}, source)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	conn := waitWebSocketConn(t, serverReady)
+	assertNextMessageType(t, messages, MsgHello)
+	assertNextMessageType(t, messages, MsgSnapshot)
+
+	createPayload, err := json.Marshal(CreateSessionRequest{Title: "worker", Tool: "codex", GroupPath: "ops"})
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	command, err := MarshalEnvelope(MsgCommand, "node_requester", CommandPayload{
+		CommandID: "cmd_create",
+		Action:    "create",
+		Payload:   createPayload,
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope command: %v", err)
+	}
+	if err := conn.WriteJSON(command); err != nil {
+		t.Fatalf("server WriteJSON command: %v", err)
+	}
+
+	snapshot := assertNextMessageType(t, messages, MsgSnapshot)
+	var snapPayload SnapshotPayload
+	if err := json.Unmarshal(snapshot.payload, &snapPayload); err != nil {
+		t.Fatalf("decode snapshot payload: %v", err)
+	}
+	if len(snapPayload.Sessions) != 1 || snapPayload.Sessions[0].ID != "created_1" {
+		t.Fatalf("snapshot sessions = %+v, want created_1", snapPayload.Sessions)
+	}
+	result := assertNextMessageType(t, messages, MsgCommandResult)
+	var resultPayload CommandResultPayload
+	if err := json.Unmarshal(result.payload, &resultPayload); err != nil {
+		t.Fatalf("decode command result: %v", err)
+	}
+	if !resultPayload.OK || resultPayload.CommandID != "cmd_create" {
+		t.Fatalf("command result = %+v", resultPayload)
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
 func TestClientCommandSendsCommandAndWaitsForResult(t *testing.T) {
 	messages := make(chan observedMessage, 16)
 	serverReady := make(chan *websocket.Conn, 1)
@@ -697,16 +1044,19 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	}
 	now := time.Unix(789, 0).UTC()
 	if err := storage.Save([]*session.Instance{{
-		ID:             "s1",
-		Title:          "worker",
-		ProjectPath:    "/repo",
-		GroupPath:      "default",
-		Tool:           "codex",
-		Status:         session.StatusWaiting,
-		CreatedAt:      now.Add(-time.Hour),
-		LastAccessedAt: now,
-		CodexSessionID: "codex-session-1",
-		Notes:          "remote notes",
+		ID:               "s1",
+		Title:            "worker",
+		ProjectPath:      "/repo",
+		WorktreePath:     "/repo/.worktrees/worker",
+		WorktreeRepoRoot: "/repo",
+		WorktreeBranch:   "fork/worker",
+		GroupPath:        "default",
+		Tool:             "codex",
+		Status:           session.StatusWaiting,
+		CreatedAt:        now.Add(-time.Hour),
+		LastAccessedAt:   now,
+		CodexSessionID:   "codex-session-1",
+		Notes:            "remote notes",
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -714,7 +1064,21 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	snap, err := (LocalSessionSource{Profile: "hub-local"}).Snapshot(context.Background())
+	snap, err := (LocalSessionSource{
+		Profile: "hub-local",
+		substate: func(_ context.Context, row *statedb.InstanceRow) string {
+			if row.ID == "s1" {
+				return "auth-401"
+			}
+			return ""
+		},
+		windows: func(_ context.Context, row *statedb.InstanceRow) []WindowInfo {
+			if row.ID == "s1" {
+				return []WindowInfo{{Index: 0, Name: "main", Activity: 111}, {Index: 1, Name: "logs", Tool: "codex"}}
+			}
+			return nil
+		},
+	}).Snapshot(context.Background())
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
@@ -725,14 +1089,36 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	if got.ID != "s1" || got.Title != "worker" || got.Tool != "codex" || got.Status != "waiting" {
 		t.Fatalf("session mapping = %+v", got)
 	}
+	if got.Substate != "auth-401" {
+		t.Fatalf("Substate = %q, want auth-401", got.Substate)
+	}
+	if len(got.Windows) != 2 || got.Windows[1].Index != 1 || got.Windows[1].Name != "logs" || got.Windows[1].Tool != "codex" {
+		t.Fatalf("Windows = %+v, want remote tmux windows", got.Windows)
+	}
 	if got.DisplaySessionID != "codex-session-1" {
 		t.Fatalf("DisplaySessionID = %q, want codex-session-1", got.DisplaySessionID)
 	}
 	if got.Notes != "remote notes" {
 		t.Fatalf("Notes = %q, want remote notes", got.Notes)
 	}
+	if got.WorktreePath != "/repo/.worktrees/worker" || got.WorktreeRepoRoot != "/repo" || got.WorktreeBranch != "fork/worker" {
+		t.Fatalf("worktree mapping = %+v", got)
+	}
 	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(now) {
 		t.Fatalf("UpdatedAt = %v, want %v", got.UpdatedAt, now)
+	}
+}
+
+func TestParseHubWindowList(t *testing.T) {
+	got := parseHubWindowList("0\x1f123\x1fmain\n1\x1f456\x1flogs pane\nbad\n2\x1fbad\x1fignored\n")
+	if len(got) != 2 {
+		t.Fatalf("windows length = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].Index != 0 || got[0].Activity != 123 || got[0].Name != "main" {
+		t.Fatalf("first window = %+v, want index/activity/name", got[0])
+	}
+	if got[1].Index != 1 || got[1].Activity != 456 || got[1].Name != "logs pane" {
+		t.Fatalf("second window = %+v, want index/activity/name", got[1])
 	}
 }
 
@@ -844,6 +1230,28 @@ func TestLocalSessionSourceMissingProfileDoesNotCreateStorage(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(profileDir, "state.db")); !os.IsNotExist(err) {
 		t.Fatalf("state.db stat = %v, want not exist", err)
+	}
+}
+
+func TestLocalSessionSourcePublishesWebAvailability(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	snap, err := (LocalSessionSource{
+		Profile: "hub-web-available",
+		webAvailable: func(context.Context) bool {
+			return true
+		},
+	}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !snap.WebAvailable {
+		t.Fatal("WebAvailable = false, want true")
 	}
 }
 
@@ -994,8 +1402,9 @@ type fakeAttachBackend struct {
 }
 
 type fakeAttachOpenCall struct {
-	sessionID string
-	size      TerminalSize
+	sessionID   string
+	windowIndex *int
+	size        TerminalSize
 }
 
 func newFakeAttachBackend() *fakeAttachBackend {
@@ -1004,6 +1413,11 @@ func newFakeAttachBackend() *fakeAttachBackend {
 
 func (b *fakeAttachBackend) Open(ctx context.Context, sessionID string, size TerminalSize) (AttachStream, error) {
 	b.opens <- fakeAttachOpenCall{sessionID: sessionID, size: size}
+	return b.stream, nil
+}
+
+func (b *fakeAttachBackend) OpenWindow(ctx context.Context, sessionID string, windowIndex int, size TerminalSize) (AttachStream, error) {
+	b.opens <- fakeAttachOpenCall{sessionID: sessionID, windowIndex: &windowIndex, size: size}
 	return b.stream, nil
 }
 
@@ -1156,4 +1570,5 @@ func waitWebSocketConn(t *testing.T, ch <-chan *websocket.Conn) *websocket.Conn 
 }
 
 var _ AttachBackend = (*fakeAttachBackend)(nil)
+var _ AttachWindowBackend = (*fakeAttachBackend)(nil)
 var _ AttachStream = (*fakeAttachStream)(nil)

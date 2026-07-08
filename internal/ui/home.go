@@ -232,19 +232,32 @@ type Home struct {
 	globalSearch              *GlobalSearch              // Global session search across all Claude conversations
 	globalSearchIndex         *session.GlobalSearchIndex // Search index (nil if disabled)
 	newDialog                 *NewDialog
-	pendingRemoteName         string                // #1353: remote target for the open new-session dialog ("" = local)
-	pendingHubNodeID          string                // hub target for the open new-session dialog ("" = local/non-hub)
-	pendingHubNodeName        string                // display name for pending hub target
-	groupDialog               *GroupDialog          // For creating/renaming groups
-	forkDialog                *ForkDialog           // For forking sessions
-	confirmDialog             *ConfirmDialog        // For confirming destructive actions
-	helpOverlay               *HelpOverlay          // For showing keyboard shortcuts
-	mcpDialog                 *MCPDialog            // For managing MCPs
-	pluginDialog              *PluginDialog         // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
-	editPathsDialog           *EditPathsDialog      // For editing multi-repo paths
-	editSessionDialog         *EditSessionDialog    // For editing session settings (title/color/notes/command/...)
-	handoverDialog            *HandoverDialog       // For handing a session to another supported tool
-	skillDialog               *SkillDialog          // For managing project skills
+	pendingRemoteName         string         // #1353: remote target for the open new-session dialog ("" = local)
+	pendingHubNodeID          string         // hub target for the open new-session dialog ("" = local/non-hub)
+	pendingHubNodeName        string         // display name for pending hub target
+	groupDialog               *GroupDialog   // For creating/renaming groups
+	forkDialog                *ForkDialog    // For forking sessions
+	confirmDialog             *ConfirmDialog // For confirming destructive actions
+	helpOverlay               *HelpOverlay   // For showing keyboard shortcuts
+	mcpDialog                 *MCPDialog     // For managing MCPs
+	hubMCPDialogNodeID        string         // non-empty when MCP dialog is editing a hub session
+	hubMCPDialogNodeName      string
+	hubMCPDialogSessionID     string
+	hubMCPDialogInitial       map[string][]string
+	pluginDialog              *PluginDialog // For managing per-session Claude Code plugins (RFC PLUGIN_ATTACH.md)
+	hubPluginDialogNodeID     string        // non-empty when Plugin dialog is editing a hub session
+	hubPluginDialogNodeName   string
+	hubPluginDialogSessionID  string
+	hubPluginDialogInitial    []string
+	hubAdminDialog            *HubAdminDialog    // For hub admin invite/trust management
+	editPathsDialog           *EditPathsDialog   // For editing multi-repo paths
+	editSessionDialog         *EditSessionDialog // For editing session settings (title/color/notes/command/...)
+	handoverDialog            *HandoverDialog    // For handing a session to another supported tool
+	skillDialog               *SkillDialog       // For managing project skills
+	hubSkillDialogNodeID      string             // non-empty when Skills dialog is editing a hub session
+	hubSkillDialogNodeName    string
+	hubSkillDialogSessionID   string
+	hubSkillDialogInitial     map[string]session.SkillCandidate
 	setupWizard               *SetupWizard          // For first-run setup
 	settingsPanel             *SettingsPanel        // For editing settings
 	analyticsPanel            *AnalyticsPanel       // For displaying session analytics
@@ -570,13 +583,16 @@ type Home struct {
 	hubConfigured     bool
 	hubLocalNodeID    string
 	hubLocalNodeName  string
+	hubLocalNodeAdmin bool
 	hubClient         hubClientAPI
 	hubStarter        hubStarter
 	hubSessions       map[string]hub.NodeSessions // nodeID -> latest snapshot
 	hubSessionsMu     sync.RWMutex
 	hubStatus         string
 	hubStatusMu       sync.Mutex
+	hubStatusCh       chan hubStatusMsg
 	hubSnapshotCh     chan hubSnapshotMsg
+	hubWelcomeCh      chan hubWelcomeMsg
 	hubTrustRequestCh chan hubTrustRequestMsg
 	hubTrustQueue     []hub.TrustRequestPayload
 
@@ -879,8 +895,11 @@ func (h *Home) actionKey(action string) string {
 
 // deletedSessionEntry holds a deleted session for undo restore
 type deletedSessionEntry struct {
-	instance  *session.Instance
-	deletedAt time.Time
+	instance     *session.Instance
+	hubNodeID    string
+	hubNodeName  string
+	hubSessionID string
+	deletedAt    time.Time
 }
 
 // getLayoutMode returns the current layout mode based on terminal width
@@ -949,20 +968,38 @@ type statusUpdateMsg struct {
 
 type hubClientAPI interface {
 	Attach(context.Context, string, string, hub.TerminalSize) error
+	AttachWindow(context.Context, string, string, int, hub.TerminalSize) error
 	OpenAttach(context.Context, string, string, hub.TerminalSize) (hub.AttachStream, error)
+	OpenAttachWindow(context.Context, string, string, int, hub.TerminalSize) (hub.AttachStream, error)
 	Command(context.Context, string, string, any) (json.RawMessage, error)
+	RenameNode(context.Context, string, string) (hub.Node, error)
+	PromoteNode(context.Context, string) (hub.Node, error)
+	DemoteNode(context.Context, string) (hub.Node, error)
+	RevokeNode(context.Context, string) error
+	ListInvites(context.Context) ([]hub.AdminInvite, error)
+	CreateInvite(context.Context, hub.CreateAdminInviteRequest) (hub.CreateAdminInviteResponse, error)
+	RevokeInvite(context.Context, string) error
+	ListTrustRequests(context.Context) ([]hub.TrustRequestPayload, error)
 	TrustDecision(context.Context, string, bool) error
 	Close() error
 }
 
-type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions), func(hub.TrustRequestPayload)) (hubClientAPI, error)
+type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions), func(hub.WelcomePayload), func(hub.TrustRequestPayload)) (hubClientAPI, error)
 
 type hubSnapshotMsg struct {
 	snapshot hub.NodeSessions
 }
 
+type hubStatusMsg struct {
+	status string
+}
+
 type hubTrustRequestMsg struct {
 	request hub.TrustRequestPayload
+}
+
+type hubWelcomeMsg struct {
+	welcome hub.WelcomePayload
 }
 
 type hubTrustDecisionResultMsg struct {
@@ -976,7 +1013,77 @@ type hubAttachResultMsg struct {
 }
 
 type hubActionResultMsg struct {
-	action   string
+	action          string
+	nodeName        string
+	nodeID          string
+	sessionID       string
+	createRequest   *hub.CreateSessionRequest
+	removeOnSuccess bool
+	nodeAdmin       *bool
+	removeNode      bool
+	err             error
+}
+
+type hubAdminDialogLoadedMsg struct {
+	invites []hub.AdminInvite
+	trust   []hub.TrustRequestPayload
+	err     error
+}
+
+type hubAdminActionResultMsg struct {
+	action     string
+	id         string
+	inviteResp *hub.CreateAdminInviteResponse
+	err        error
+}
+
+type hubMCPDialogLoadedMsg struct {
+	nodeID       string
+	nodeName     string
+	sessionID    string
+	sessionTitle string
+	projectPath  string
+	tool         string
+	attached     map[string][]string
+	err          error
+}
+
+type hubMCPApplyResultMsg struct {
+	nodeName string
+	err      error
+}
+
+type hubPluginDialogLoadedMsg struct {
+	nodeID                    string
+	nodeName                  string
+	sessionID                 string
+	sessionTitle              string
+	tool                      string
+	catalog                   []hub.PluginCatalogEntry
+	plugins                   []string
+	channels                  []string
+	pluginChannelLinkDisabled bool
+	err                       error
+}
+
+type hubPluginApplyResultMsg struct {
+	nodeName string
+	err      error
+}
+
+type hubSkillDialogLoadedMsg struct {
+	nodeID       string
+	nodeName     string
+	sessionID    string
+	sessionTitle string
+	projectPath  string
+	tool         string
+	catalog      []session.SkillCandidate
+	attached     []session.ProjectSkillAttachment
+	err          error
+}
+
+type hubSkillApplyResultMsg struct {
 	nodeName string
 	err      error
 }
@@ -1066,6 +1173,16 @@ type clearMaintenanceMsg struct{}
 type copyResultMsg struct {
 	sessionTitle string
 	lineCount    int
+	err          error
+}
+
+// hubCodeBlockBlocksMsg is emitted after fetching hub session preview content
+// for the Shift+Y code-block picker. It carries extracted blocks back onto the
+// Bubble Tea update goroutine so the dialog is opened from UI state, not from a
+// background command.
+type hubCodeBlockBlocksMsg struct {
+	sessionTitle string
+	blocks       []CodeBlock
 	err          error
 }
 
@@ -1196,6 +1313,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		helpOverlay:          NewHelpOverlay(),
 		mcpDialog:            NewMCPDialog(),
 		pluginDialog:         NewPluginDialog(),
+		hubAdminDialog:       NewHubAdminDialog(),
 		editPathsDialog:      NewEditPathsDialog(),
 		editSessionDialog:    NewEditSessionDialog(),
 		handoverDialog:       NewHandoverDialog(),
@@ -1265,7 +1383,9 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		lastClickIndex:            -1,
 		hubSessions:               make(map[string]hub.NodeSessions),
 		hubStarter:                startHubClient,
+		hubStatusCh:               make(chan hubStatusMsg, 64),
 		hubSnapshotCh:             make(chan hubSnapshotMsg, 64),
+		hubWelcomeCh:              make(chan hubWelcomeMsg, 8),
 		hubTrustRequestCh:         make(chan hubTrustRequestMsg, 64),
 	}
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
@@ -1572,7 +1692,7 @@ func (h *Home) configureHubFromConfig(config *session.UserConfig) {
 	if starter == nil {
 		starter = startHubClient
 	}
-	client, err := starter(h.ctx, config.Hub, h.profile, h.setHubStatus, h.handleHubSnapshot, h.handleHubTrustRequest)
+	client, err := starter(h.ctx, config.Hub, h.profile, h.handleHubStatus, h.handleHubSnapshot, h.handleHubWelcome, h.handleHubTrustRequest)
 	if err != nil {
 		h.setHubStatus("hub offline")
 		uiLog.Warn("hub_autoconnect_start_failed", slog.String("error", err.Error()))
@@ -1585,6 +1705,18 @@ func (h *Home) setHubStatus(status string) {
 	h.hubStatusMu.Lock()
 	h.hubStatus = status
 	h.hubStatusMu.Unlock()
+}
+
+func (h *Home) handleHubStatus(status string) {
+	h.setHubStatus(status)
+	if h.hubStatusCh == nil {
+		return
+	}
+	select {
+	case h.hubStatusCh <- hubStatusMsg{status: status}:
+	default:
+		uiLog.Warn("hub_status_queue_full", slog.String("status", status))
+	}
 }
 
 func (h *Home) hubStatusText() string {
@@ -1605,6 +1737,27 @@ func (h *Home) handleHubSnapshot(snapshot hub.NodeSessions) {
 	default:
 		uiLog.Warn("hub_snapshot_queue_full", slog.String("node_id", snapshot.Node.ID))
 	}
+}
+
+func (h *Home) handleHubWelcome(welcome hub.WelcomePayload) {
+	if h.hubWelcomeCh == nil {
+		return
+	}
+	select {
+	case h.hubWelcomeCh <- hubWelcomeMsg{welcome: welcome}:
+	default:
+		uiLog.Warn("hub_welcome_queue_full", slog.String("node_id", welcome.NodeID))
+	}
+}
+
+func (h *Home) applyHubWelcome(welcome hub.WelcomePayload) {
+	if nodeID := strings.TrimSpace(welcome.NodeID); nodeID != "" {
+		h.hubLocalNodeID = nodeID
+	}
+	if nodeName := strings.TrimSpace(welcome.NodeName); nodeName != "" {
+		h.hubLocalNodeName = nodeName
+	}
+	h.hubLocalNodeAdmin = welcome.Admin
 }
 
 func (h *Home) applyHubSnapshot(snapshot hub.NodeSessions) {
@@ -1638,6 +1791,66 @@ func (h *Home) drainHubSnapshots() bool {
 			changed = true
 		default:
 			return changed
+		}
+	}
+}
+
+func (h *Home) listenForHubStatus() tea.Cmd {
+	ch := h.hubStatusCh
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-ch:
+			return msg
+		case <-h.ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (h *Home) listenForHubSnapshot() tea.Cmd {
+	ch := h.hubSnapshotCh
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-ch:
+			return msg
+		case <-h.ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (h *Home) listenForHubWelcome() tea.Cmd {
+	ch := h.hubWelcomeCh
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-ch:
+			return msg
+		case <-h.ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (h *Home) listenForHubTrustRequest() tea.Cmd {
+	ch := h.hubTrustRequestCh
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-ch:
+			return msg
+		case <-h.ctx.Done():
+			return nil
 		}
 	}
 }
@@ -1731,6 +1944,13 @@ func (c *runningHubClient) Attach(ctx context.Context, nodeID, sessionID string,
 	return c.client.Attach(ctx, nodeID, sessionID, size)
 }
 
+func (c *runningHubClient) AttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size hub.TerminalSize) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.AttachWindow(ctx, nodeID, sessionID, windowIndex, size)
+}
+
 func (c *runningHubClient) OpenAttach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error) {
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("hub client is not connected")
@@ -1738,11 +1958,74 @@ func (c *runningHubClient) OpenAttach(ctx context.Context, nodeID, sessionID str
 	return c.client.OpenAttach(ctx, nodeID, sessionID, size)
 }
 
+func (c *runningHubClient) OpenAttachWindow(ctx context.Context, nodeID, sessionID string, windowIndex int, size hub.TerminalSize) (hub.AttachStream, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.OpenAttachWindow(ctx, nodeID, sessionID, windowIndex, size)
+}
+
 func (c *runningHubClient) Command(ctx context.Context, nodeID, action string, payload any) (json.RawMessage, error) {
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("hub client is not connected")
 	}
 	return c.client.Command(ctx, nodeID, action, payload)
+}
+
+func (c *runningHubClient) RenameNode(ctx context.Context, nodeID, name string) (hub.Node, error) {
+	if c == nil || c.client == nil {
+		return hub.Node{}, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.RenameNode(ctx, nodeID, name)
+}
+
+func (c *runningHubClient) PromoteNode(ctx context.Context, nodeID string) (hub.Node, error) {
+	if c == nil || c.client == nil {
+		return hub.Node{}, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.PromoteNode(ctx, nodeID)
+}
+
+func (c *runningHubClient) DemoteNode(ctx context.Context, nodeID string) (hub.Node, error) {
+	if c == nil || c.client == nil {
+		return hub.Node{}, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.DemoteNode(ctx, nodeID)
+}
+
+func (c *runningHubClient) RevokeNode(ctx context.Context, nodeID string) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.RevokeNode(ctx, nodeID)
+}
+
+func (c *runningHubClient) ListInvites(ctx context.Context) ([]hub.AdminInvite, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.ListInvites(ctx)
+}
+
+func (c *runningHubClient) CreateInvite(ctx context.Context, req hub.CreateAdminInviteRequest) (hub.CreateAdminInviteResponse, error) {
+	if c == nil || c.client == nil {
+		return hub.CreateAdminInviteResponse{}, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.CreateInvite(ctx, req)
+}
+
+func (c *runningHubClient) RevokeInvite(ctx context.Context, inviteID string) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	return c.client.RevokeInvite(ctx, inviteID)
+}
+
+func (c *runningHubClient) ListTrustRequests(ctx context.Context) ([]hub.TrustRequestPayload, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	return c.client.ListTrustRequests(ctx)
 }
 
 func (c *runningHubClient) TrustDecision(ctx context.Context, nodeID string, allow bool) error {
@@ -1765,7 +2048,7 @@ func (c *runningHubClient) Close() error {
 	return nil
 }
 
-func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions), onTrustRequest func(hub.TrustRequestPayload)) (hubClientAPI, error) {
+func startHubClient(parent context.Context, cfg session.HubSettings, profile string, setStatus func(string), onSnapshot func(hub.NodeSessions), onWelcome func(hub.WelcomePayload), onTrustRequest func(hub.TrustRequestPayload)) (hubClientAPI, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -1805,6 +2088,7 @@ func startHubClient(parent context.Context, cfg session.HubSettings, profile str
 			}
 		},
 		OnSnapshot:     onSnapshot,
+		OnWelcome:      onWelcome,
 		OnTrustRequest: onTrustRequest,
 	}, hub.LocalSessionSource{Profile: profile})
 
@@ -1919,6 +2203,22 @@ func (h *Home) scopedGroupPaths() []string {
 	return scoped
 }
 
+func (h *Home) scopedGroupReparentTargets(sourcePath string) []string {
+	sourcePath = strings.Trim(strings.TrimSpace(sourcePath), "/")
+	targets := []string{}
+	if h.groupScope == "" {
+		targets = append(targets, "")
+	}
+	for _, path := range h.scopedGroupPaths() {
+		path = strings.Trim(strings.TrimSpace(path), "/")
+		if path == "" || path == sourcePath || strings.HasPrefix(path, sourcePath+"/") {
+			continue
+		}
+		targets = append(targets, path)
+	}
+	return targets
+}
+
 func (h *Home) scopedHubGroupPaths(nodeID string) []string {
 	nodeID = strings.TrimSpace(nodeID)
 	paths := map[string]bool{session.DefaultGroupPath: true}
@@ -1950,6 +2250,22 @@ func (h *Home) scopedHubGroupPaths(nodeID string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (h *Home) scopedHubGroupReparentTargets(nodeID, sourcePath string) []string {
+	sourcePath = strings.Trim(strings.TrimSpace(sourcePath), "/")
+	targets := []string{}
+	if h.groupScope == "" {
+		targets = append(targets, "")
+	}
+	for _, path := range h.scopedHubGroupPaths(nodeID) {
+		path = strings.Trim(strings.TrimSpace(path), "/")
+		if path == "" || path == sourcePath || strings.HasPrefix(path, sourcePath+"/") {
+			continue
+		}
+		targets = append(targets, path)
+	}
+	return targets
 }
 
 // groupScopeDisplayName returns the human-readable name for the active group scope.
@@ -2042,7 +2358,7 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 			continue
 		}
 		nodeName := hubNodeDisplayName(node)
-		appendHubWebNode(snapshot, nodeID, nodeName)
+		appendHubWebNode(snapshot, nodeID, nodeName, node.WebAvailable)
 		byGroup := make(map[string][]hub.SessionInfo)
 		hubGroups := make(map[string]hub.GroupInfo)
 		if !archivedView {
@@ -2077,20 +2393,21 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 				groupPaths = append(groupPaths, groupPath)
 			}
 		}
-		sort.Strings(groupPaths)
+		sortHubGroupPaths(groupPaths, hubGroups)
 		if len(groupPaths) == 0 && !archivedView {
 			groupPaths = append(groupPaths, session.DefaultGroupPath)
 		}
 
-		for _, groupPath := range groupPaths {
+		for groupIndex, groupPath := range groupPaths {
 			webGroupPath := hubWebGroupPath(nodeID, groupPath)
 			sessions := byGroup[groupPath]
 			group := &web.MenuGroup{
 				Name:         hubDisplayGroupPath(nodeName, groupPath),
 				Path:         webGroupPath,
 				Expanded:     true,
-				Order:        snapshot.TotalGroups + 1000,
+				Order:        1000 + groupIndex,
 				SessionCount: len(sessions),
+				DefaultPath:  strings.TrimSpace(hubGroups[groupPath].DefaultPath),
 				Source:       "hub",
 				HubNodeID:    nodeID,
 				HubNodeName:  nodeName,
@@ -2107,23 +2424,58 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 
 			for i, info := range sessions {
 				menuSession := &web.MenuSession{
-					ID:             web.HubSessionWebID(nodeID, info.ID),
-					Title:          info.Title,
-					Tool:           info.Tool,
-					Status:         session.Status(strings.TrimSpace(info.Status)),
-					GroupPath:      webGroupPath,
-					ProjectPath:    info.ProjectPath,
-					Notes:          info.Notes,
-					Order:          i,
-					LastAccessedAt: hubSessionUpdatedAt(info),
-					ArchivedAt:     hubArchivedAtValue(info),
-					Source:         "hub",
-					HubNodeID:      nodeID,
-					HubNodeName:    nodeName,
-					HubSessionID:   info.ID,
-					HubGroupPath:   groupPath,
-					ReadOnly:       false,
-					CanFork:        info.CanFork,
+					ID:                        web.HubSessionWebID(nodeID, info.ID),
+					Title:                     info.Title,
+					Tool:                      info.Tool,
+					Status:                    session.Status(strings.TrimSpace(info.Status)),
+					Substate:                  strings.TrimSpace(info.Substate),
+					GroupPath:                 webGroupPath,
+					ProjectPath:               info.ProjectPath,
+					ParentSessionID:           web.HubSessionWebID(nodeID, info.ParentSessionID),
+					IsConductor:               info.IsConductor,
+					Command:                   info.Command,
+					Wrapper:                   info.Wrapper,
+					TmuxSession:               info.TmuxSession,
+					TmuxSocketName:            info.TmuxSocketName,
+					Windows:                   hubMenuSessionWindows(info.Windows),
+					Color:                     info.Color,
+					ClaudeSessionID:           info.ClaudeSessionID,
+					GeminiSessionID:           info.GeminiSessionID,
+					GeminiModel:               info.GeminiModel,
+					GeminiYoloMode:            info.GeminiYoloMode,
+					OpenCodeSessionID:         info.OpenCodeSessionID,
+					CodexSessionID:            info.CodexSessionID,
+					LatestPrompt:              info.LatestPrompt,
+					AdditionalPaths:           append([]string(nil), info.AdditionalPaths...),
+					MultiRepoEnabled:          info.MultiRepoEnabled,
+					MultiRepoTempDir:          info.MultiRepoTempDir,
+					MultiRepoWorktrees:        hubSessionWorktrees(info.MultiRepoWorktrees),
+					WorktreePath:              info.WorktreePath,
+					WorktreeRepoRoot:          info.WorktreeRepoRoot,
+					WorktreeBranch:            info.WorktreeBranch,
+					Notes:                     info.Notes,
+					LoadedMCPNames:            append([]string(nil), info.LoadedMCPNames...),
+					Plugins:                   append([]string(nil), info.Plugins...),
+					Channels:                  append([]string(nil), info.Channels...),
+					PluginChannelLinkDisabled: info.PluginChannelLinkDisabled,
+					ExtraArgs:                 append([]string(nil), info.ExtraArgs...),
+					ToolOptionsJSON:           cloneHubRawJSON(info.ToolOptionsJSON),
+					Sandbox:                   hubSessionSandbox(info.Sandbox),
+					SandboxContainer:          info.SandboxContainer,
+					SSHHost:                   info.SSHHost,
+					SSHRemotePath:             info.SSHRemotePath,
+					TitleLocked:               info.TitleLocked,
+					NoTransitionNotify:        info.NoTransitionNotify,
+					Order:                     i,
+					LastAccessedAt:            hubSessionUpdatedAt(info),
+					ArchivedAt:                hubArchivedAtValue(info),
+					Source:                    "hub",
+					HubNodeID:                 nodeID,
+					HubNodeName:               nodeName,
+					HubSessionID:              info.ID,
+					HubGroupPath:              groupPath,
+					ReadOnly:                  false,
+					CanFork:                   info.CanFork,
 				}
 				if menuSession.Title == "" {
 					menuSession.Title = info.ID
@@ -2146,15 +2498,10 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 }
 
 func hubWebGroupPath(nodeID, groupPath string) string {
-	nodeID = strings.TrimSpace(nodeID)
-	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
-	if groupPath == "" {
-		groupPath = session.DefaultGroupPath
-	}
-	return "hub/" + nodeID + "/" + groupPath
+	return web.HubGroupWebPath(nodeID, groupPath)
 }
 
-func appendHubWebNode(snapshot *web.MenuSnapshot, nodeID, nodeName string) {
+func appendHubWebNode(snapshot *web.MenuSnapshot, nodeID, nodeName string, webAvailable bool) {
 	if snapshot == nil {
 		return
 	}
@@ -2166,12 +2513,15 @@ func appendHubWebNode(snapshot *web.MenuSnapshot, nodeID, nodeName string) {
 	if nodeName == "" {
 		nodeName = nodeID
 	}
-	for _, existing := range snapshot.HubNodes {
+	for i, existing := range snapshot.HubNodes {
 		if existing.ID == nodeID {
+			if webAvailable && !existing.WebAvailable {
+				snapshot.HubNodes[i].WebAvailable = true
+			}
 			return
 		}
 	}
-	snapshot.HubNodes = append(snapshot.HubNodes, web.HubNode{ID: nodeID, Name: nodeName})
+	snapshot.HubNodes = append(snapshot.HubNodes, web.HubNode{ID: nodeID, Name: nodeName, WebAvailable: webAvailable})
 }
 
 func hubSessionUpdatedAt(info hub.SessionInfo) time.Time {
@@ -2186,6 +2536,69 @@ func hubArchivedAtValue(info hub.SessionInfo) time.Time {
 		return time.Time{}
 	}
 	return info.ArchivedAt.UTC()
+}
+
+func cloneHubRawJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func hubSessionSandbox(raw json.RawMessage) *session.SandboxConfig {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var cfg session.SandboxConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
+}
+
+func hubSessionWorktrees(rows []hub.Worktree) []session.MultiRepoWorktree {
+	out := make([]session.MultiRepoWorktree, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, session.MultiRepoWorktree{
+			OriginalPath: row.OriginalPath,
+			WorktreePath: row.WorktreePath,
+			RepoRoot:     row.RepoRoot,
+			Branch:       row.Branch,
+		})
+	}
+	return out
+}
+
+func hubSessionWindows(rows []hub.WindowInfo) []session.HubWindowInfo {
+	out := make([]session.HubWindowInfo, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, session.HubWindowInfo{
+			Index:    row.Index,
+			Name:     row.Name,
+			Activity: row.Activity,
+			Tool:     row.Tool,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func hubMenuSessionWindows(rows []hub.WindowInfo) []web.MenuWindowInfo {
+	out := make([]web.MenuWindowInfo, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, web.MenuWindowInfo{
+			Index:    row.Index,
+			Name:     row.Name,
+			Activity: row.Activity,
+			Tool:     row.Tool,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (h *Home) publishWebSessionStates(instances []*session.Instance) {
@@ -2317,10 +2730,23 @@ func (h *Home) sessionHasWindows(item session.Item) bool {
 	return len(tmux.GetCachedWindows(tmuxSess.Name)) >= 2
 }
 
+func (h *Home) hubSessionHasWindows(item session.Item) bool {
+	return item.HubSession != nil && len(item.HubSession.Windows) >= 2
+}
+
 // moveCursorToSession moves the cursor to the flat item matching the given session ID.
 func (h *Home) moveCursorToSession(sessionID string) {
 	for i, fi := range h.flatItems {
 		if fi.Type == session.ItemTypeSession && fi.Session != nil && fi.Session.ID == sessionID {
+			h.cursor = i
+			return
+		}
+	}
+}
+
+func (h *Home) moveCursorToHubSession(nodeID, sessionID string) {
+	for i, fi := range h.flatItems {
+		if fi.Type == session.ItemTypeHubSession && fi.HubSession != nil && fi.HubNodeID == nodeID && fi.HubSession.ID == sessionID {
 			h.cursor = i
 			return
 		}
@@ -2601,32 +3027,57 @@ func (h *Home) rebuildFlatItems() {
 		for _, item := range h.flatItems {
 			expanded = append(expanded, item)
 
-			if item.Type != session.ItemTypeSession || item.Session == nil {
-				continue
-			}
-			tmuxSess := item.Session.GetTmuxSession()
-			if tmuxSess == nil {
-				continue
-			}
-			wins := tmux.GetCachedWindows(tmuxSess.Name)
-			if len(wins) < 2 || h.windowsCollapsed[item.Session.ID] {
-				continue
-			}
+			switch {
+			case item.Type == session.ItemTypeSession && item.Session != nil:
+				tmuxSess := item.Session.GetTmuxSession()
+				if tmuxSess == nil {
+					continue
+				}
+				wins := tmux.GetCachedWindows(tmuxSess.Name)
+				if len(wins) < 2 || h.windowsCollapsed[item.Session.ID] {
+					continue
+				}
 
-			for winIdx, win := range wins {
-				expanded = append(expanded, session.Item{
-					Type:                session.ItemTypeWindow,
-					WindowIndex:         win.Index,
-					WindowName:          win.Name,
-					WindowTool:          win.Tool,
-					WindowSessionID:     item.Session.ID,
-					Level:               item.Level + 1,
-					Path:                item.Path,
-					IsWindow:            true,
-					IsLastWindow:        winIdx == len(wins)-1,
-					IsLastInGroup:       item.IsLastInGroup && winIdx == len(wins)-1,
-					ParentIsLastInGroup: item.IsLastInGroup,
-				})
+				for winIdx, win := range wins {
+					expanded = append(expanded, session.Item{
+						Type:                session.ItemTypeWindow,
+						WindowIndex:         win.Index,
+						WindowName:          win.Name,
+						WindowTool:          win.Tool,
+						WindowSessionID:     item.Session.ID,
+						Level:               item.Level + 1,
+						Path:                item.Path,
+						IsWindow:            true,
+						IsLastWindow:        winIdx == len(wins)-1,
+						IsLastInGroup:       item.IsLastInGroup && winIdx == len(wins)-1,
+						ParentIsLastInGroup: item.IsLastInGroup,
+					})
+				}
+			case item.Type == session.ItemTypeHubSession && item.HubSession != nil:
+				wins := item.HubSession.Windows
+				parentID := web.HubSessionWebID(item.HubNodeID, item.HubSession.ID)
+				if len(wins) < 2 || h.windowsCollapsed[parentID] {
+					continue
+				}
+				for winIdx, win := range wins {
+					expanded = append(expanded, session.Item{
+						Type:                session.ItemTypeWindow,
+						HubNodeID:           item.HubNodeID,
+						HubNodeName:         item.HubNodeName,
+						HubGroupPath:        item.HubGroupPath,
+						HubSession:          item.HubSession,
+						WindowIndex:         win.Index,
+						WindowName:          win.Name,
+						WindowTool:          win.Tool,
+						WindowSessionID:     parentID,
+						Level:               item.Level + 1,
+						Path:                item.Path,
+						IsWindow:            true,
+						IsLastWindow:        winIdx == len(wins)-1,
+						IsLastInGroup:       item.IsLastInGroup && winIdx == len(wins)-1,
+						ParentIsLastInGroup: item.IsLastInGroup,
+					})
+				}
 			}
 		}
 		h.flatItems = expanded
@@ -2751,6 +3202,72 @@ func hubItemPath(nodeID, groupPath string) string {
 	return "hub/" + nodeID + "/" + groupPath
 }
 
+func hubGroupLeafName(groupPath string) string {
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" || groupPath == session.DefaultGroupPath {
+		return session.DefaultGroupName
+	}
+	if idx := strings.LastIndex(groupPath, "/"); idx >= 0 {
+		return groupPath[idx+1:]
+	}
+	return groupPath
+}
+
+func hubGroupBasePath(name string) string {
+	tree := session.NewGroupTree(nil)
+	group := tree.CreateGroup(name)
+	if group == nil || strings.TrimSpace(group.Path) == "" {
+		return "unnamed"
+	}
+	return group.Path
+}
+
+func hubChildGroupPath(parentPath, name string) string {
+	parentPath = strings.Trim(strings.TrimSpace(parentPath), "/")
+	base := hubGroupBasePath(name)
+	if parentPath == "" {
+		return base
+	}
+	return parentPath + "/" + base
+}
+
+func renamedHubGroupPath(oldPath, name string) string {
+	oldPath = strings.Trim(strings.TrimSpace(oldPath), "/")
+	parentPath := ""
+	if idx := strings.LastIndex(oldPath, "/"); idx >= 0 {
+		parentPath = oldPath[:idx]
+	}
+	return hubChildGroupPath(parentPath, name)
+}
+
+func sortHubGroupPaths(paths []string, groups map[string]hub.GroupInfo) {
+	sort.SliceStable(paths, func(i, j int) bool {
+		left := strings.Trim(strings.TrimSpace(paths[i]), "/")
+		right := strings.Trim(strings.TrimSpace(paths[j]), "/")
+		leftGroup, leftOK := groups[left]
+		rightGroup, rightOK := groups[right]
+		switch {
+		case leftOK && rightOK:
+			if leftGroup.Order != rightGroup.Order {
+				return leftGroup.Order < rightGroup.Order
+			}
+		case leftOK:
+			return true
+		case rightOK:
+			return false
+		}
+		return left < right
+	})
+}
+
+func hubParentGroupPath(path string) string {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		return path[:idx]
+	}
+	return ""
+}
+
 func hubNodeItemPath(nodeID string) string {
 	nodeID = strings.Trim(strings.TrimSpace(nodeID), "/")
 	return "hub/" + nodeID
@@ -2862,6 +3379,7 @@ func (h *Home) projectHubItems() []session.Item {
 		nodeName := hubNodeDisplayName(node)
 		byGroup := make(map[string][]session.HubSessionInfo)
 		emptyGroups := make(map[string]bool)
+		hubGroups := make(map[string]hub.GroupInfo)
 		if h.statusFilter != FilterModeArchived {
 			for _, group := range node.Groups {
 				groupPath := strings.Trim(strings.TrimSpace(group.Path), "/")
@@ -2871,21 +3389,58 @@ func (h *Home) projectHubItems() []session.Item {
 				if h.groupScope != "" && !h.isInGroupScope(groupPath) {
 					continue
 				}
+				group.Path = groupPath
+				hubGroups[groupPath] = group
 				emptyGroups[groupPath] = true
 			}
 		}
 		for _, info := range node.Sessions {
 			hubInfo := session.HubSessionInfo{
-				ID:               info.ID,
-				Title:            info.Title,
-				Tool:             info.Tool,
-				Status:           info.Status,
-				GroupPath:        info.GroupPath,
-				ProjectPath:      info.ProjectPath,
-				Notes:            info.Notes,
-				DisplaySessionID: info.DisplaySessionID,
-				CanFork:          info.CanFork,
-				ArchivedAt:       info.ArchivedAt,
+				ID:                        info.ID,
+				Title:                     info.Title,
+				Tool:                      info.Tool,
+				Status:                    info.Status,
+				Substate:                  info.Substate,
+				GroupPath:                 info.GroupPath,
+				ProjectPath:               info.ProjectPath,
+				ParentSessionID:           info.ParentSessionID,
+				IsConductor:               info.IsConductor,
+				Windows:                   hubSessionWindows(info.Windows),
+				Command:                   info.Command,
+				Wrapper:                   info.Wrapper,
+				TmuxSession:               info.TmuxSession,
+				TmuxSocketName:            info.TmuxSocketName,
+				Color:                     info.Color,
+				ClaudeSessionID:           info.ClaudeSessionID,
+				GeminiSessionID:           info.GeminiSessionID,
+				GeminiModel:               info.GeminiModel,
+				GeminiYoloMode:            info.GeminiYoloMode,
+				OpenCodeSessionID:         info.OpenCodeSessionID,
+				CodexSessionID:            info.CodexSessionID,
+				LatestPrompt:              info.LatestPrompt,
+				AdditionalPaths:           append([]string(nil), info.AdditionalPaths...),
+				MultiRepoEnabled:          info.MultiRepoEnabled,
+				MultiRepoTempDir:          info.MultiRepoTempDir,
+				MultiRepoWorktrees:        hubSessionWorktrees(info.MultiRepoWorktrees),
+				WorktreePath:              info.WorktreePath,
+				WorktreeRepoRoot:          info.WorktreeRepoRoot,
+				WorktreeBranch:            info.WorktreeBranch,
+				Notes:                     info.Notes,
+				LoadedMCPNames:            append([]string(nil), info.LoadedMCPNames...),
+				Plugins:                   append([]string(nil), info.Plugins...),
+				Channels:                  append([]string(nil), info.Channels...),
+				PluginChannelLinkDisabled: info.PluginChannelLinkDisabled,
+				ExtraArgs:                 append([]string(nil), info.ExtraArgs...),
+				ToolOptionsJSON:           cloneHubRawJSON(info.ToolOptionsJSON),
+				Sandbox:                   hubSessionSandbox(info.Sandbox),
+				SandboxContainer:          info.SandboxContainer,
+				SSHHost:                   info.SSHHost,
+				SSHRemotePath:             info.SSHRemotePath,
+				TitleLocked:               info.TitleLocked,
+				NoTransitionNotify:        info.NoTransitionNotify,
+				DisplaySessionID:          info.DisplaySessionID,
+				CanFork:                   info.CanFork,
+				ArchivedAt:                info.ArchivedAt,
 			}
 			groupPath := strings.Trim(strings.TrimSpace(hubInfo.GroupPath), "/")
 			if groupPath == "" {
@@ -2916,7 +3471,7 @@ func (h *Home) projectHubItems() []session.Item {
 		for groupPath := range emptyGroups {
 			groupPaths = append(groupPaths, groupPath)
 		}
-		sort.Strings(groupPaths)
+		sortHubGroupPaths(groupPaths, hubGroups)
 		if len(groupPaths) == 0 {
 			groupPath := session.DefaultGroupPath
 			if h.groupScope != "" {
@@ -3335,6 +3890,10 @@ func (h *Home) Init() tea.Cmd {
 
 		h.tick(),
 		h.reviverTick(),
+		h.listenForHubStatus(),
+		h.listenForHubSnapshot(),
+		h.listenForHubWelcome(),
+		h.listenForHubTrustRequest(),
 		h.checkForUpdate(),
 		h.fetchRemoteSessions,
 	}
@@ -4151,24 +4710,38 @@ func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 
 func (h *Home) fetchHubPreview(nodeID, sessionID, key string) tea.Cmd {
 	return func() tea.Msg {
-		if h.hubClient == nil {
-			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("hub client is not connected")}
-		}
 		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
 		defer cancel()
-		raw, err := h.hubClient.Command(ctx, nodeID, "preview", map[string]string{
-			"session_id": sessionID,
-		})
+		content, err := h.hubPreviewContent(ctx, nodeID, sessionID)
 		if err != nil {
 			return previewFetchedMsg{previewKey: key, err: err}
 		}
-		var result hub.PreviewSessionResponse
-		if err := json.Unmarshal(raw, &result); err != nil {
-			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("decode hub preview response: %w", err)}
-		}
-		content := truncateRemotePreviewContent(result.Content)
+		content = truncateRemotePreviewContent(content)
 		return previewFetchedMsg{previewKey: key, content: content}
 	}
+}
+
+func (h *Home) hubPreviewContent(ctx context.Context, nodeID, sessionID string) (string, error) {
+	if h.hubClient == nil {
+		return "", fmt.Errorf("hub client is not connected")
+	}
+	if ctx == nil {
+		ctx = h.ctx
+	}
+	raw, err := h.hubClient.Command(ctx, nodeID, "preview", map[string]string{
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return "", err
+	}
+	var result hub.PreviewSessionResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("decode hub preview response: %w", err)
+	}
+	if strings.TrimSpace(result.Content) == "" {
+		return "", fmt.Errorf("no output available for this hub session")
+	}
+	return result.Content, nil
 }
 
 // selectedPreviewTarget returns the instance, cache key, and window index for the currently
@@ -4215,7 +4788,7 @@ func (h *Home) selectedHubPreviewTarget() (string, string, string, bool) {
 		return "", "", "", false
 	}
 	item := h.flatItems[h.cursor]
-	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+	if item.HubSession == nil || (item.Type != session.ItemTypeHubSession && item.Type != session.ItemTypeWindow) {
 		return "", "", "", false
 	}
 	nodeID := strings.TrimSpace(item.HubNodeID)
@@ -4633,6 +5206,23 @@ func (h *Home) pushUndoStack(inst *session.Instance) {
 		deletedAt: time.Now(),
 	}
 	h.undoStack = append(h.undoStack, entry)
+	if len(h.undoStack) > 10 {
+		h.undoStack = h.undoStack[len(h.undoStack)-10:]
+	}
+}
+
+func (h *Home) pushHubUndoStack(nodeID, nodeName, sessionID string) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.undoStack = append(h.undoStack, deletedSessionEntry{
+		hubNodeID:    nodeID,
+		hubNodeName:  strings.TrimSpace(nodeName),
+		hubSessionID: sessionID,
+		deletedAt:    time.Now(),
+	})
 	if len(h.undoStack) > 10 {
 		h.undoStack = h.undoStack[len(h.undoStack)-10:]
 	}
@@ -5115,12 +5705,7 @@ func (h *Home) syncNotificationsBackground() {
 	// Phase 2: Acknowledge the session if signal was received
 	if sessionToAcknowledgeID != "" {
 		if inst, ok := h.instanceByID[sessionToAcknowledgeID]; ok {
-			if ts := inst.GetTmuxSession(); ts != nil {
-				ts.Acknowledge()
-				// Persist ack to SQLite so other instances see it
-				if db := statedb.GetGlobal(); db != nil {
-					_ = db.SetAcknowledged(inst.ID, true)
-				}
+			if h.acknowledgeViewedSession(inst) {
 				_ = inst.UpdateStatus()
 				notifLog.Debug(
 					"session_acknowledged",
@@ -5286,6 +5871,8 @@ func (h *Home) refreshAttachedSessionStatus(sessionID string) {
 		return
 	}
 
+	h.acknowledgeViewedSession(inst)
+
 	// Attach return is the one moment where stale hook files are most visible:
 	// Claude/Codex may have exited via /q without writing a fresh "dead" hook.
 	// Force the attached session through the live tmux path before the list is
@@ -5312,6 +5899,30 @@ func (h *Home) refreshAttachedSessionStatus(sessionID string) {
 		}
 	}
 	h.refreshSessionRenderSnapshot(nil)
+}
+
+func (h *Home) acknowledgeViewedSession(inst *session.Instance) bool {
+	if inst == nil || inst.GetStatusThreadSafe() != session.StatusWaiting {
+		return false
+	}
+
+	// A waiting hook file represents unseen agent activity. Once the user opens
+	// the session, that activity has been seen; clear the hook before the next
+	// status pass so Codex/Gemini/Claude hook fast paths cannot re-yellow the
+	// session immediately after attach/detach.
+	inst.ClearHookStatus()
+	if h != nil && h.hookWatcher != nil {
+		h.hookWatcher.ClearHookStatus(inst.ID)
+	}
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
+		tmuxSess.Acknowledge()
+	}
+	if db := statedb.GetGlobal(); db != nil {
+		_ = db.SetAcknowledged(inst.ID, true)
+	}
+	inst.ForceNextStatusCheck()
+	statusLog.Debug("acknowledged_on_view", slog.String("title", inst.Title), slog.String("session_id", inst.ID))
+	return true
 }
 
 func (h *Home) publishCurrentSessionStates() {
@@ -5960,6 +6571,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Save both instances AND groups (critical fix: was losing groups!)
 			// Use forceSave to bypass mtime check - new session creation MUST persist
 			h.forceSaveInstances()
+			h.publishWebMenuSnapshot()
 
 			// Start fetching preview for the new session
 			return h, h.fetchPreview(msg.instance, msg.instance.ID, -1)
@@ -5995,6 +6607,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.forceSaveInstances()
+		h.publishWebMenuSnapshot()
 		if msg.err != nil {
 			h.setError(msg.err)
 		} else if msg.warning != "" {
@@ -6063,6 +6676,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Save both instances AND groups
 			// Use forceSave to bypass mtime check - forked session MUST persist
 			h.forceSaveInstances()
+			h.publishWebMenuSnapshot()
 
 			// forceSaveInstances can setError on a failed persist; fold the
 			// non-fatal degradation notice into it rather than overwriting, so a
@@ -6140,6 +6754,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Save both instances AND groups (critical fix: was losing groups!)
 		// Use forceSave to bypass mtime check - delete MUST persist
 		h.forceSaveInstances()
+		h.publishWebMenuSnapshot()
 
 		// Show undo hint (using setError as a transient message)
 		if deletedInstance != nil {
@@ -6172,6 +6787,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		h.refreshSessionRenderSnapshot(nil)
 		h.saveInstances()
+		h.publishCurrentSessionStates()
 
 		restartHint := ""
 		if restartKey := h.actionKey(hotkeyRestart); restartKey != "" {
@@ -6378,11 +6994,21 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		selectedBefore := h.captureSelectedItemIdentity()
 		h.applyHubSnapshot(msg.snapshot)
 		h.rebuildFlatItemsPreservingSelection(selectedBefore)
-		return h, nil
+		h.publishWebMenuSnapshot()
+		return h, h.listenForHubSnapshot()
+
+	case hubStatusMsg:
+		h.setHubStatus(msg.status)
+		return h, h.listenForHubStatus()
+
+	case hubWelcomeMsg:
+		h.applyHubWelcome(msg.welcome)
+		h.publishWebMenuSnapshot()
+		return h, h.listenForHubWelcome()
 
 	case hubTrustRequestMsg:
 		h.applyHubTrustRequest(msg.request)
-		return h, nil
+		return h, h.listenForHubTrustRequest()
 
 	case remoteLatenciesFetchedMsg:
 		h.remoteLatencyMu.Lock()
@@ -6612,6 +7238,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, tea.Batch(cmd, listenForReloads(h.storageWatcher))
 
 	case hubAttachResultMsg:
+		h.isAttaching.Store(false)
 		if msg.err != nil {
 			uiLog.Warn("hub_attach_failed", slog.String("error", msg.err.Error()))
 			h.setHubStatus("hub attach failed")
@@ -6628,6 +7255,144 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.action != "" {
 			h.setHubStatus("hub " + msg.action + " sent")
 		}
+		if msg.action == "create" && msg.nodeID != "" && msg.sessionID != "" && msg.createRequest != nil {
+			h.addHubSessionToCache(msg.nodeID, msg.nodeName, msg.sessionID, *msg.createRequest)
+			h.rebuildFlatItems()
+			h.publishWebMenuSnapshot()
+		}
+		if msg.action == "delete" && msg.nodeID != "" && msg.sessionID != "" {
+			h.pushHubUndoStack(msg.nodeID, msg.nodeName, msg.sessionID)
+		}
+		if msg.removeOnSuccess && msg.nodeID != "" && msg.sessionID != "" {
+			h.removeHubSessionFromCache(msg.nodeID, msg.sessionID)
+			h.rebuildFlatItems()
+		}
+		if msg.nodeAdmin != nil && msg.nodeID != "" {
+			h.updateHubNodeAdminInCache(msg.nodeID, *msg.nodeAdmin)
+			h.rebuildFlatItems()
+			h.publishWebMenuSnapshot()
+		}
+		if msg.removeNode && msg.nodeID != "" {
+			h.removeHubNodeFromCache(msg.nodeID)
+			h.rebuildFlatItems()
+			h.publishWebMenuSnapshot()
+		}
+		return h, nil
+
+	case hubAdminDialogLoadedMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub admin failed")
+			h.setError(fmt.Errorf("hub admin: %w", msg.err))
+			return h, nil
+		}
+		h.hubAdminDialog.SetSize(h.width, h.height)
+		h.hubAdminDialog.Show(msg.invites, msg.trust)
+		h.setHubStatus("hub admin loaded")
+		return h, nil
+
+	case hubAdminActionResultMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub admin failed")
+			h.setError(fmt.Errorf("hub admin %s: %w", msg.action, msg.err))
+			return h, nil
+		}
+		if msg.inviteResp != nil && h.hubAdminDialog != nil {
+			h.hubAdminDialog.FinishCreateInvite(*msg.inviteResp)
+		}
+		h.setHubStatus("hub admin " + msg.action + " ok")
+		return h, h.loadHubAdminDialog()
+
+	case hubMCPDialogLoadedMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub mcp failed")
+			h.setError(fmt.Errorf("hub mcp: %w", msg.err))
+			h.clearHubMCPDialogState()
+			return h, nil
+		}
+		h.mcpDialog.SetSize(h.width, h.height)
+		if err := h.mcpDialog.ShowWithAttached(msg.projectPath, msg.sessionID, msg.tool, msg.attached); err != nil {
+			h.setHubStatus("hub mcp failed")
+			h.setError(fmt.Errorf("hub mcp: %w", err))
+			h.clearHubMCPDialogState()
+			return h, nil
+		}
+		h.hubMCPDialogNodeID = msg.nodeID
+		h.hubMCPDialogNodeName = msg.nodeName
+		h.hubMCPDialogSessionID = msg.sessionID
+		h.hubMCPDialogInitial = cloneMCPNamesByScope(msg.attached)
+		h.setHubStatus("hub mcp loaded")
+		return h, nil
+
+	case hubMCPApplyResultMsg:
+		h.clearHubMCPDialogState()
+		if msg.err != nil {
+			h.setHubStatus("hub mcp failed")
+			h.setError(fmt.Errorf("hub mcp: %w", msg.err))
+			return h, nil
+		}
+		h.setHubStatus("hub mcp updated")
+		return h, nil
+
+	case hubPluginDialogLoadedMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub plugins failed")
+			h.setError(fmt.Errorf("hub plugins: %w", msg.err))
+			h.clearHubPluginDialogState()
+			return h, nil
+		}
+		h.pluginDialog.SetSize(h.width, h.height)
+		if err := h.pluginDialog.ShowWithData(msg.sessionID, msg.tool, pluginDialogCatalogFromHub(msg.catalog), msg.plugins, msg.pluginChannelLinkDisabled); err != nil {
+			h.setHubStatus("hub plugins failed")
+			h.setError(fmt.Errorf("hub plugins: %w", err))
+			h.clearHubPluginDialogState()
+			return h, nil
+		}
+		h.hubPluginDialogNodeID = msg.nodeID
+		h.hubPluginDialogNodeName = msg.nodeName
+		h.hubPluginDialogSessionID = msg.sessionID
+		h.hubPluginDialogInitial = appendSortedStringCopy(msg.plugins)
+		h.setHubStatus("hub plugins loaded")
+		return h, nil
+
+	case hubPluginApplyResultMsg:
+		h.clearHubPluginDialogState()
+		if msg.err != nil {
+			h.setHubStatus("hub plugins failed")
+			h.setError(fmt.Errorf("hub plugins: %w", msg.err))
+			return h, nil
+		}
+		h.setHubStatus("hub plugins updated")
+		return h, nil
+
+	case hubSkillDialogLoadedMsg:
+		if msg.err != nil {
+			h.setHubStatus("hub skills failed")
+			h.setError(fmt.Errorf("hub skills: %w", msg.err))
+			h.clearHubSkillDialogState()
+			return h, nil
+		}
+		h.skillDialog.SetSize(h.width, h.height)
+		if err := h.skillDialog.ShowWithData(msg.projectPath, msg.sessionID, msg.tool, msg.catalog, msg.attached); err != nil {
+			h.setHubStatus("hub skills failed")
+			h.setError(fmt.Errorf("hub skills: %w", err))
+			h.clearHubSkillDialogState()
+			return h, nil
+		}
+		h.hubSkillDialogNodeID = msg.nodeID
+		h.hubSkillDialogNodeName = msg.nodeName
+		h.hubSkillDialogSessionID = msg.sessionID
+		h.hubSkillDialogInitial = skillCandidateMap(h.skillDialog.AttachedCandidates())
+		h.setHubStatus("hub skills loaded")
+		return h, nil
+
+	case hubSkillApplyResultMsg:
+		h.clearHubSkillDialogState()
+		if msg.err != nil {
+			h.setHubStatus("hub skills failed")
+			h.setError(fmt.Errorf("hub skills: %w", msg.err))
+			return h, nil
+		}
+		h.setHubStatus("hub skills updated")
 		return h, nil
 
 	case hubTrustDecisionResultMsg:
@@ -7050,6 +7815,22 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case hubCodeBlockBlocksMsg:
+		if msg.err != nil {
+			h.setError(msg.err)
+			return h, nil
+		}
+		switch len(msg.blocks) {
+		case 0:
+			h.setError(fmt.Errorf("no code blocks found in this session's output"))
+		case 1:
+			return h, h.copyCodeBlock(msg.blocks[0], msg.sessionTitle)
+		default:
+			h.codeBlockDialog.SetSize(h.width, h.height)
+			h.codeBlockDialog.Show(msg.sessionTitle, msg.blocks)
+		}
+		return h, nil
+
 	case sendOutputResultMsg:
 		if msg.err != nil {
 			h.setError(fmt.Errorf("failed to send to %s: %v", msg.targetTitle, msg.err))
@@ -7108,6 +7889,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.drainHubSnapshots() {
 			selectedBefore := h.captureSelectedItemIdentity()
 			h.rebuildFlatItemsPreservingSelection(selectedBefore)
+			h.publishWebMenuSnapshot()
 		}
 
 		// Auto-dismiss errors after 5 seconds
@@ -7479,6 +8261,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if h.confirmDialog.IsVisible() {
 			return h.handleConfirmDialogKey(msg)
+		}
+		if h.hubAdminDialog != nil && h.hubAdminDialog.IsVisible() {
+			return h.handleHubAdminDialogKey(msg)
 		}
 		if h.mcpDialog.IsVisible() {
 			return h.handleMCPDialogKey(msg)
@@ -7857,7 +8642,7 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				GroupPath:   groupPath,
 				ModelID:     h.newDialog.GetLaunchModelID(),
 			}
-			return h, h.hubCommand(nodeID, nodeName, "create", req)
+			return h, h.hubCreateCommand(nodeID, nodeName, req)
 		}
 
 		// Get values including worktree settings.
@@ -8018,7 +8803,7 @@ func (h *Home) showRemoteNewSessionDialog(item session.Item) {
 	h.pendingHubNodeName = ""
 
 	paths := h.remotePathSuggestions(remoteName)
-	h.newDialog.SetPathSuggestions(paths)
+	h.newDialog.SetRemotePathSuggestions(paths)
 	h.newDialog.SetRecentSessions(nil)
 	// Preselect the last-used tool (UX top-3 #2); explicit [default_tool] wins.
 	h.newDialog.SetDefaultTool(resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB())))
@@ -8080,11 +8865,16 @@ func (h *Home) showHubNewSessionDialog(item session.Item) {
 	groupName := groupPath
 	defaultPath := "."
 	tool := ""
+	paths := h.hubPathSuggestions(nodeID)
 	if item.Type == session.ItemTypeHubNode {
 		if groupPath == "" {
 			groupPath = session.DefaultGroupPath
 		}
 		groupName = hubDisplayGroupPath(h.pendingHubNodeName, groupPath)
+	} else if item.Type == session.ItemTypeHubGroup {
+		if path := h.hubGroupDefaultPath(nodeID, groupPath); path != "" {
+			defaultPath = path
+		}
 	} else if item.HubSession != nil {
 		if groupPath == "" {
 			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
@@ -8105,7 +8895,7 @@ func (h *Home) showHubNewSessionDialog(item session.Item) {
 	if tool == "" {
 		tool = resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB()))
 	}
-	h.newDialog.SetPathSuggestions(nil)
+	h.newDialog.SetRemotePathSuggestions(paths)
 	h.newDialog.SetRecentSessions(nil)
 	h.newDialog.SetDefaultTool(tool)
 	h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, nil, "")
@@ -8137,6 +8927,69 @@ func (h *Home) remotePathSuggestions(remoteName string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func (h *Home) hubPathSuggestions(nodeID string) []string {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return nil
+	}
+	h.hubSessionsMu.RLock()
+	snapshot, ok := h.hubSessions[nodeID]
+	h.hubSessionsMu.RUnlock()
+	if !ok {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(snapshot.Sessions)+len(snapshot.Groups))
+	paths := make([]string, 0, len(snapshot.Sessions)+len(snapshot.Groups))
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	for _, group := range snapshot.Groups {
+		add(group.DefaultPath)
+	}
+	for _, info := range snapshot.Sessions {
+		add(info.ProjectPath)
+		add(info.WorktreePath)
+		for _, path := range info.AdditionalPaths {
+			add(path)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func (h *Home) hubGroupDefaultPath(nodeID, groupPath string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	h.hubSessionsMu.RLock()
+	snapshot, ok := h.hubSessions[nodeID]
+	h.hubSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	for _, group := range snapshot.Groups {
+		path := strings.Trim(strings.TrimSpace(group.Path), "/")
+		if path == "" {
+			path = session.DefaultGroupPath
+		}
+		if path == groupPath {
+			return strings.TrimSpace(group.DefaultPath)
+		}
+	}
+	return ""
 }
 
 func persistClaudeDialogDefaults(opts *session.ClaudeOptions, args []string) {
@@ -8846,6 +9699,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				h.saveGroupState()
 			} else if item.Type == session.ItemTypeWindow {
+				if item.HubSession != nil && item.HubNodeID != "" {
+					return h, h.attachHubSessionWindow(item.HubNodeID, item.HubSession.ID, item.WindowIndex, hubSessionNeedsRestartBeforeAttach(item.HubSession))
+				}
 				// Find parent session by WindowSessionID
 				var parentInst *session.Instance
 				h.instancesMu.RLock()
@@ -8864,18 +9720,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						parentInst.SyncSessionIDsToTmux()
 						parentInst.MarkAccessed()
 
-						if parentInst.GetStatusThreadSafe() == session.StatusWaiting {
-							tmuxSess.Acknowledge()
-							if db := statedb.GetGlobal(); db != nil {
-								_ = db.SetAcknowledged(parentInst.ID, true)
-							}
-						}
+						h.acknowledgeViewedSession(parentInst)
 
 						h.isAttaching.Store(true)
 						return h, tea.Exec(attachWindowCmd{session: tmuxSess, windowIndex: item.WindowIndex, detachByte: h.detachByte()}, func(err error) tea.Msg {
 							h.isAttaching.Store(false)
 							parentInst.MarkAccessed()
-							return statusUpdateMsg{}
+							return statusUpdateMsg{attachedSessionID: parentInst.ID}
 						})
 					}
 				}
@@ -8908,6 +9759,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.windowsCollapsed[sid] = !h.windowsCollapsed[sid]
 				h.rebuildFlatItems()
 				h.moveCursorToSession(sid)
+			} else if item.Type == session.ItemTypeHubSession && h.hubSessionHasWindows(item) {
+				sid := web.HubSessionWebID(item.HubNodeID, item.HubSession.ID)
+				h.windowsCollapsed[sid] = !h.windowsCollapsed[sid]
+				h.rebuildFlatItems()
+				h.moveCursorToHubSession(item.HubNodeID, item.HubSession.ID)
 			}
 		}
 		return h, nil
@@ -8933,11 +9789,19 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				sid := item.WindowSessionID
 				h.windowsCollapsed[sid] = true
 				h.rebuildFlatItems()
-				h.moveCursorToSession(sid)
+				if item.HubSession != nil && item.HubNodeID != "" {
+					h.moveCursorToHubSession(item.HubNodeID, item.HubSession.ID)
+				} else {
+					h.moveCursorToSession(sid)
+				}
 				collapsed = false // no group state to save
 			} else if item.Type == session.ItemTypeSession && h.sessionHasWindows(item) && !h.windowsCollapsed[item.Session.ID] {
 				// Collapse this session's windows
 				h.windowsCollapsed[item.Session.ID] = true
+				h.rebuildFlatItems()
+				collapsed = false
+			} else if item.Type == session.ItemTypeHubSession && h.hubSessionHasWindows(item) && !h.windowsCollapsed[web.HubSessionWebID(item.HubNodeID, item.HubSession.ID)] {
+				h.windowsCollapsed[web.HubSessionWebID(item.HubNodeID, item.HubSession.ID)] = true
 				h.rebuildFlatItems()
 				collapsed = false
 			} else if item.Type == session.ItemTypeSession {
@@ -8970,6 +9834,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if h.cursor >= len(h.flatItems) {
 					h.cursor = max(0, len(h.flatItems)-1)
 				}
+			case session.ItemTypeHubGroup:
+				return h, h.reorderHubGroup(item, "up")
 			case session.ItemTypeSession:
 				if item.Session != nil {
 					sessionID := item.Session.ID
@@ -8997,6 +9863,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if h.cursor >= len(h.flatItems) {
 					h.cursor = max(0, len(h.flatItems)-1)
 				}
+			case session.ItemTypeHubGroup:
+				return h, h.reorderHubGroup(item, "down")
 			case session.ItemTypeSession:
 				if item.Session != nil {
 					sessionID := item.Session.ID
@@ -9013,11 +9881,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "shift+left":
-		// Promote: outdent a sub-session to top-level peer in the same group.
-		// Top-level sessions and groups are unaffected. Cross-group moves
-		// stay on M.
+		// Hub node: demote from admin. Local session: promote/outdent a
+		// sub-session to top-level peer in the same group.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeHubNode {
+				return h, h.setHubNodeAdmin(item, false)
+			}
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				sessionID := item.Session.ID
 				h.groupTree.PromoteSession(item.Session)
@@ -9032,12 +9902,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "shift+right":
-		// Demote: nest the cursor's top-level session under the previous
-		// top-level peer as that peer's last child. No-op when already a
-		// sub-session, when the session has its own children (single-level
-		// nesting only), or when there is no previous peer in the group.
+		// Hub node: promote to admin. Local session: demote/nest under the
+		// previous top-level peer in the same group.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeHubNode {
+				return h, h.setHubNodeAdmin(item, true)
+			}
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				sessionID := item.Session.ID
 				h.groupTree.DemoteSession(item.Session)
@@ -9075,10 +9946,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil &&
 				session.ToolSupportsMCPManager(item.Session.Tool) {
+				h.clearHubMCPDialogState()
 				h.mcpDialog.SetSize(h.width, h.height)
 				if err := h.mcpDialog.Show(item.Session.ProjectPath, item.Session.ID, item.Session.Tool); err != nil {
 					h.setError(err)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil &&
+				session.ToolSupportsMCPManager(item.HubSession.Tool) {
+				return h, h.openHubMCPDialog(item)
 			}
 		}
 		return h, nil
@@ -9092,10 +9967,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil &&
 				session.IsClaudeCompatible(item.Session.Tool) {
+				h.clearHubPluginDialogState()
 				h.pluginDialog.SetSize(h.width, h.height)
 				if err := h.pluginDialog.Show(item.Session); err != nil {
 					h.setError(err)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil &&
+				session.IsClaudeCompatible(item.HubSession.Tool) {
+				return h, h.openHubPluginDialog(item)
 			}
 		}
 		return h, nil
@@ -9134,6 +10013,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if item.Session.CanFork() {
 					return h, h.forkSessionWithDialog(item.Session)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubSession.CanFork {
+				h.forkDialog.ShowWithParentSandboxed(item.HubSession.Title, item.HubSession.ProjectPath, item.HubSession.GroupPath, nil, "", false)
+				return h, nil
 			}
 		}
 		return h, nil
@@ -9143,19 +10025,27 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil &&
 				session.SupportsProjectSkills(item.Session.Tool) {
+				h.clearHubSkillDialogState()
 				h.skillDialog.SetSize(h.width, h.height)
 				if err := h.skillDialog.Show(item.Session.ProjectPath, item.Session.ID, item.Session.Tool); err != nil {
 					h.setError(err)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil &&
+				session.SupportsProjectSkills(item.HubSession.Tool) {
+				return h, h.openHubSkillDialog(item)
 			}
 		}
 		return h, nil
 
 	case "M", "shift+m":
-		// Move session to different group
+		// Move session to a different group, or reparent a group.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
-			if item.Type == session.ItemTypeSession {
+			if item.Type == session.ItemTypeGroup && item.Group != nil {
+				h.groupDialog.ShowMoveGroup(h.scopedGroupReparentTargets(item.Path))
+			} else if item.Type == session.ItemTypeHubGroup {
+				h.groupDialog.ShowMoveGroup(h.scopedHubGroupReparentTargets(item.HubNodeID, item.HubGroupPath))
+			} else if item.Type == session.ItemTypeSession {
 				h.groupDialog.ShowMove(h.scopedGroupPaths())
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
 				h.groupDialog.ShowMove(h.scopedHubGroupPaths(item.HubNodeID))
@@ -9169,20 +10059,33 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		item := h.flatItems[h.cursor]
-		if item.Type != session.ItemTypeSession || item.Session == nil {
-			return h, nil
+		if item.Type == session.ItemTypeSession && item.Session != nil {
+			inst := item.Session
+			if !inst.IsWorktree() {
+				h.setError(fmt.Errorf("session '%s' is not a worktree", inst.Title))
+				return h, nil
+			}
+			if _, running := h.setupRunningSessions[inst.ID]; running {
+				h.setError(fmt.Errorf("setup script already running for '%s'", inst.Title))
+				return h, nil
+			}
+			h.setupRunningSessions[inst.ID] = time.Now()
+			return h, h.runWorktreeSetup(inst)
 		}
-		inst := item.Session
-		if !inst.IsWorktree() {
-			h.setError(fmt.Errorf("session '%s' is not a worktree", inst.Title))
-			return h, nil
+		if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+			if strings.TrimSpace(item.HubSession.WorktreePath) == "" || strings.TrimSpace(item.HubSession.WorktreeRepoRoot) == "" {
+				h.setError(fmt.Errorf("hub session '%s' is not a worktree", item.HubSession.Title))
+				return h, nil
+			}
+			setupKey := hubPromptTarget(item.HubNodeID, item.HubSession.ID)
+			if _, running := h.setupRunningSessions[setupKey]; running {
+				h.setError(fmt.Errorf("setup script already running for '%s'", item.HubSession.Title))
+				return h, nil
+			}
+			h.setupRunningSessions[setupKey] = time.Now()
+			return h, h.runHubWorktreeSetup(item)
 		}
-		if _, running := h.setupRunningSessions[inst.ID]; running {
-			h.setError(fmt.Errorf("setup script already running for '%s'", inst.Title))
-			return h, nil
-		}
-		h.setupRunningSessions[inst.ID] = time.Now()
-		return h, h.runWorktreeSetup(inst)
+		return h, nil
 
 	case "W", "shift+w":
 		// Worktree finish - merge + cleanup for worktree sessions
@@ -9208,6 +10111,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					dirty, err := git.HasUncommittedChanges(wtPath)
 					return worktreeDirtyCheckMsg{sessionID: sid, isDirty: dirty, err: err}
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.finishHubWorktreeSession(item)
 			}
 		}
 		return h, nil
@@ -9235,7 +10140,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Scoped mode: create subgroups under scope root or its children
 			if h.cursor < len(h.flatItems) {
 				item := h.flatItems[h.cursor]
-				if item.Type == session.ItemTypeGroup {
+				if item.Type == session.ItemTypeHubGroup {
+					h.groupDialog.ShowCreateSubgroup(item.HubGroupPath, hubGroupLeafName(item.HubGroupPath))
+				} else if item.Type == session.ItemTypeHubNode {
+					h.groupDialog.ShowCreateWithContext("", "")
+				} else if item.Type == session.ItemTypeGroup {
 					h.groupDialog.ShowCreateSubgroup(item.Group.Path, item.Group.Name)
 				} else {
 					h.groupDialog.ShowCreateSubgroup(h.groupScope, h.groupScopeDisplayName())
@@ -9245,7 +10154,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		} else if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
-			if item.Type == session.ItemTypeGroup {
+			if item.Type == session.ItemTypeHubGroup {
+				h.groupDialog.ShowCreateWithContext(item.HubGroupPath, hubGroupLeafName(item.HubGroupPath))
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubSession.GroupPath != "" {
+				gPath := item.HubSession.GroupPath
+				h.groupDialog.ShowCreateWithContextDefaultRoot(gPath, hubGroupLeafName(gPath))
+			} else if item.Type == session.ItemTypeHubNode {
+				h.groupDialog.ShowCreateWithContext("", "")
+			} else if item.Type == session.ItemTypeGroup {
 				// On group header: default to subgroup mode
 				h.groupDialog.ShowCreateWithContext(item.Group.Path, item.Group.Name)
 			} else if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.GroupPath != "" {
@@ -9271,6 +10187,15 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeGroup {
 				h.groupDialog.ShowRename(item.Path, item.Group.Name)
+			} else if item.Type == session.ItemTypeHubNode {
+				if !h.hubLocalNodeAdmin {
+					h.setHubStatus("hub admin required")
+					h.setError(fmt.Errorf("hub node rename requires an admin hub node"))
+					return h, nil
+				}
+				h.groupDialog.ShowRenameNode(item.HubNodeID, item.HubNodeName)
+			} else if item.Type == session.ItemTypeHubGroup {
+				h.groupDialog.ShowRename(item.HubGroupPath, hubGroupLeafName(item.HubGroupPath))
 			} else if item.Type == session.ItemTypeSession && item.Session != nil {
 				h.groupDialog.ShowRenameSession(item.Session.ID, item.Session.Title)
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
@@ -9327,18 +10252,24 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "E":
 		// Exec an interactive shell inside the sandbox container.
-		if selected := h.getSelectedSession(); selected != nil && selected.IsSandboxed() &&
-			selected.SandboxContainer != "" {
+		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
+			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.attachHubSandboxShell(item)
+			}
+		}
+		if selected := h.getSelectedSession(); selected != nil && selected.IsSandboxed() && selected.SandboxContainer != "" {
 			tmuxName, shellErr := selected.OpenContainerShell()
 			if shellErr != nil {
 				h.setError(shellErr)
 				return h, nil
 			}
-			termSession := &tmux.Session{Name: tmuxName}
+			termSession := &tmux.Session{Name: tmuxName, SocketName: selected.TmuxSocketName}
+			h.acknowledgeViewedSession(selected)
 			h.isAttaching.Store(true)
 			return h, tea.Exec(attachCmd{session: termSession, opts: tmux.AttachOptions{DetachByte: h.detachByte()}}, func(err error) tea.Msg {
 				h.isAttaching.Store(false)
-				return statusUpdateMsg{}
+				return statusUpdateMsg{attachedSessionID: selected.ID}
 			})
 		}
 		return h, nil
@@ -9489,8 +10420,24 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.confirmDialog.ShowDeleteSession(item.Session.ID, item.Session.Title, item.Session.IsSandboxed(), item.Session.IsWorktree())
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowDeleteRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
+			} else if item.Type == session.ItemTypeHubNode {
+				if !h.hubLocalNodeAdmin {
+					h.setHubStatus("hub admin required")
+					h.setError(fmt.Errorf("hub node revoke requires an admin hub node"))
+					return h, nil
+				}
+				h.confirmDialog.ShowRevokeHubNode(item.HubNodeID, item.HubNodeName)
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
 				h.confirmDialog.ShowDeleteHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
+			} else if item.Type == session.ItemTypeHubGroup {
+				if item.HubGroupPath == session.DefaultGroupPath {
+					h.confirmDialog.ShowNotice(
+						"⚠  Can't Delete Hub Group",
+						fmt.Sprintf("%q is the default group on %s and can't be deleted.", session.DefaultGroupName, item.HubNodeName),
+					)
+				} else {
+					h.confirmDialog.ShowDeleteHubGroup(item.HubNodeID, item.HubNodeName, item.HubGroupPath, hubGroupLeafName(item.HubGroupPath))
+				}
 			} else if item.Type == session.ItemTypeGroup && item.Path == session.DefaultGroupPath {
 				// Protected default group: surface the block in the same centered modal
 				// used for the delete confirmation, so it can't be clamped off the bottom
@@ -9612,6 +10559,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		return h, nil
+
+	case "H":
+		return h, h.openHubAdminDialog()
 
 	case "u":
 		// Mark session as unread (idle → waiting)
@@ -9848,6 +10798,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				return h, h.copySessionOutput(item.Session)
 			}
+			if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.copyHubSessionOutput(item.HubNodeID, item.HubNodeName, item.HubSession)
+			}
 		}
 		return h, nil
 
@@ -9858,6 +10811,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				return h, h.copySessionInfo(item.Session)
+			}
+			if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.copyHubSessionInfo(item.HubNodeName, item.HubSession)
 			}
 		}
 		return h, nil
@@ -9872,6 +10828,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				return h, h.startCodeBlockCopy(item.Session)
 			}
+			if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.startHubCodeBlockCopy(item.HubNodeID, item.HubNodeName, item.HubSession)
+			}
 		}
 		return h, nil
 
@@ -9880,13 +10839,23 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
-				others := h.getOtherActiveSessions(item.Session.ID)
-				if len(others) == 0 {
+				source := localSendOutputTarget(item.Session)
+				targets := h.sendOutputTargets(source)
+				if len(targets) == 0 {
 					h.setError(fmt.Errorf("no other sessions to send to"))
 					return h, nil
 				}
 				h.sessionPickerDialog.SetSize(h.width, h.height)
-				h.sessionPickerDialog.Show(item.Session, h.instances)
+				h.sessionPickerDialog.ShowTargets(source, targets)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				source := hubSendOutputTarget(item.HubNodeID, item.HubNodeName, item.HubSession)
+				targets := h.sendOutputTargets(source)
+				if len(targets) == 0 {
+					h.setError(fmt.Errorf("no other sessions to send to"))
+					return h, nil
+				}
+				h.sessionPickerDialog.SetSize(h.width, h.height)
+				h.sessionPickerDialog.ShowTargets(source, targets)
 			}
 		}
 		return h, nil
@@ -9925,7 +10894,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		entry := h.undoStack[len(h.undoStack)-1]
 		h.undoStack = h.undoStack[:len(h.undoStack)-1]
+		if entry.hubNodeID != "" {
+			return h, h.hubCommand(entry.hubNodeID, entry.hubNodeName, "undo_delete", nil)
+		}
 		inst := entry.instance
+		if inst == nil {
+			h.setError(fmt.Errorf("nothing to undo"))
+			return h, nil
+		}
 		return h, func() tea.Msg {
 			err := inst.Restart()
 			return sessionRestoredMsg{
@@ -10300,7 +11276,18 @@ func (h *Home) confirmAction() tea.Cmd {
 		nodeID := h.confirmDialog.GetHubNodeID()
 		nodeName := h.confirmDialog.GetRemoteName()
 		h.confirmDialog.Hide()
+		h.removeHubSessionFromCache(nodeID, sessionID)
+		h.rebuildFlatItems()
+		h.publishWebMenuSnapshot()
 		return h.hubCommand(nodeID, nodeName, "delete", map[string]string{"session_id": sessionID})
+	case ConfirmDeleteHubGroup:
+		groupPath := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		h.deleteHubGroupFromCache(nodeID, groupPath)
+		h.rebuildFlatItems()
+		return h.hubCommand(nodeID, nodeName, "group_delete", hub.GroupDeleteRequest{GroupPath: groupPath, Force: true})
 	case ConfirmCloseHubSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		nodeID := h.confirmDialog.GetHubNodeID()
@@ -10331,6 +11318,11 @@ func (h *Home) confirmAction() tea.Cmd {
 		h.removeHubSessionFromCache(nodeID, sessionID)
 		h.rebuildFlatItems()
 		return h.hubCommand(nodeID, nodeName, "remove", map[string]string{"session_id": sessionID})
+	case ConfirmRevokeHubNode:
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		return h.hubRevokeNodeCommand(nodeID, nodeName)
 	case ConfirmRemoveSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		if inst := h.getInstanceByID(sessionID); inst != nil {
@@ -10834,6 +11826,11 @@ func (h *Home) handleMCPDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		mcpUILog.Debug("dialog_has_changed", slog.Bool("changed", hasChanged))
 
 		if hasChanged {
+			if h.hubMCPDialogNodeID != "" {
+				cmd := h.applyHubMCPDialog()
+				h.mcpDialog.Hide()
+				return h, cmd
+			}
 			// Apply changes (saves state + writes .mcp.json)
 			if err := h.mcpDialog.Apply(); err != nil {
 				mcpUILog.Debug("dialog_apply_failed", slog.String("error", err.Error()))
@@ -10872,16 +11869,66 @@ func (h *Home) handleMCPDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		mcpUILog.Debug("dialog_hiding_without_restart")
 		h.mcpDialog.Hide()
+		h.clearHubMCPDialogState()
 		return h, nil
 
 	case "esc":
 		h.mcpDialog.Hide()
+		h.clearHubMCPDialogState()
 		return h, nil
 
 	default:
 		h.mcpDialog.Update(msg)
 		return h, nil
 	}
+}
+
+// handleHubAdminDialogKey handles keys when the hub admin dialog is visible.
+func (h *Home) handleHubAdminDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if h.hubAdminDialog == nil || !h.hubAdminDialog.IsVisible() {
+		return h, nil
+	}
+	if h.hubAdminDialog.IsCreatingInvite() {
+		if msg.String() == "enter" {
+			req, err := h.hubAdminDialog.CreateInviteRequest()
+			if err != nil {
+				h.hubAdminDialog.SetValidationError(err)
+				return h, nil
+			}
+			return h, h.hubAdminCreateInviteCommand(req)
+		}
+		var cmd tea.Cmd
+		h.hubAdminDialog, cmd = h.hubAdminDialog.Update(msg)
+		return h, cmd
+	}
+	switch msg.String() {
+	case "c":
+		h.hubAdminDialog.ShowCreateInvite(false)
+		return h, nil
+	case "C":
+		h.hubAdminDialog.ShowCreateInvite(true)
+		return h, nil
+	case "r":
+		return h, h.loadHubAdminDialog()
+	case "enter", "a":
+		kind, id, ok := h.hubAdminDialog.Selected()
+		if ok && kind == hubAdminItemTrust {
+			return h, h.hubAdminTrustDecisionCommand(id, true)
+		}
+	case "x", "d":
+		kind, id, ok := h.hubAdminDialog.Selected()
+		if ok && kind == hubAdminItemTrust {
+			return h, h.hubAdminTrustDecisionCommand(id, false)
+		}
+	case "D":
+		kind, id, ok := h.hubAdminDialog.Selected()
+		if ok && kind == hubAdminItemInvite {
+			return h, h.hubAdminRevokeInviteCommand(id)
+		}
+	}
+	var cmd tea.Cmd
+	h.hubAdminDialog, cmd = h.hubAdminDialog.Update(msg)
+	return h, cmd
 }
 
 // handlePluginDialogKey routes key events to the plugin manager dialog.
@@ -10894,7 +11941,13 @@ func (h *Home) handlePluginDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Persist if anything changed; otherwise just close.
 		if !h.pluginDialog.HasChanged() {
 			h.pluginDialog.Hide()
+			h.clearHubPluginDialogState()
 			return h, nil
+		}
+		if h.hubPluginDialogNodeID != "" {
+			cmd := h.applyHubPluginDialog()
+			h.pluginDialog.Hide()
+			return h, cmd
 		}
 		sessionID := h.pluginDialog.GetSessionID()
 		newNames := h.pluginDialog.SelectedPluginNames()
@@ -10929,6 +11982,7 @@ func (h *Home) handlePluginDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		h.pluginDialog.Hide()
+		h.clearHubPluginDialogState()
 		return h, nil
 
 	default:
@@ -11213,6 +12267,11 @@ func (h *Home) handleSkillDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		needsApply := h.skillDialog.NeedsApply()
 		if needsApply {
+			if h.hubSkillDialogNodeID != "" {
+				cmd := h.applyHubSkillDialog()
+				h.skillDialog.Hide()
+				return h, cmd
+			}
 			if err := h.skillDialog.Apply(); err != nil {
 				h.setError(err)
 				h.skillDialog.Hide()
@@ -11227,10 +12286,12 @@ func (h *Home) handleSkillDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		h.skillDialog.Hide()
+		h.clearHubSkillDialogState()
 		return h, nil
 
 	case "esc":
 		h.skillDialog.Hide()
+		h.clearHubSkillDialogState()
 		return h, nil
 
 	default:
@@ -11254,6 +12315,25 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case GroupDialogCreate:
 			name := h.groupDialog.GetValue()
 			if name != "" {
+				if h.cursor < len(h.flatItems) {
+					item := h.flatItems[h.cursor]
+					if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+						nodeID := item.HubNodeID
+						nodeName := item.HubNodeName
+						parentPath := ""
+						if h.groupDialog.HasParent() {
+							parentPath = h.groupDialog.GetParentPath()
+						}
+						defaultPath := h.groupDialog.GetDefaultPath()
+						req := hub.GroupCreateRequest{Name: name, ParentPath: parentPath, DefaultPath: defaultPath}
+						newPath := hubChildGroupPath(parentPath, name)
+						h.addOrUpdateHubGroupInCache(nodeID, newPath, hubGroupLeafName(newPath), defaultPath, 0)
+						h.rebuildFlatItems()
+						h.groupDialog.Hide()
+						h.lastGTime = time.Time{}
+						return h, h.hubCommand(nodeID, nodeName, "group_create", req)
+					}
+				}
 				// Seed the new-group default from [group_defaults].max_concurrent.
 				if cfg, _ := session.LoadUserConfig(); cfg != nil {
 					h.groupTree.DefaultMaxConcurrent = cfg.GroupDefaults.MaxConcurrent
@@ -11279,6 +12359,21 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case GroupDialogRename:
 			name := h.groupDialog.GetValue()
 			if name != "" {
+				if h.cursor < len(h.flatItems) {
+					item := h.flatItems[h.cursor]
+					if item.Type == session.ItemTypeHubGroup {
+						oldPath := h.groupDialog.GetGroupPath()
+						newPath := renamedHubGroupPath(oldPath, name)
+						h.renameHubGroupInCache(item.HubNodeID, oldPath, newPath, hubGroupLeafName(newPath))
+						h.rebuildFlatItems()
+						h.groupDialog.Hide()
+						h.lastGTime = time.Time{}
+						return h, h.hubCommand(item.HubNodeID, item.HubNodeName, "group_rename", hub.GroupRenameRequest{
+							GroupPath: oldPath,
+							Name:      name,
+						})
+					}
+				}
 				h.groupTree.RenameGroup(h.groupDialog.GetGroupPath(), name)
 				h.instancesMu.Lock()
 				h.instances = h.groupTree.GetAllInstances()
@@ -11286,11 +12381,51 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.rebuildFlatItems()
 				h.saveInstances()
 			}
-		case GroupDialogMove:
-			targetGroupPath := h.groupDialog.GetSelectedGroup()
-			if targetGroupPath != "" && h.cursor < len(h.flatItems) {
+		case GroupDialogRenameNode:
+			name := h.groupDialog.GetValue()
+			if name != "" && h.cursor < len(h.flatItems) {
 				item := h.flatItems[h.cursor]
-				if item.Type == session.ItemTypeSession {
+				if item.Type == session.ItemTypeHubNode {
+					nodeID := item.HubNodeID
+					oldName := item.HubNodeName
+					h.renameHubNodeInCache(nodeID, name)
+					h.rebuildFlatItems()
+					h.publishWebMenuSnapshot()
+					h.groupDialog.Hide()
+					h.lastGTime = time.Time{}
+					return h, h.hubRenameNodeCommand(nodeID, oldName, name)
+				}
+			}
+		case GroupDialogMove:
+			targetGroupPath, hasTarget := h.groupDialog.GetSelectedGroupOK()
+			if hasTarget && h.cursor < len(h.flatItems) {
+				item := h.flatItems[h.cursor]
+				if item.Type == session.ItemTypeGroup && item.Group != nil {
+					sourcePath := strings.Trim(strings.TrimSpace(item.Path), "/")
+					if err := h.groupTree.MoveGroupTo(sourcePath, targetGroupPath); err != nil {
+						h.groupDialog.SetError(err.Error())
+						return h, nil
+					}
+					newPath := reparentedWebGroupPath(sourcePath, targetGroupPath)
+					h.instancesMu.Lock()
+					h.instances = h.groupTree.GetAllInstances()
+					h.instancesMu.Unlock()
+					h.rebuildFlatItems()
+					h.moveCursorToGroup(newPath)
+					h.saveInstances()
+				} else if item.Type == session.ItemTypeHubGroup {
+					sourcePath := strings.Trim(strings.TrimSpace(item.HubGroupPath), "/")
+					newPath := reparentedWebGroupPath(sourcePath, targetGroupPath)
+					h.renameHubGroupInCache(item.HubNodeID, sourcePath, newPath, hubGroupLeafName(newPath))
+					h.rebuildFlatItems()
+					h.moveCursorToHubGroup(item.HubNodeID, newPath)
+					h.groupDialog.Hide()
+					h.lastGTime = time.Time{}
+					return h, h.hubCommand(item.HubNodeID, item.HubNodeName, "group_reparent", hub.GroupReparentRequest{
+						GroupPath:      sourcePath,
+						DestParentPath: targetGroupPath,
+					})
+				} else if item.Type == session.ItemTypeSession && targetGroupPath != "" {
 					h.groupTree.MoveSessionToGroup(item.Session, targetGroupPath)
 					h.instancesMu.Lock()
 					h.instances = h.groupTree.GetAllInstances()
@@ -11471,6 +12606,19 @@ func (h *Home) handleForkDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				h.forkDialog.Hide()
 				return h, result.cmd
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				req := hub.ForkSessionRequest{
+					SessionID:   item.HubSession.ID,
+					Title:       title,
+					GroupPath:   groupPath,
+					Worktree:    worktreeEnabled,
+					Branch:      branchName,
+					WithState:   h.forkDialog.IsWithStateEnabled(),
+					WithIgnored: h.forkDialog.IsWithStateAndGitignoredEnabled(),
+					Sandbox:     h.forkDialog.IsSandboxEnabled(),
+				}
+				h.forkDialog.Hide()
+				return h, h.hubCommand(item.HubNodeID, item.HubNodeName, "fork", req)
 			}
 		}
 		h.forkDialog.Hide()
@@ -13451,14 +14599,7 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 	// - GREEN (running) sessions stay green when attached/detached
 	// - YELLOW (waiting) sessions turn gray when user looks at them
 	// - Detach just lets polling take over naturally
-	if inst.GetStatusThreadSafe() == session.StatusWaiting {
-		tmuxSess.Acknowledge()
-		// Persist ack to SQLite so other instances see it
-		if db := statedb.GetGlobal(); db != nil {
-			_ = db.SetAcknowledged(inst.ID, true)
-		}
-		statusLog.Debug("acknowledged_on_attach", slog.String("title", inst.Title))
-	}
+	h.acknowledgeViewedSession(inst)
 
 	// Use tea.Exec with a custom command that runs our Attach method
 	// On return, immediately update all session statuses (don't reload from storage
@@ -13724,6 +14865,39 @@ func (h *Home) attachRemoteSession(remoteName, sessionID string) tea.Cmd {
 	})
 }
 
+func (h *Home) attachHubSandboxShell(item session.Item) tea.Cmd {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	hs := item.HubSession
+	if hs.Sandbox == nil || !hs.Sandbox.Enabled || strings.TrimSpace(hs.SandboxContainer) == "" {
+		h.setError(fmt.Errorf("hub session %q is not a running sandbox session", hs.Title))
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(hs.ID)
+	if nodeID == "" || sessionID == "" {
+		h.setError(fmt.Errorf("hub sandbox shell target is incomplete"))
+		return nil
+	}
+	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
+	h.isAttaching.Store(true)
+	return tea.Exec(hubSandboxShellAttachCmd{
+		client:    h.hubClient,
+		ctx:       h.ctx,
+		nodeID:    nodeID,
+		sessionID: sessionID,
+		size:      size,
+	}, func(err error) tea.Msg {
+		return hubAttachResultMsg{err: err}
+	})
+}
+
 // attachHubSession attaches to a hub-owned session through the connected hub
 // client, suspending the TUI while the requester-side terminal bridge runs.
 func (h *Home) attachHubSession(nodeID, sessionID string, restartBeforeAttach bool) tea.Cmd {
@@ -13735,6 +14909,27 @@ func (h *Home) attachHubSession(nodeID, sessionID string, restartBeforeAttach bo
 	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
 	h.isAttaching.Store(true)
 	return tea.Exec(hubAttachCmd{client: h.hubClient, ctx: h.ctx, nodeID: nodeID, sessionID: sessionID, size: size, restartBeforeAttach: restartBeforeAttach}, func(err error) tea.Msg {
+		return hubAttachResultMsg{err: err}
+	})
+}
+
+func (h *Home) attachHubSessionWindow(nodeID, sessionID string, windowIndex int, restartBeforeAttach bool) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	size := hub.TerminalSize{Cols: h.width, Rows: h.height}
+	h.isAttaching.Store(true)
+	return tea.Exec(hubAttachCmd{
+		client:              h.hubClient,
+		ctx:                 h.ctx,
+		nodeID:              nodeID,
+		sessionID:           sessionID,
+		windowIndex:         &windowIndex,
+		size:                size,
+		restartBeforeAttach: restartBeforeAttach,
+	}, func(err error) tea.Msg {
 		return hubAttachResultMsg{err: err}
 	})
 }
@@ -13751,9 +14946,708 @@ func (h *Home) hubCommand(nodeID, nodeName, action string, payload any) tea.Cmd 
 		h.setError(fmt.Errorf("hub action target is incomplete"))
 		return nil
 	}
+	sessionID := hubCommandPayloadSessionID(payload)
 	return func() tea.Msg {
 		_, err := h.hubClient.Command(h.ctx, nodeID, action, payload)
-		return hubActionResultMsg{action: action, nodeName: nodeName, err: err}
+		return hubActionResultMsg{action: action, nodeName: nodeName, nodeID: nodeID, sessionID: sessionID, err: err}
+	}
+}
+
+func (h *Home) hubRenameNodeCommand(nodeID, oldName, name string) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub node rename requires an admin hub node"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	name = strings.TrimSpace(name)
+	if nodeID == "" || name == "" {
+		h.setError(fmt.Errorf("hub node rename target is incomplete"))
+		return nil
+	}
+	return func() tea.Msg {
+		_, err := h.hubClient.RenameNode(h.ctx, nodeID, name)
+		return hubActionResultMsg{action: "node_rename", nodeName: oldName, nodeID: nodeID, err: err}
+	}
+}
+
+func (h *Home) setHubNodeAdmin(item session.Item, admin bool) tea.Cmd {
+	if item.Type != session.ItemTypeHubNode {
+		return nil
+	}
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub node admin changes require an admin hub node"))
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	nodeName := strings.TrimSpace(item.HubNodeName)
+	if nodeID == "" {
+		h.setError(fmt.Errorf("hub node admin target is incomplete"))
+		return nil
+	}
+	return h.hubNodeAdminCommand(nodeID, nodeName, admin)
+}
+
+func (h *Home) hubNodeAdminCommand(nodeID, nodeName string, admin bool) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		h.setError(fmt.Errorf("hub node admin target is incomplete"))
+		return nil
+	}
+	action := "node_promote"
+	if !admin {
+		action = "node_demote"
+	}
+	return func() tea.Msg {
+		var err error
+		if admin {
+			_, err = h.hubClient.PromoteNode(h.ctx, nodeID)
+		} else {
+			_, err = h.hubClient.DemoteNode(h.ctx, nodeID)
+		}
+		return hubActionResultMsg{action: action, nodeName: nodeName, nodeID: nodeID, nodeAdmin: &admin, err: err}
+	}
+}
+
+func (h *Home) hubRevokeNodeCommand(nodeID, nodeName string) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		h.setError(fmt.Errorf("hub node revoke target is incomplete"))
+		return nil
+	}
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub node revoke requires an admin hub node"))
+		return nil
+	}
+	return func() tea.Msg {
+		err := h.hubClient.RevokeNode(h.ctx, nodeID)
+		return hubActionResultMsg{action: "node_revoke", nodeName: nodeName, nodeID: nodeID, removeNode: err == nil, err: err}
+	}
+}
+
+func (h *Home) openHubAdminDialog() tea.Cmd {
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub admin management requires an admin hub node"))
+		return nil
+	}
+	return h.loadHubAdminDialog()
+}
+
+func (h *Home) loadHubAdminDialog() tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	return func() tea.Msg {
+		invites, inviteErr := h.hubClient.ListInvites(h.ctx)
+		trust, trustErr := h.hubClient.ListTrustRequests(h.ctx)
+		if inviteErr != nil {
+			return hubAdminDialogLoadedMsg{err: inviteErr}
+		}
+		if trustErr != nil {
+			return hubAdminDialogLoadedMsg{err: trustErr}
+		}
+		return hubAdminDialogLoadedMsg{invites: invites, trust: trust}
+	}
+}
+
+func (h *Home) hubAdminTrustDecisionCommand(nodeID string, allow bool) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		h.setError(fmt.Errorf("hub trust request target is incomplete"))
+		return nil
+	}
+	action := "trust_deny"
+	if allow {
+		action = "trust_allow"
+	}
+	return func() tea.Msg {
+		err := h.hubClient.TrustDecision(h.ctx, nodeID, allow)
+		return hubAdminActionResultMsg{action: action, id: nodeID, err: err}
+	}
+}
+
+func (h *Home) hubAdminCreateInviteCommand(req hub.CreateAdminInviteRequest) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	req.NodeName = strings.TrimSpace(req.NodeName)
+	if req.NodeName == "" {
+		h.setError(fmt.Errorf("hub invite node name is required"))
+		return nil
+	}
+	if req.TTLSeconds <= 0 {
+		h.setError(fmt.Errorf("hub invite ttl must be greater than zero"))
+		return nil
+	}
+	return func() tea.Msg {
+		resp, err := h.hubClient.CreateInvite(h.ctx, req)
+		if err != nil {
+			return hubAdminActionResultMsg{action: "invite_create", id: req.NodeName, err: err}
+		}
+		return hubAdminActionResultMsg{action: "invite_create", id: req.NodeName, inviteResp: &resp}
+	}
+}
+
+func (h *Home) hubAdminRevokeInviteCommand(inviteID string) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	inviteID = strings.TrimSpace(inviteID)
+	if inviteID == "" {
+		h.setError(fmt.Errorf("hub invite target is incomplete"))
+		return nil
+	}
+	return func() tea.Msg {
+		err := h.hubClient.RevokeInvite(h.ctx, inviteID)
+		return hubAdminActionResultMsg{action: "invite_revoke", id: inviteID, err: err}
+	}
+}
+
+func hubCommandPayloadSessionID(payload any) string {
+	switch p := payload.(type) {
+	case map[string]string:
+		return strings.TrimSpace(p["session_id"])
+	case hub.UpdateSessionRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.UpdateSessionPathsRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.ForkSessionRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.WorktreeFinishRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.MCPListRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.MCPMutateRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.MCPMoveRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.SkillListRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.SkillMutateRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.PluginListRequest:
+		return strings.TrimSpace(p.SessionID)
+	case hub.PluginMutateRequest:
+		return strings.TrimSpace(p.SessionID)
+	default:
+		return ""
+	}
+}
+
+func (h *Home) hubCreateCommand(nodeID, nodeName string, req hub.CreateSessionRequest) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		h.setError(fmt.Errorf("hub create target is incomplete"))
+		return nil
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	req.Tool = strings.TrimSpace(req.Tool)
+	req.ProjectPath = strings.TrimSpace(req.ProjectPath)
+	req.GroupPath = strings.Trim(strings.TrimSpace(req.GroupPath), "/")
+	req.ModelID = strings.TrimSpace(req.ModelID)
+	if req.ProjectPath == "" {
+		req.ProjectPath = "."
+	}
+	if req.GroupPath == "" {
+		req.GroupPath = session.DefaultGroupPath
+	}
+	return func() tea.Msg {
+		raw, err := h.hubClient.Command(h.ctx, nodeID, "create", req)
+		msg := hubActionResultMsg{
+			action:        "create",
+			nodeName:      nodeName,
+			nodeID:        nodeID,
+			createRequest: &req,
+			err:           err,
+		}
+		if err != nil || len(raw) == 0 {
+			return msg
+		}
+		var result struct {
+			SessionID string `json:"session_id"`
+		}
+		if decodeErr := json.Unmarshal(raw, &result); decodeErr != nil {
+			msg.err = fmt.Errorf("decode hub create result: %w", decodeErr)
+			return msg
+		}
+		msg.sessionID = strings.TrimSpace(result.SessionID)
+		return msg
+	}
+}
+
+func (h *Home) openHubMCPDialog(item session.Item) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	if item.HubSession == nil {
+		h.setError(fmt.Errorf("hub mcp session target is incomplete"))
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		h.setError(fmt.Errorf("hub mcp session target is incomplete"))
+		return nil
+	}
+	h.clearHubMCPDialogState()
+	h.setHubStatus("loading hub mcps")
+	return func() tea.Msg {
+		raw, err := h.hubClient.Command(h.ctx, nodeID, "mcp_list", hub.MCPListRequest{SessionID: sessionID})
+		if err != nil {
+			return hubMCPDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: err}
+		}
+		var resp hub.MCPListResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return hubMCPDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: fmt.Errorf("decode hub mcp list: %w", err)}
+		}
+		return hubMCPDialogLoadedMsg{
+			nodeID:       nodeID,
+			nodeName:     item.HubNodeName,
+			sessionID:    sessionID,
+			sessionTitle: item.HubSession.Title,
+			projectPath:  item.HubSession.ProjectPath,
+			tool:         item.HubSession.Tool,
+			attached: map[string][]string{
+				"local":  appendSortedStringCopy(resp.Local),
+				"global": appendSortedStringCopy(resp.Global),
+				"user":   appendSortedStringCopy(resp.User),
+			},
+		}
+	}
+}
+
+func (h *Home) applyHubMCPDialog() tea.Cmd {
+	nodeID := strings.TrimSpace(h.hubMCPDialogNodeID)
+	nodeName := strings.TrimSpace(h.hubMCPDialogNodeName)
+	sessionID := strings.TrimSpace(h.hubMCPDialogSessionID)
+	initial := cloneMCPNamesByScope(h.hubMCPDialogInitial)
+	current := cloneMCPNamesByScope(h.mcpDialog.AttachedNamesByScope())
+	if nodeID == "" || sessionID == "" || h.hubClient == nil {
+		h.clearHubMCPDialogState()
+		return func() tea.Msg {
+			return hubMCPApplyResultMsg{nodeName: nodeName, err: fmt.Errorf("hub mcp target is incomplete")}
+		}
+	}
+	return func() tea.Msg {
+		for _, scope := range []string{"local", "global", "user"} {
+			for _, name := range removedMCPNames(initial[scope], current[scope]) {
+				if _, err := h.hubClient.Command(h.ctx, nodeID, "mcp_detach", hub.MCPMutateRequest{SessionID: sessionID, Name: name, Scope: scope}); err != nil {
+					return hubMCPApplyResultMsg{nodeName: nodeName, err: err}
+				}
+			}
+			for _, name := range removedMCPNames(current[scope], initial[scope]) {
+				if _, err := h.hubClient.Command(h.ctx, nodeID, "mcp_attach", hub.MCPMutateRequest{SessionID: sessionID, Name: name, Scope: scope}); err != nil {
+					return hubMCPApplyResultMsg{nodeName: nodeName, err: err}
+				}
+			}
+		}
+		if _, err := h.hubClient.Command(h.ctx, nodeID, "restart", map[string]string{"session_id": sessionID}); err != nil {
+			return hubMCPApplyResultMsg{nodeName: nodeName, err: err}
+		}
+		return hubMCPApplyResultMsg{nodeName: nodeName}
+	}
+}
+
+func (h *Home) clearHubMCPDialogState() {
+	h.hubMCPDialogNodeID = ""
+	h.hubMCPDialogNodeName = ""
+	h.hubMCPDialogSessionID = ""
+	h.hubMCPDialogInitial = nil
+}
+
+func (h *Home) openHubPluginDialog(item session.Item) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	if item.HubSession == nil {
+		h.setError(fmt.Errorf("hub plugin session target is incomplete"))
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		h.setError(fmt.Errorf("hub plugin session target is incomplete"))
+		return nil
+	}
+	h.clearHubPluginDialogState()
+	h.setHubStatus("loading hub plugins")
+	return func() tea.Msg {
+		raw, err := h.hubClient.Command(h.ctx, nodeID, "plugin_list", hub.PluginListRequest{SessionID: sessionID})
+		if err != nil {
+			return hubPluginDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: err}
+		}
+		var resp hub.PluginListResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return hubPluginDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: fmt.Errorf("decode hub plugin list: %w", err)}
+		}
+		return hubPluginDialogLoadedMsg{
+			nodeID:                    nodeID,
+			nodeName:                  item.HubNodeName,
+			sessionID:                 sessionID,
+			sessionTitle:              item.HubSession.Title,
+			tool:                      item.HubSession.Tool,
+			catalog:                   resp.Catalog,
+			plugins:                   resp.Plugins,
+			channels:                  resp.Channels,
+			pluginChannelLinkDisabled: resp.PluginChannelLinkDisabled,
+		}
+	}
+}
+
+func (h *Home) applyHubPluginDialog() tea.Cmd {
+	nodeID := strings.TrimSpace(h.hubPluginDialogNodeID)
+	nodeName := strings.TrimSpace(h.hubPluginDialogNodeName)
+	sessionID := strings.TrimSpace(h.hubPluginDialogSessionID)
+	initial := appendSortedStringCopy(h.hubPluginDialogInitial)
+	current := appendSortedStringCopy(h.pluginDialog.SelectedPluginNames())
+	if nodeID == "" || sessionID == "" || h.hubClient == nil {
+		h.clearHubPluginDialogState()
+		return func() tea.Msg {
+			return hubPluginApplyResultMsg{nodeName: nodeName, err: fmt.Errorf("hub plugin target is incomplete")}
+		}
+	}
+	shouldRestart := h.hubSessionShouldRestartForPluginChange(nodeID, sessionID)
+	return func() tea.Msg {
+		for _, name := range removedMCPNames(initial, current) {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "plugin_detach", hub.PluginMutateRequest{SessionID: sessionID, Name: name}); err != nil {
+				return hubPluginApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		for _, name := range removedMCPNames(current, initial) {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "plugin_attach", hub.PluginMutateRequest{SessionID: sessionID, Name: name}); err != nil {
+				return hubPluginApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		if shouldRestart {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "restart", map[string]string{"session_id": sessionID}); err != nil {
+				return hubPluginApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		h.applyHubSessionFieldChanges(nodeID, sessionID, []hub.SessionFieldChange{{Field: session.FieldPlugins, Value: strings.Join(current, ",")}})
+		return hubPluginApplyResultMsg{nodeName: nodeName}
+	}
+}
+
+func (h *Home) hubSessionShouldRestartForPluginChange(nodeID, sessionID string) bool {
+	info, ok := h.findHubSessionInfo(nodeID, sessionID)
+	if !ok {
+		return true
+	}
+	status := session.Status(strings.TrimSpace(info.Status))
+	return status == session.StatusRunning || status == session.StatusWaiting || status == session.StatusIdle
+}
+
+func (h *Home) clearHubPluginDialogState() {
+	h.hubPluginDialogNodeID = ""
+	h.hubPluginDialogNodeName = ""
+	h.hubPluginDialogSessionID = ""
+	h.hubPluginDialogInitial = nil
+}
+
+func pluginDialogCatalogFromHub(entries []hub.PluginCatalogEntry) []PluginDialogCatalogItem {
+	out := make([]PluginDialogCatalogItem, 0, len(entries))
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, PluginDialogCatalogItem{
+			Name:         name,
+			ID:           entry.ID,
+			Description:  entry.Description,
+			EmitsChannel: entry.EmitsChannel,
+			AutoInstall:  entry.AutoInstall,
+		})
+	}
+	return out
+}
+
+func (h *Home) openHubSkillDialog(item session.Item) tea.Cmd {
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	if item.HubSession == nil {
+		h.setError(fmt.Errorf("hub skill session target is incomplete"))
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		h.setError(fmt.Errorf("hub skill session target is incomplete"))
+		return nil
+	}
+	h.clearHubSkillDialogState()
+	h.setHubStatus("loading hub skills")
+	return func() tea.Msg {
+		raw, err := h.hubClient.Command(h.ctx, nodeID, "skill_list", hub.SkillListRequest{SessionID: sessionID})
+		if err != nil {
+			return hubSkillDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: err}
+		}
+		var resp hub.SkillListResponse
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return hubSkillDialogLoadedMsg{nodeID: nodeID, nodeName: item.HubNodeName, sessionID: sessionID, err: fmt.Errorf("decode hub skill list: %w", err)}
+		}
+		return hubSkillDialogLoadedMsg{
+			nodeID:       nodeID,
+			nodeName:     item.HubNodeName,
+			sessionID:    sessionID,
+			sessionTitle: item.HubSession.Title,
+			projectPath:  item.HubSession.ProjectPath,
+			tool:         item.HubSession.Tool,
+			catalog:      resp.Catalog,
+			attached:     resp.Attached,
+		}
+	}
+}
+
+func (h *Home) applyHubSkillDialog() tea.Cmd {
+	nodeID := strings.TrimSpace(h.hubSkillDialogNodeID)
+	nodeName := strings.TrimSpace(h.hubSkillDialogNodeName)
+	sessionID := strings.TrimSpace(h.hubSkillDialogSessionID)
+	initial := cloneSkillCandidateMap(h.hubSkillDialogInitial)
+	current := skillCandidateMap(h.skillDialog.AttachedCandidates())
+	tool := strings.TrimSpace(h.skillDialog.tool)
+	if nodeID == "" || sessionID == "" || h.hubClient == nil {
+		h.clearHubSkillDialogState()
+		return func() tea.Msg {
+			return hubSkillApplyResultMsg{nodeName: nodeName, err: fmt.Errorf("hub skill target is incomplete")}
+		}
+	}
+	return func() tea.Msg {
+		for _, skill := range removedSkillCandidates(initial, current) {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "skill_detach", hub.SkillMutateRequest{SessionID: sessionID, Name: skill.Name, Source: skill.Source}); err != nil {
+				return hubSkillApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		for _, skill := range removedSkillCandidates(current, initial) {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "skill_attach", hub.SkillMutateRequest{SessionID: sessionID, Name: skill.Name, Source: skill.Source}); err != nil {
+				return hubSkillApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		if session.ShouldRestartProjectSkills(tool) {
+			if _, err := h.hubClient.Command(h.ctx, nodeID, "restart", map[string]string{"session_id": sessionID}); err != nil {
+				return hubSkillApplyResultMsg{nodeName: nodeName, err: err}
+			}
+		}
+		return hubSkillApplyResultMsg{nodeName: nodeName}
+	}
+}
+
+func (h *Home) clearHubSkillDialogState() {
+	h.hubSkillDialogNodeID = ""
+	h.hubSkillDialogNodeName = ""
+	h.hubSkillDialogSessionID = ""
+	h.hubSkillDialogInitial = nil
+}
+
+func skillCandidateMap(skills []session.SkillCandidate) map[string]session.SkillCandidate {
+	out := make(map[string]session.SkillCandidate, len(skills))
+	for _, skill := range skills {
+		key := skillCandidateKey(skill)
+		if key != "" {
+			out[key] = skill
+		}
+	}
+	return out
+}
+
+func cloneSkillCandidateMap(in map[string]session.SkillCandidate) map[string]session.SkillCandidate {
+	out := make(map[string]session.SkillCandidate, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func removedSkillCandidates(before, after map[string]session.SkillCandidate) []session.SkillCandidate {
+	removed := make([]session.SkillCandidate, 0)
+	for key, skill := range before {
+		if _, ok := after[key]; !ok {
+			removed = append(removed, skill)
+		}
+	}
+	sort.Slice(removed, func(i, j int) bool {
+		return strings.ToLower(removed[i].Name) < strings.ToLower(removed[j].Name)
+	})
+	return removed
+}
+
+func skillCandidateKey(skill session.SkillCandidate) string {
+	id := strings.TrimSpace(skill.ID)
+	if id != "" {
+		return id
+	}
+	name := strings.TrimSpace(skill.Name)
+	if name == "" {
+		return ""
+	}
+	source := strings.TrimSpace(skill.Source)
+	if source == "" {
+		return name
+	}
+	return source + "/" + name
+}
+
+func cloneMCPNamesByScope(in map[string][]string) map[string][]string {
+	out := map[string][]string{
+		"local":  nil,
+		"global": nil,
+		"user":   nil,
+	}
+	for _, scope := range []string{"local", "global", "user"} {
+		out[scope] = appendSortedStringCopy(in[scope])
+	}
+	return out
+}
+
+func appendSortedStringCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+func removedMCPNames(before, after []string) []string {
+	afterSet := make(map[string]bool, len(after))
+	for _, name := range after {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			afterSet[name] = true
+		}
+	}
+	var removed []string
+	for _, name := range before {
+		name = strings.TrimSpace(name)
+		if name != "" && !afterSet[name] {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
+func (h *Home) reorderHubGroup(item session.Item, direction string) tea.Cmd {
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	groupPath := strings.Trim(strings.TrimSpace(item.HubGroupPath), "/")
+	if nodeID == "" || groupPath == "" {
+		h.setError(fmt.Errorf("hub group reorder target is incomplete"))
+		return nil
+	}
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	h.reorderHubGroupInCache(nodeID, groupPath, direction, nil)
+	h.rebuildFlatItems()
+	h.moveCursorToHubGroup(nodeID, groupPath)
+	if h.cursor >= len(h.flatItems) {
+		h.cursor = max(0, len(h.flatItems)-1)
+	}
+	return h.hubCommand(nodeID, item.HubNodeName, "group_reorder", hub.GroupReorderRequest{
+		GroupPath: groupPath,
+		Direction: strings.ToLower(strings.TrimSpace(direction)),
+	})
+}
+
+func (h *Home) finishHubWorktreeSession(item session.Item) tea.Cmd {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	if nodeID == "" || sessionID == "" {
+		h.setError(fmt.Errorf("hub worktree finish target is incomplete"))
+		return nil
+	}
+	if strings.TrimSpace(item.HubSession.WorktreePath) == "" ||
+		strings.TrimSpace(item.HubSession.WorktreeRepoRoot) == "" ||
+		strings.TrimSpace(item.HubSession.WorktreeBranch) == "" {
+		h.setError(fmt.Errorf("hub session %q is not a worktree", item.HubSession.Title))
+		return nil
+	}
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	nodeName := item.HubNodeName
+	req := hub.WorktreeFinishRequest{SessionID: sessionID}
+	return func() tea.Msg {
+		_, err := h.hubClient.Command(h.ctx, nodeID, "worktree_finish", req)
+		return hubActionResultMsg{
+			action:          "worktree_finish",
+			nodeName:        nodeName,
+			nodeID:          nodeID,
+			sessionID:       sessionID,
+			removeOnSuccess: true,
+			err:             err,
+		}
+	}
+}
+
+func (h *Home) runHubWorktreeSetup(item session.Item) tea.Cmd {
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	sessionID := strings.TrimSpace(item.HubSession.ID)
+	sessionTitle := item.HubSession.Title
+	setupKey := hubPromptTarget(nodeID, sessionID)
+	if nodeID == "" || sessionID == "" {
+		return func() tea.Msg {
+			return worktreeSetupResultMsg{sessionID: setupKey, sessionTitle: sessionTitle, err: fmt.Errorf("hub worktree setup target is incomplete")}
+		}
+	}
+	if h.hubClient == nil {
+		h.setHubStatus("hub offline")
+		return func() tea.Msg {
+			return worktreeSetupResultMsg{sessionID: setupKey, sessionTitle: sessionTitle, err: fmt.Errorf("hub client is not connected")}
+		}
+	}
+	req := hub.WorktreeSetupRequest{SessionID: sessionID}
+	return func() tea.Msg {
+		_, err := h.hubClient.Command(h.ctx, nodeID, "worktree_setup", req)
+		return worktreeSetupResultMsg{sessionID: setupKey, sessionTitle: sessionTitle, err: err}
 	}
 }
 
@@ -13804,7 +15698,7 @@ func (h *Home) createHubSession(item session.Item) tea.Cmd {
 		ProjectPath: projectPath,
 		GroupPath:   groupPath,
 	}
-	return h.hubCommand(nodeID, nodeName, "create", req)
+	return h.hubCreateCommand(nodeID, nodeName, req)
 }
 
 func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
@@ -13825,6 +15719,90 @@ func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
 			h.hubSessions[nodeID] = snapshot
 			return
 		}
+	}
+}
+
+func (h *Home) renameHubNodeInCache(nodeID, name string) {
+	nodeID = strings.TrimSpace(nodeID)
+	name = strings.TrimSpace(name)
+	if nodeID == "" || name == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	if h.hubSessions == nil {
+		return
+	}
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(snapshot.Node.ID) == "" {
+		snapshot.Node.ID = nodeID
+	}
+	snapshot.Node.Name = name
+	h.hubSessions[nodeID] = snapshot
+	if nodeID == h.hubLocalNodeID {
+		h.hubLocalNodeName = name
+	}
+}
+
+func (h *Home) updateHubNodeAdminInCache(nodeID string, admin bool) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	if h.hubSessions == nil {
+		return
+	}
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(snapshot.Node.ID) == "" {
+		snapshot.Node.ID = nodeID
+	}
+	snapshot.Node.Admin = admin
+	h.hubSessions[nodeID] = snapshot
+	if nodeID == h.hubLocalNodeID {
+		h.hubLocalNodeAdmin = admin
+	}
+}
+
+func (h *Home) hubNodeIsAdmin(nodeID string) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return false
+	}
+	h.hubSessionsMu.RLock()
+	defer h.hubSessionsMu.RUnlock()
+	if h.hubSessions == nil {
+		return false
+	}
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return false
+	}
+	return snapshot.Node.Admin
+}
+
+func (h *Home) removeHubNodeFromCache(nodeID string) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	if h.hubSessions == nil {
+		return
+	}
+	delete(h.hubSessions, nodeID)
+	if nodeID == h.hubLocalNodeID {
+		h.hubLocalNodeID = ""
+		h.hubLocalNodeName = ""
+		h.hubLocalNodeAdmin = false
 	}
 }
 
@@ -13869,6 +15847,69 @@ func (h *Home) findHubSessionInfo(nodeID, sessionID string) (hub.SessionInfo, bo
 	return hub.SessionInfo{}, false
 }
 
+func (h *Home) addHubSessionToCache(nodeID, nodeName, sessionID string, req hub.CreateSessionRequest) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		nodeName = nodeID
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = sessionID
+	}
+	tool := strings.TrimSpace(req.Tool)
+	if tool == "" {
+		tool = session.GetDefaultTool()
+	}
+	if tool == "" {
+		tool = "claude"
+	}
+	groupPath := strings.Trim(strings.TrimSpace(req.GroupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	projectPath := strings.TrimSpace(req.ProjectPath)
+	if projectPath == "" {
+		projectPath = "."
+	}
+	now := time.Now().UTC()
+	info := hub.SessionInfo{
+		ID:          sessionID,
+		Title:       title,
+		Tool:        tool,
+		Status:      string(session.StatusRunning),
+		GroupPath:   groupPath,
+		ProjectPath: projectPath,
+		UpdatedAt:   &now,
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	if h.hubSessions == nil {
+		h.hubSessions = make(map[string]hub.NodeSessions)
+	}
+	snapshot := h.hubSessions[nodeID]
+	if strings.TrimSpace(snapshot.Node.ID) == "" {
+		snapshot.Node = hub.Node{ID: nodeID, Name: nodeName}
+	} else if strings.TrimSpace(snapshot.Node.Name) == "" {
+		snapshot.Node.Name = nodeName
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			snapshot.Sessions[i] = info
+			h.hubSessions[nodeID] = snapshot
+			h.cachedStatusCounts.valid.Store(false)
+			return
+		}
+	}
+	snapshot.Sessions = append(snapshot.Sessions, info)
+	h.hubSessions[nodeID] = snapshot
+	h.cachedStatusCounts.valid.Store(false)
+}
+
 func (h *Home) applyHubSessionFieldChanges(nodeID, sessionID string, changes []hub.SessionFieldChange) {
 	nodeID = strings.TrimSpace(nodeID)
 	sessionID = strings.TrimSpace(sessionID)
@@ -13895,11 +15936,27 @@ func (h *Home) applyHubSessionFieldChanges(nodeID, sessionID string, changes []h
 				snapshot.Sessions[i].ProjectPath = change.Value
 			case session.FieldNotes:
 				snapshot.Sessions[i].Notes = change.Value
+			case session.FieldPlugins:
+				snapshot.Sessions[i].Plugins = splitCommaList(change.Value)
+			case session.FieldChannels:
+				snapshot.Sessions[i].Channels = splitCommaList(change.Value)
 			}
 		}
 		h.hubSessions[nodeID] = snapshot
 		return
 	}
+}
+
+func splitCommaList(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (h *Home) updateHubSessionArchived(nodeID, sessionID string, archivedAt time.Time) {
@@ -13948,6 +16005,219 @@ func (h *Home) updateHubSessionGroup(nodeID, sessionID, groupPath string) {
 		if snapshot.Sessions[i].ID == sessionID {
 			snapshot.Sessions[i].GroupPath = groupPath
 			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func (h *Home) addOrUpdateHubGroupInCache(nodeID, groupPath, name, defaultPath string, maxConcurrent int) {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	if nodeID == "" {
+		return
+	}
+	if strings.TrimSpace(name) == "" {
+		name = hubGroupLeafName(groupPath)
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot := h.hubSessions[nodeID]
+	if strings.TrimSpace(snapshot.Node.ID) == "" {
+		snapshot.Node.ID = nodeID
+	}
+	for i := range snapshot.Groups {
+		if strings.Trim(strings.TrimSpace(snapshot.Groups[i].Path), "/") == groupPath {
+			snapshot.Groups[i].Name = name
+			snapshot.Groups[i].Path = groupPath
+			snapshot.Groups[i].DefaultPath = defaultPath
+			snapshot.Groups[i].MaxConcurrent = maxConcurrent
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+	snapshot.Groups = append(snapshot.Groups, hub.GroupInfo{
+		Name:          name,
+		Path:          groupPath,
+		Expanded:      true,
+		Order:         len(snapshot.Groups),
+		DefaultPath:   defaultPath,
+		MaxConcurrent: maxConcurrent,
+	})
+	h.hubSessions[nodeID] = snapshot
+}
+
+func (h *Home) renameHubGroupInCache(nodeID, oldPath, newPath, name string) {
+	nodeID = strings.TrimSpace(nodeID)
+	oldPath = strings.Trim(strings.TrimSpace(oldPath), "/")
+	newPath = strings.Trim(strings.TrimSpace(newPath), "/")
+	if oldPath == "" || newPath == "" || nodeID == "" {
+		return
+	}
+	if strings.TrimSpace(name) == "" {
+		name = hubGroupLeafName(newPath)
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Groups {
+		path := strings.Trim(strings.TrimSpace(snapshot.Groups[i].Path), "/")
+		switch {
+		case path == oldPath:
+			snapshot.Groups[i].Path = newPath
+			snapshot.Groups[i].Name = name
+		case strings.HasPrefix(path, oldPath+"/"):
+			snapshot.Groups[i].Path = newPath + path[len(oldPath):]
+		}
+	}
+	for i := range snapshot.Sessions {
+		path := strings.Trim(strings.TrimSpace(snapshot.Sessions[i].GroupPath), "/")
+		switch {
+		case path == oldPath:
+			snapshot.Sessions[i].GroupPath = newPath
+		case strings.HasPrefix(path, oldPath+"/"):
+			snapshot.Sessions[i].GroupPath = newPath + path[len(oldPath):]
+		}
+	}
+	h.hubSessions[nodeID] = snapshot
+}
+
+func (h *Home) deleteHubGroupFromCache(nodeID, groupPath string) {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if nodeID == "" || groupPath == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	groups := snapshot.Groups[:0]
+	for _, group := range snapshot.Groups {
+		path := strings.Trim(strings.TrimSpace(group.Path), "/")
+		if path == groupPath || strings.HasPrefix(path, groupPath+"/") {
+			continue
+		}
+		groups = append(groups, group)
+	}
+	snapshot.Groups = groups
+	for i := range snapshot.Sessions {
+		path := strings.Trim(strings.TrimSpace(snapshot.Sessions[i].GroupPath), "/")
+		if path == groupPath || strings.HasPrefix(path, groupPath+"/") {
+			snapshot.Sessions[i].GroupPath = session.DefaultGroupPath
+		}
+	}
+	h.hubSessions[nodeID] = snapshot
+}
+
+func (h *Home) reorderHubGroupInCache(nodeID, groupPath, direction string, position *int) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if nodeID == "" || groupPath == "" {
+		return false
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return false
+	}
+	targetIdx := -1
+	for i := range snapshot.Groups {
+		snapshot.Groups[i].Path = strings.Trim(strings.TrimSpace(snapshot.Groups[i].Path), "/")
+		if snapshot.Groups[i].Path == "" {
+			snapshot.Groups[i].Path = session.DefaultGroupPath
+		}
+		if snapshot.Groups[i].Path == groupPath {
+			targetIdx = i
+		}
+	}
+	if targetIdx < 0 {
+		snapshot.Groups = append(snapshot.Groups, hub.GroupInfo{
+			Name:     hubGroupLeafName(groupPath),
+			Path:     groupPath,
+			Expanded: true,
+			Order:    len(snapshot.Groups),
+		})
+		targetIdx = len(snapshot.Groups) - 1
+	}
+	parent := hubParentGroupPath(groupPath)
+	level := strings.Count(groupPath, "/")
+	siblingIdxs := make([]int, 0)
+	for i := range snapshot.Groups {
+		path := strings.Trim(strings.TrimSpace(snapshot.Groups[i].Path), "/")
+		if hubParentGroupPath(path) == parent && strings.Count(path, "/") == level {
+			siblingIdxs = append(siblingIdxs, i)
+		}
+	}
+	sort.SliceStable(siblingIdxs, func(i, j int) bool {
+		left := snapshot.Groups[siblingIdxs[i]]
+		right := snapshot.Groups[siblingIdxs[j]]
+		if left.Order != right.Order {
+			return left.Order < right.Order
+		}
+		return left.Path < right.Path
+	})
+	current := -1
+	for i, idx := range siblingIdxs {
+		if idx == targetIdx {
+			current = i
+			break
+		}
+	}
+	if current < 0 {
+		return false
+	}
+	var target int
+	if position != nil {
+		target = *position
+	} else {
+		switch strings.ToLower(strings.TrimSpace(direction)) {
+		case "up":
+			target = current - 1
+		case "down":
+			target = current + 1
+		default:
+			return false
+		}
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target >= len(siblingIdxs) {
+		target = len(siblingIdxs) - 1
+	}
+	if target == current {
+		h.hubSessions[nodeID] = snapshot
+		return true
+	}
+	moved := siblingIdxs[current]
+	siblingIdxs = append(siblingIdxs[:current], siblingIdxs[current+1:]...)
+	siblingIdxs = append(siblingIdxs[:target], append([]int{moved}, siblingIdxs[target:]...)...)
+	minOrder := snapshot.Groups[siblingIdxs[0]].Order
+	for _, idx := range siblingIdxs[1:] {
+		if snapshot.Groups[idx].Order < minOrder {
+			minOrder = snapshot.Groups[idx].Order
+		}
+	}
+	for order, idx := range siblingIdxs {
+		snapshot.Groups[idx].Order = minOrder + order
+	}
+	h.hubSessions[nodeID] = snapshot
+	return true
+}
+
+func (h *Home) moveCursorToHubGroup(nodeID, groupPath string) {
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeHubGroup && item.HubNodeID == nodeID && item.HubGroupPath == groupPath {
+			h.cursor = i
 			return
 		}
 	}
@@ -14019,6 +16289,7 @@ type hubAttachCmd struct {
 	ctx                 context.Context
 	nodeID              string
 	sessionID           string
+	windowIndex         *int
 	size                hub.TerminalSize
 	restartBeforeAttach bool
 }
@@ -14039,12 +16310,50 @@ func (h hubAttachCmd) Run() error {
 			return fmt.Errorf("restart hub session before attach: %w", err)
 		}
 	}
+	if h.windowIndex != nil {
+		return h.client.AttachWindow(ctx, h.nodeID, h.sessionID, *h.windowIndex, h.size)
+	}
 	return h.client.Attach(ctx, h.nodeID, h.sessionID, h.size)
 }
 
 func (h hubAttachCmd) SetStdin(reader io.Reader)  {}
 func (h hubAttachCmd) SetStdout(writer io.Writer) {}
 func (h hubAttachCmd) SetStderr(writer io.Writer) {}
+
+type hubSandboxShellAttachCmd struct {
+	client    hubClientAPI
+	ctx       context.Context
+	nodeID    string
+	sessionID string
+	size      hub.TerminalSize
+}
+
+func (h hubSandboxShellAttachCmd) Run() error {
+	ctx := h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if h.client == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	raw, err := h.client.Command(ctx, h.nodeID, "sandbox_shell", hub.SandboxShellRequest{SessionID: h.sessionID})
+	if err != nil {
+		return fmt.Errorf("open hub sandbox shell: %w", err)
+	}
+	var resp hub.SandboxShellResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("decode hub sandbox shell response: %w", err)
+	}
+	attachSessionID := strings.TrimSpace(resp.AttachSessionID)
+	if attachSessionID == "" {
+		return fmt.Errorf("hub sandbox shell returned no attach session")
+	}
+	return h.client.Attach(ctx, h.nodeID, attachSessionID, h.size)
+}
+
+func (h hubSandboxShellAttachCmd) SetStdin(reader io.Reader)  {}
+func (h hubSandboxShellAttachCmd) SetStdout(writer io.Writer) {}
+func (h hubSandboxShellAttachCmd) SetStderr(writer io.Writer) {}
 
 func (h *Home) openImportDialog() tea.Msg {
 	msg := importSourcesLoadedMsg{}
@@ -14887,6 +17196,9 @@ func (h *Home) View() string {
 	}
 	if h.confirmDialog.IsVisible() {
 		return h.confirmDialog.View()
+	}
+	if h.hubAdminDialog != nil && h.hubAdminDialog.IsVisible() {
+		return h.hubAdminDialog.View()
 	}
 	if h.mcpDialog.IsVisible() {
 		return h.mcpDialog.View()
@@ -16608,8 +18920,8 @@ func (h *Home) fitCuratedHints(contextHints, globalHints []footerHint) []footerH
 // maxCuratedContextHints caps how many context-relevant shortcuts the curated
 // footer advertises for the selected row. The settings and help keys are added
 // on top of these by renderHelpBarCurated, so the bar stays short while still
-// surfacing the two or three most useful actions for what is highlighted.
-const maxCuratedContextHints = 3
+// surfacing the most useful actions for what is highlighted.
+const maxCuratedContextHints = 4
 
 // curatedContextHints returns up to maxCuratedContextHints context-relevant
 // hints for the selected row, in priority order. It advertises the actions most
@@ -16687,6 +18999,15 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 
 	case session.ItemTypeHubNode:
 		add(newQuick, "new")
+		if h.hubLocalNodeAdmin {
+			add(h.actionKey(hotkeyRename), "rename")
+			if h.hubNodeIsAdmin(item.HubNodeID) {
+				add("⇧←", "demote")
+			} else {
+				add("⇧→", "promote")
+			}
+			add("d", "revoke")
+		}
 
 	case session.ItemTypeHubSession:
 		add("⏎", "attach")
@@ -17770,11 +20091,15 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 		if nodeName == "" {
 			nodeName = "hub"
 		}
+		hints := []string{"Press n to create a session on this node", "Press N to quick-create on this node"}
+		if h.hubLocalNodeAdmin {
+			hints = append(hints, "r rename · Shift+Right promote · Shift+Left demote · d revoke")
+		}
 		return renderEmptyStateResponsive(EmptyStateConfig{
 			Icon:     "⬡",
 			Title:    nodeName,
 			Subtitle: "Hub node — no visible sessions",
-			Hints:    []string{"Press n to create a session on this node", "Press N to quick-create on this node"},
+			Hints:    hints,
 		}, width, height)
 	}
 	if item.Type == session.ItemTypeHubGroup {
@@ -17794,30 +20119,22 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 
 	var b strings.Builder
 	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent)
-	b.WriteString(nameStyle.Render(hs.Title))
+	title := hs.Title
+	if item.Type == session.ItemTypeWindow {
+		title = fmt.Sprintf("Window %d: %s", item.WindowIndex, item.WindowName)
+	}
+	b.WriteString(nameStyle.Render(title))
 	b.WriteString("  ")
 
-	statusColor := ColorTextDim
-	statusIcon := "○"
-	switch session.Status(strings.TrimSpace(hs.Status)) {
-	case session.StatusRunning, session.StatusStarting:
-		statusIcon = "●"
-		statusColor = ColorGreen
-	case session.StatusWaiting:
-		statusIcon = "◐"
-		statusColor = ColorYellow
-	case session.StatusError:
-		statusIcon = "✗"
-		statusColor = ColorRed
-	case session.StatusStopped:
-		statusIcon = "■"
-		statusColor = ColorTextDim
-	}
-	b.WriteString(lipgloss.NewStyle().Foreground(statusColor).Render(statusIcon + " " + strings.TrimSpace(hs.Status)))
+	statusIcon, statusStyle := rowStatusGlyph(session.Status(strings.TrimSpace(hs.Status)), session.Substate(strings.TrimSpace(hs.Substate)), hubSessionArchived(*hs))
+	b.WriteString(statusStyle.Render(statusIcon + " " + strings.TrimSpace(hs.Status)))
 	b.WriteString("\n\n")
 
 	dimStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
 	b.WriteString(dimStyle.Render("Hub:    ") + item.HubNodeName + "\n")
+	if item.Type == session.ItemTypeWindow {
+		b.WriteString(dimStyle.Render("Parent: ") + hs.Title + "\n")
+	}
 	if hs.ProjectPath != "" {
 		b.WriteString(dimStyle.Render("Path:   ") + hs.ProjectPath + "\n")
 	}
@@ -18062,6 +20379,10 @@ func (h *Home) renderHubNodeItem(b *strings.Builder, item session.Item, selected
 	nameStyle := GroupNameStyle
 	countStyle := GroupCountStyle
 	nodeIcon := GroupExpandStyle.Render("⬡")
+	role := " user"
+	if h.hubNodeIsAdmin(item.HubNodeID) {
+		role = " admin"
+	}
 	if selected {
 		nameStyle = GroupNameSelStyle
 		countStyle = GroupCountSelStyle
@@ -18073,7 +20394,7 @@ func (h *Home) renderHubNodeItem(b *strings.Builder, item session.Item, selected
 		strings.Repeat(" ", leftGutterWidth),
 		nodeIcon,
 		nameStyle.Render(label),
-		countStyle.Render(" (0)"),
+		countStyle.Render(" ("+strings.TrimSpace(role)+")"),
 	))
 }
 
@@ -18123,29 +20444,7 @@ func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selec
 		return
 	}
 
-	statusIcon := "○"
-	statusColor := lipgloss.Color("8")
-	if hubSessionArchived(*hs) {
-		statusIcon = "■"
-		statusColor = lipgloss.Color("8")
-	} else {
-		switch session.Status(strings.TrimSpace(hs.Status)) {
-		case session.StatusRunning, session.StatusStarting:
-			statusIcon = "●"
-			statusColor = lipgloss.Color("2")
-		case session.StatusWaiting:
-			statusIcon = "◉"
-			statusColor = lipgloss.Color("3")
-		case session.StatusError:
-			statusIcon = "✗"
-			statusColor = lipgloss.Color("1")
-		case session.StatusStopped:
-			statusIcon = "■"
-			statusColor = lipgloss.Color("8")
-		}
-	}
-
-	sStyle := lipgloss.NewStyle().Foreground(statusColor)
+	statusIcon, sStyle := rowStatusGlyph(session.Status(strings.TrimSpace(hs.Status)), session.Substate(strings.TrimSpace(hs.Substate)), hubSessionArchived(*hs))
 	titleStyle := lipgloss.NewStyle().Foreground(ColorText)
 	if selected {
 		sStyle = SessionStatusSelStyle
@@ -18165,6 +20464,18 @@ func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selec
 		}
 		toolStr = tStyle.Render(" " + hs.Tool)
 	}
+	windowChevron := " "
+	if h.hubSessionHasWindows(item) {
+		chevronChar := "▾"
+		if h.windowsCollapsed[web.HubSessionWebID(item.HubNodeID, hs.ID)] {
+			chevronChar = "▸"
+		}
+		chevronStyle := TreeConnectorStyle
+		if selected {
+			chevronStyle = TreeConnectorSelStyle
+		}
+		windowChevron = chevronStyle.Render(chevronChar)
+	}
 
 	treeConnector := treeBranch
 	if item.IsLastInGroup {
@@ -18178,10 +20489,11 @@ func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selec
 		treeStyle = TreeConnectorSelStyle
 	}
 
-	b.WriteString(fmt.Sprintf("%s%s%s %s %s%s\n",
+	b.WriteString(fmt.Sprintf("%s%s%s%s %s %s%s\n",
 		strings.Repeat(" ", leftGutterWidth),
 		selPrefix,
 		treeStyle.Render(treeConnector),
+		windowChevron,
 		sStyle.Render(statusIcon),
 		titleStyle.Render(titleStr),
 		toolStr,
@@ -18591,7 +20903,8 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		return h.renderGroupPreview(item.Group, width, height)
 	}
 
-	if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+	if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession ||
+		(item.Type == session.ItemTypeWindow && item.HubSession != nil) {
 		return h.renderHubPreview(item, width, height)
 	}
 
@@ -20256,45 +22569,240 @@ func (h *Home) copySessionOutput(inst *session.Instance) tea.Cmd {
 	}
 }
 
-// sendOutputToSession returns a tea.Cmd that sends the source session's output to the target.
-func (h *Home) sendOutputToSession(source, target *session.Instance) tea.Cmd {
+func hubSessionCopyTitle(nodeName string, hs *session.HubSessionInfo) string {
+	if hs == nil {
+		return strings.TrimSpace(nodeName)
+	}
+	title := strings.TrimSpace(hs.Title)
+	nodeName = strings.TrimSpace(nodeName)
+	if title == "" {
+		title = strings.TrimSpace(hs.ID)
+	}
+	if nodeName == "" {
+		return title
+	}
+	if title == "" {
+		return nodeName
+	}
+	return fmt.Sprintf("%s/%s", nodeName, title)
+}
+
+// copyHubSessionOutput mirrors copySessionOutput for projected hub sessions,
+// using the owner's preview command instead of local tmux/session state.
+func (h *Home) copyHubSessionOutput(nodeID, nodeName string, hs *session.HubSessionInfo) tea.Cmd {
 	return func() tea.Msg {
-		content, err := getSessionContent(source)
+		if hs == nil {
+			return copyResultMsg{err: fmt.Errorf("no hub session selected")}
+		}
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		content, err := h.hubPreviewContent(ctx, nodeID, hs.ID)
+		if err != nil {
+			return copyResultMsg{err: err}
+		}
+
+		termInfo := tmux.GetTerminalInfo()
+		result, err := clipboard.Copy(content, termInfo.SupportsOSC52)
+		if err != nil {
+			return copyResultMsg{err: fmt.Errorf("clipboard: %w", err)}
+		}
+		return copyResultMsg{
+			sessionTitle: hubSessionCopyTitle(nodeName, hs),
+			lineCount:    result.LineCount,
+		}
+	}
+}
+
+func (h *Home) startHubCodeBlockCopy(nodeID, nodeName string, hs *session.HubSessionInfo) tea.Cmd {
+	if hs == nil {
+		h.setError(fmt.Errorf("no hub session selected"))
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		content, err := h.hubPreviewContent(ctx, nodeID, hs.ID)
+		if err != nil {
+			return hubCodeBlockBlocksMsg{err: fmt.Errorf("no output to extract code from: %w", err)}
+		}
+		blocks := extractCodeBlocks(content)
+		switch len(blocks) {
+		case 0:
+			return hubCodeBlockBlocksMsg{err: fmt.Errorf("no code blocks found in this session's output")}
+		case 1:
+			block := blocks[0]
+			if strings.TrimSpace(block.Content) == "" {
+				return copyResultMsg{err: fmt.Errorf("empty code block")}
+			}
+			termInfo := tmux.GetTerminalInfo()
+			result, err := clipboard.Copy(block.Content, termInfo.SupportsOSC52)
+			if err != nil {
+				return copyResultMsg{err: fmt.Errorf("clipboard: %w", err)}
+			}
+			return copyResultMsg{
+				sessionTitle: hubSessionCopyTitle(nodeName, hs),
+				lineCount:    result.LineCount,
+			}
+		default:
+			return hubCodeBlockBlocksMsg{
+				sessionTitle: hubSessionCopyTitle(nodeName, hs),
+				blocks:       blocks,
+			}
+		}
+	}
+}
+
+func (h *Home) sendOutputTargets(source sendOutputTarget) []sendOutputTarget {
+	var targets []sendOutputTarget
+
+	h.instancesMu.RLock()
+	for _, inst := range h.instances {
+		if inst == nil {
+			continue
+		}
+		target := localSendOutputTarget(inst)
+		if target.sameSession(source) || target.status == session.StatusError || target.status == session.StatusStopped {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	h.instancesMu.RUnlock()
+
+	h.hubSessionsMu.RLock()
+	nodeIDs := make([]string, 0, len(h.hubSessions))
+	for nodeID := range h.hubSessions {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Slice(nodeIDs, func(i, j int) bool {
+		left := h.hubSessions[nodeIDs[i]]
+		right := h.hubSessions[nodeIDs[j]]
+		leftName := strings.TrimSpace(left.Node.Name)
+		if leftName == "" {
+			leftName = nodeIDs[i]
+		}
+		rightName := strings.TrimSpace(right.Node.Name)
+		if rightName == "" {
+			rightName = nodeIDs[j]
+		}
+		if leftName == rightName {
+			return nodeIDs[i] < nodeIDs[j]
+		}
+		return leftName < rightName
+	})
+	for _, nodeID := range nodeIDs {
+		snapshot := h.hubSessions[nodeID]
+		sessions := append([]hub.SessionInfo(nil), snapshot.Sessions...)
+		sort.SliceStable(sessions, func(i, j int) bool {
+			if sessions[i].Title == sessions[j].Title {
+				return sessions[i].ID < sessions[j].ID
+			}
+			return sessions[i].Title < sessions[j].Title
+		})
+		for _, info := range sessions {
+			hubInfo := session.HubSessionInfo{
+				ID:     info.ID,
+				Title:  info.Title,
+				Tool:   info.Tool,
+				Status: info.Status,
+			}
+			target := hubSendOutputTarget(nodeID, hubNodeDisplayName(snapshot), &hubInfo)
+			if target.sameSession(source) || target.status == session.StatusError || target.status == session.StatusStopped {
+				continue
+			}
+			targets = append(targets, target)
+		}
+	}
+	h.hubSessionsMu.RUnlock()
+
+	return targets
+}
+
+func (h *Home) sendOutputContent(target sendOutputTarget) (content, title string, err error) {
+	switch target.kind {
+	case sendOutputTargetLocal:
+		if target.local == nil {
+			return "", "", fmt.Errorf("source session not found")
+		}
+		content, err := getSessionContent(target.local)
+		return content, target.local.Title, err
+	case sendOutputTargetHub:
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		content, err := h.hubPreviewContent(ctx, target.hubNodeID, target.hubSessionID)
+		return content, target.title, err
+	default:
+		return "", "", fmt.Errorf("unsupported source session")
+	}
+}
+
+func (h *Home) sendPromptToTarget(target sendOutputTarget, message string) error {
+	switch target.kind {
+	case sendOutputTargetLocal:
+		if target.local == nil {
+			return fmt.Errorf("target session not found")
+		}
+		tmuxSession := target.local.GetTmuxSession()
+		if tmuxSession == nil {
+			return fmt.Errorf("target session has no tmux pane")
+		}
+		if err := tmuxSession.SendKeysChunked(message); err != nil {
+			return fmt.Errorf("send failed: %w", err)
+		}
+		return nil
+	case sendOutputTargetHub:
+		if h.hubClient == nil {
+			return fmt.Errorf("hub client is not connected")
+		}
+		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
+		defer cancel()
+		_, err := h.hubClient.Command(ctx, target.hubNodeID, "send", map[string]string{
+			"session_id": target.hubSessionID,
+			"message":    message,
+		})
+		return err
+	default:
+		return fmt.Errorf("unsupported target session")
+	}
+}
+
+func (h *Home) sendOutputToTarget(source, target sendOutputTarget) tea.Cmd {
+	return func() tea.Msg {
+		content, title, err := h.sendOutputContent(source)
 		if err != nil {
 			return sendOutputResultMsg{
-				targetTitle: target.Title,
+				targetTitle: target.displayTitle(),
 				err:         err,
 			}
 		}
-
-		// Truncate if too large
-		if len(content) > maxTransferSize {
-			content = content[:maxTransferSize] + "\n[Truncated at 500KB]"
-		}
-
-		// Wrap with header/footer
-		wrapped := fmt.Sprintf("--- Output from [%s] ---\n%s\n--- End output from [%s] ---\n",
-			source.Title, content, source.Title)
-
-		tmuxSession := target.GetTmuxSession()
-		if tmuxSession == nil {
+		content = strings.TrimSpace(content)
+		if content == "" {
 			return sendOutputResultMsg{
-				targetTitle: target.Title,
-				err:         fmt.Errorf("target session has no tmux pane"),
+				targetTitle: target.displayTitle(),
+				err:         fmt.Errorf("no output available for source session"),
 			}
 		}
 
-		if err := tmuxSession.SendKeysChunked(wrapped); err != nil {
+		if len(content) > maxTransferSize {
+			content = content[:maxTransferSize] + "\n[Truncated at 500KB]"
+		}
+		title = strings.TrimSpace(title)
+		if title == "" {
+			title = source.displayTitle()
+		}
+		wrapped := fmt.Sprintf("--- Output from [%s] ---\n%s\n--- End output from [%s] ---\n",
+			title, content, title)
+
+		if err := h.sendPromptToTarget(target, wrapped); err != nil {
 			return sendOutputResultMsg{
-				targetTitle: target.Title,
-				err:         fmt.Errorf("send failed: %w", err),
+				targetTitle: target.displayTitle(),
+				err:         err,
 			}
 		}
 
 		lineCount := strings.Count(content, "\n")
 		return sendOutputResultMsg{
-			sourceTitle: source.Title,
-			targetTitle: target.Title,
+			sourceTitle: source.displayTitle(),
+			targetTitle: target.displayTitle(),
 			lineCount:   lineCount,
 		}
 	}
@@ -20304,11 +22812,11 @@ func (h *Home) sendOutputToSession(source, target *session.Instance) tea.Cmd {
 func (h *Home) handleSessionPickerDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		selected := h.sessionPickerDialog.GetSelected()
-		source := h.sessionPickerDialog.GetSource()
+		selected := h.sessionPickerDialog.GetSelectedTarget()
+		source := h.sessionPickerDialog.GetSourceTarget()
 		h.sessionPickerDialog.Hide()
-		if selected != nil && source != nil {
-			return h, h.sendOutputToSession(source, selected)
+		if !selected.isZero() && !source.isZero() {
+			return h, h.sendOutputToTarget(source, selected)
 		}
 		return h, nil
 	case "esc":
@@ -20585,22 +23093,6 @@ func (h *Home) finishWorktree(inst *session.Instance, sessionID, sessionTitle, b
 			merged:       merged,
 		}
 	}
-}
-
-// getOtherActiveSessions returns sessions excluding the given ID and error/stopped-status sessions.
-func (h *Home) getOtherActiveSessions(excludeID string) []*session.Instance {
-	var result []*session.Instance
-	for _, inst := range h.instances {
-		if inst.ID == excludeID {
-			continue
-		}
-		s := inst.GetStatusThreadSafe()
-		if s == session.StatusError || s == session.StatusStopped {
-			continue
-		}
-		result = append(result, inst)
-	}
-	return result
 }
 
 // getSessionContent retrieves displayable content from a session.

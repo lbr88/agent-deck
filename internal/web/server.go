@@ -140,6 +140,8 @@ type SessionMutator interface {
 	CreateGroup(name, parentPath string) (string, error)
 	RenameGroup(groupPath, newName string) error
 	DeleteGroup(groupPath string) error
+	ReparentGroup(groupPath, destParentPath string) (string, error)
+	ReorderGroup(groupPath, direction string, position *int) (int, int, error)
 	// FinishWorktree merges (or skips), removes the worktree, optionally
 	// deletes the source branch, kills the tmux session, and removes the
 	// session from storage. Mirrors the TUI W/shift+w hotkey and the
@@ -149,12 +151,33 @@ type SessionMutator interface {
 	FinishWorktree(sessionID string, opts WorktreeFinishOptions) (WorktreeFinishResult, error)
 }
 
+type SessionOptionsMutator interface {
+	CreateSessionWithOptions(req CreateSessionRequest) (string, error)
+}
+
+type SessionOutputProvider interface {
+	SessionOutput(sessionID string) (SessionOutputResponse, error)
+}
+
 type HubSessionCreator interface {
 	CreateHubSession(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error)
 }
 
+type SessionForkOptionsMutator interface {
+	ForkSessionWithOptions(sessionID string, req ForkSessionRequest) (string, error)
+}
+
 type HubTerminalAttacher interface {
 	OpenHubTerminal(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error)
+	OpenHubSandboxShellTerminal(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) (hub.AttachStream, error)
+}
+
+type LocalTerminalAcknowledger interface {
+	AcknowledgeLocalTerminal(sessionID string) error
+}
+
+type LocalSandboxShellOpener interface {
+	OpenLocalSandboxShell(ctx context.Context, sessionID string) (tmuxSessionName, tmuxSocketName string, err error)
 }
 
 // Server wraps an HTTP server for Agent Deck web mode.
@@ -173,6 +196,7 @@ type Server struct {
 	costStore       *costs.Store
 	mutator         SessionMutator
 	skills          SkillsService
+	plugins         PluginManager
 	mcpMgr          MCPManager
 	mutationLimiter *rate.Limiter
 
@@ -205,6 +229,9 @@ func NewServer(cfg Config) *Server {
 		menuSubscribers:  make(map[chan struct{}]struct{}),
 		mutationLimiter:  mutationLimiter,
 		hookStatusLoader: defaultLoadHookStatuses,
+	}
+	if mmd, ok := menuData.(*MemoryMenuData); ok {
+		mmd.SetOnChange(s.notifyMenuChangedWithoutInvalidation)
 	}
 	s.baseCtx, s.cancelBase = context.WithCancel(context.Background())
 	webLog := logging.ForComponent(logging.CompWeb)
@@ -244,6 +271,18 @@ func NewServer(cfg Config) *Server {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/api/menu", s.handleMenu)
+	mux.HandleFunc("GET /api/hub/nodes", s.handleHubNodesAdmin)
+	mux.HandleFunc("PATCH /api/hub/nodes/{id}", s.handleHubNodeAdminByID)
+	mux.HandleFunc("POST /api/hub/nodes/{id}/promote", s.handleHubNodeAdminAction)
+	mux.HandleFunc("POST /api/hub/nodes/{id}/demote", s.handleHubNodeAdminAction)
+	mux.HandleFunc("DELETE /api/hub/nodes/{id}", s.handleHubNodeAdminAction)
+	mux.HandleFunc("GET /api/hub/invites", s.handleHubInvitesAdmin)
+	mux.HandleFunc("POST /api/hub/invites", s.handleHubInvitesAdmin)
+	mux.HandleFunc("DELETE /api/hub/invites/{id}", s.handleHubInviteRevokeAdmin)
+	mux.HandleFunc("POST /api/hub/invites/{id}/revoke", s.handleHubInviteRevokeAdmin)
+	mux.HandleFunc("GET /api/hub/trust/pending", s.handleHubTrustPendingAdmin)
+	mux.HandleFunc("POST /api/hub/trust/{id}/allow", s.handleHubTrustDecisionAdmin)
+	mux.HandleFunc("POST /api/hub/trust/{id}/deny", s.handleHubTrustDecisionAdmin)
 	mux.HandleFunc("/api/session/", s.handleSessionByID)
 	mux.HandleFunc("/api/sessions", s.handleSessionsCollection)
 	// /api/sessions/undelete is a collection-level action (Chrome-style
@@ -285,6 +324,10 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/api/system/stats", s.handleSystemStats)
 
 	mux.HandleFunc("/api/skills", s.handleSkillsCatalog)
+	mux.HandleFunc("/api/plugins", s.handlePluginsCatalog)
+	mux.HandleFunc("GET /api/sessions/{id}/plugins", s.handleSessionPluginsRouter)
+	mux.HandleFunc("POST /api/sessions/{id}/plugins/{name}", s.handleSessionPluginsRouter)
+	mux.HandleFunc("DELETE /api/sessions/{id}/plugins/{name}", s.handleSessionPluginsRouter)
 
 	// MCP management (Web UI parity with TUI `m` key dialog). Closes the
 	// four MISSING rows under "MCP MANAGEMENT" in PARITY_MATRIX.md.
@@ -435,6 +478,20 @@ func (s *Server) SetSkillsService(svc SkillsService) {
 	s.skills = svc
 }
 
+func (s *Server) HasSkillsService() bool {
+	return s.skills != nil
+}
+
+// SetPluginManager injects an alternate PluginManager (used by tests and by
+// ui.WebMutator so hub session IDs can route over the hub command channel).
+func (s *Server) SetPluginManager(mgr PluginManager) {
+	s.plugins = mgr
+}
+
+func (s *Server) HasPluginManager() bool {
+	return s.plugins != nil
+}
+
 // HasMutator reports whether a SessionMutator has been wired. Mutating
 // endpoints (POST/PATCH/DELETE) return 503 NOT_IMPLEMENTED when this is
 // false, even if WebMutations is true. Exposed for regression tests on the
@@ -452,6 +509,21 @@ func (s *Server) notifyMenuChangedWithoutInvalidation() {
 }
 
 func (s *Server) notifyMenuChangedWithInvalidation(invalidate bool) {
+	// Invalidate the MemoryMenuData cache so the next LoadMenuSnapshot()
+	// reloads from the storage-backed fallback. In headless (--no-tui) mode
+	// there is no TUI loop to call publishWebMenuSnapshot(), so without this
+	// the menu snapshot would remain frozen at its first-load state and new
+	// sessions created via the API would never appear until server restart.
+	//
+	// This must happen before subscribers are signaled. Otherwise an SSE
+	// listener can wake, load the stale cached snapshot, see no fingerprint
+	// change, and then sit until the fallback poll interval.
+	if invalidate {
+		if mmd, ok := s.menuData.(*MemoryMenuData); ok {
+			mmd.InvalidateCache()
+		}
+	}
+
 	s.menuSubscribersMu.Lock()
 	for ch := range s.menuSubscribers {
 		select {
@@ -460,17 +532,6 @@ func (s *Server) notifyMenuChangedWithInvalidation(invalidate bool) {
 		}
 	}
 	s.menuSubscribersMu.Unlock()
-
-	// Invalidate the MemoryMenuData cache so the next LoadMenuSnapshot()
-	// reloads from the storage-backed fallback. In headless (--no-tui) mode
-	// there is no TUI loop to call publishWebMenuSnapshot(), so without this
-	// the menu snapshot would remain frozen at its first-load state and new
-	// sessions created via the API would never appear until server restart.
-	if invalidate {
-		if mmd, ok := s.menuData.(*MemoryMenuData); ok {
-			mmd.InvalidateCache()
-		}
-	}
 }
 
 // checkMutationsAllowed writes a 403 response and returns false when web mutations are disabled.

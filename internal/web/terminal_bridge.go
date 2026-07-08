@@ -347,7 +347,7 @@ func tmuxCommand(socketName string, args ...string) *exec.Cmd {
 	// Explicit per-session socket name wins — this is the v1.7.50 path.
 	if trimmed := strings.TrimSpace(socketName); trimmed != "" {
 		finalArgs := append([]string{"-L", trimmed}, args...)
-		cmd := exec.Command("tmux", finalArgs...)
+		cmd := exec.Command("tmux", finalArgs...) // #nosec G702 -- fixed binary; args are passed without shell expansion.
 		// Unset TMUX so tmux-in-tmux guards don't trip: we are explicitly
 		// directing this to a different server than the one we're in.
 		cmd.Env = environWithoutTMUX(os.Environ())
@@ -361,7 +361,7 @@ func tmuxCommand(socketName string, args ...string) *exec.Cmd {
 		finalArgs = append([]string{"-S", socketPath}, args...)
 	}
 
-	cmd := exec.Command("tmux", finalArgs...)
+	cmd := exec.Command("tmux", finalArgs...) // #nosec G702 -- fixed binary; args are passed without shell expansion.
 	if hasSocket {
 		cmd.Env = environWithoutTMUX(os.Environ())
 	}
