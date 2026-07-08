@@ -197,6 +197,10 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 			Status:    "waiting",
 			GroupPath: "ops",
 		}},
+		Groups: []GroupInfo{{
+			Name: "empty",
+			Path: "empty",
+		}},
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -211,6 +215,9 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	}
 	if len(got.Sessions) != 1 || got.Sessions[0].Title != "worker" {
 		t.Fatalf("snapshot sessions = %+v", got.Sessions)
+	}
+	if len(got.Groups) != 1 || got.Groups[0].Path != "empty" {
+		t.Fatalf("snapshot groups = %+v", got.Groups)
 	}
 }
 
@@ -694,6 +701,49 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	}
 }
 
+func TestLocalSessionSourcePublishesEmptyGroups(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
+	t.Setenv("XDG_DATA_HOME", home+"/.local/share")
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	inst := &session.Instance{
+		ID:             "s1",
+		Title:          "worker",
+		ProjectPath:    "/repo",
+		GroupPath:      session.DefaultGroupPath,
+		Tool:           "codex",
+		Status:         session.StatusWaiting,
+		CreatedAt:      time.Unix(789, 0).UTC().Add(-time.Hour),
+		LastAccessedAt: time.Unix(789, 0).UTC(),
+	}
+	groupTree := session.NewGroupTree([]*session.Instance{inst})
+	if groupTree.CreateGroup("empty") == nil {
+		t.Fatal("CreateGroup empty returned nil")
+	}
+
+	storage, err := session.NewStorageWithProfile("hub-groups")
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	if err := storage.SaveWithGroups([]*session.Instance{inst}, groupTree); err != nil {
+		t.Fatalf("SaveWithGroups: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	snap, err := (LocalSessionSource{Profile: "hub-groups"}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if !snapshotHasGroup(snap, "empty") {
+		t.Fatalf("snapshot groups = %+v, want empty group", snap.Groups)
+	}
+}
+
 func TestLocalSessionSourceMarksForkableSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -870,6 +920,15 @@ func waitNodeSessions(t *testing.T, ch <-chan NodeSessions) NodeSessions {
 		t.Fatal("timed out waiting for node sessions")
 		return NodeSessions{}
 	}
+}
+
+func snapshotHasGroup(snapshot SnapshotPayload, path string) bool {
+	for _, group := range snapshot.Groups {
+		if group.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func waitTrustRequest(t *testing.T, ch <-chan TrustRequestPayload) TrustRequestPayload {

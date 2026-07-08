@@ -441,6 +441,7 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 			Node:     Node{ID: nodeID, Name: nodeName},
 			SentAt:   snapshot.SentAt,
 			Sessions: append([]SessionInfo(nil), snapshot.Sessions...),
+			Groups:   append([]GroupInfo(nil), snapshot.Groups...),
 		})
 	case MsgAttachOpen:
 		c.handleAttachOpen(ctx, conn, env)
@@ -1154,6 +1155,10 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 	if err != nil {
 		return SnapshotPayload{}, fmt.Errorf("load local sessions: %w", err)
 	}
+	groupRows, err := db.LoadGroups()
+	if err != nil {
+		return SnapshotPayload{}, fmt.Errorf("load local groups: %w", err)
+	}
 	sessions := make([]SessionInfo, 0, len(rows))
 	for _, row := range rows {
 		if row == nil {
@@ -1161,7 +1166,25 @@ func (s LocalSessionSource) Snapshot(ctx context.Context) (SnapshotPayload, erro
 		}
 		sessions = append(sessions, sessionInfoFromRow(row))
 	}
-	return SnapshotPayload{SentAt: time.Now().UTC(), Sessions: sessions}, nil
+	groups := make([]GroupInfo, 0, len(groupRows))
+	for _, row := range groupRows {
+		if row == nil {
+			continue
+		}
+		groups = append(groups, groupInfoFromRow(row))
+	}
+	return SnapshotPayload{SentAt: time.Now().UTC(), Sessions: sessions, Groups: groups}, nil
+}
+
+func groupInfoFromRow(row *statedb.GroupRow) GroupInfo {
+	return GroupInfo{
+		Name:          row.Name,
+		Path:          row.Path,
+		Expanded:      row.Expanded,
+		Order:         row.Order,
+		DefaultPath:   row.DefaultPath,
+		MaxConcurrent: row.MaxConcurrent,
+	}
 }
 
 func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {

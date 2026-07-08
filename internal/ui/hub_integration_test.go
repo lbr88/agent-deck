@@ -75,6 +75,10 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 		},
 		"node_server": {
 			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{{
+				Name: "empty",
+				Path: "empty",
+			}},
 			Sessions: []hub.SessionInfo{{
 				ID:          "r1",
 				Title:       "deploy",
@@ -112,6 +116,9 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	if !webSnapshotHasHubGroup(active, "node_empty", session.DefaultGroupPath, 0) {
 		t.Fatalf("active web snapshot missing empty hub node group: %+v", active.Items)
 	}
+	if !webSnapshotHasHubGroup(active, "node_server", "empty", 0) {
+		t.Fatalf("active web snapshot missing empty remote hub group: %+v", active.Items)
+	}
 	if !webSnapshotHasHubNode(active, "node_empty", "empty") {
 		t.Fatalf("active web snapshot missing empty hub node target: %+v", active.HubNodes)
 	}
@@ -122,6 +129,44 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	}
 	if !webSnapshotHasHubSession(archived, "node_server", "archived") {
 		t.Fatalf("archived web snapshot missing archived hub session: %+v", archived.Items)
+	}
+}
+
+func TestHubRemoteEmptyGroupAppearsAsCreateTarget(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Groups: []hub.GroupInfo{{
+				Name: "empty",
+				Path: "empty",
+			}},
+		},
+	}
+	h.rebuildFlatItems()
+
+	got := h.View()
+	if !strings.Contains(got, "server1 / empty") {
+		t.Fatalf("view missing empty remote hub group:\n%s", got)
+	}
+	h.cursor = indexHubGroup(t, h, "node_server", "empty")
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	if cmd == nil {
+		t.Fatal("N on empty hub group returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("N hub group command error = %v", msg.(hubActionResultMsg).err)
+	}
+	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "create" || req.GroupPath != "empty" {
+		t.Fatalf("hub empty group create = command=%+v req=%+v", client.commands[0], req)
 	}
 }
 
@@ -1412,5 +1457,16 @@ func indexHubNode(t *testing.T, h *Home, nodeID string) int {
 		}
 	}
 	t.Fatalf("hub node %q not found in flatItems: %+v", nodeID, h.flatItems)
+	return -1
+}
+
+func indexHubGroup(t *testing.T, h *Home, nodeID, groupPath string) int {
+	t.Helper()
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeHubGroup && item.HubNodeID == nodeID && item.HubGroupPath == groupPath {
+			return i
+		}
+	}
+	t.Fatalf("hub group %q/%q not found in flatItems: %+v", nodeID, groupPath, h.flatItems)
 	return -1
 }

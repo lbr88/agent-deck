@@ -83,6 +83,7 @@ type NodeSessions struct {
 	Node     Node
 	SentAt   time.Time
 	Sessions []SessionInfo
+	Groups   []GroupInfo
 }
 
 type TrustRequest struct {
@@ -637,6 +638,7 @@ func (s *Store) LatestSessions() ([]NodeSessions, error) {
 			Node:     node,
 			SentAt:   sentAt,
 			Sessions: snapshot.Sessions,
+			Groups:   snapshot.Groups,
 		})
 	}
 	if err := rows.Err(); err != nil {

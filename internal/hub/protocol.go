@@ -69,11 +69,21 @@ type SessionInfo struct {
 	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
 }
 
+type GroupInfo struct {
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	Expanded      bool   `json:"expanded,omitempty"`
+	Order         int    `json:"order,omitempty"`
+	DefaultPath   string `json:"default_path,omitempty"`
+	MaxConcurrent int    `json:"max_concurrent,omitempty"`
+}
+
 type SnapshotPayload struct {
 	NodeID   string        `json:"node_id,omitempty"`
 	NodeName string        `json:"node_name,omitempty"`
 	SentAt   time.Time     `json:"sent_at"`
 	Sessions []SessionInfo `json:"sessions"`
+	Groups   []GroupInfo   `json:"groups,omitempty"`
 }
 
 type CommandPayload struct {

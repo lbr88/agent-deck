@@ -1922,6 +1922,15 @@ func (h *Home) scopedHubGroupPaths(nodeID string) []string {
 	paths := map[string]bool{session.DefaultGroupPath: true}
 	h.hubSessionsMu.RLock()
 	if snapshot, ok := h.hubSessions[nodeID]; ok {
+		for _, group := range snapshot.Groups {
+			groupPath := strings.Trim(strings.TrimSpace(group.Path), "/")
+			if groupPath == "" {
+				groupPath = session.DefaultGroupPath
+			}
+			if h.groupScope == "" || h.isInGroupScope(groupPath) {
+				paths[groupPath] = true
+			}
+		}
 		for _, info := range snapshot.Sessions {
 			groupPath := strings.Trim(strings.TrimSpace(info.GroupPath), "/")
 			if groupPath == "" {
@@ -2033,6 +2042,17 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 		nodeName := hubNodeDisplayName(node)
 		appendHubWebNode(snapshot, nodeID, nodeName)
 		byGroup := make(map[string][]hub.SessionInfo)
+		hubGroups := make(map[string]hub.GroupInfo)
+		if !archivedView {
+			for _, group := range node.Groups {
+				groupPath := strings.Trim(strings.TrimSpace(group.Path), "/")
+				if groupPath == "" {
+					groupPath = session.DefaultGroupPath
+				}
+				group.Path = groupPath
+				hubGroups[groupPath] = group
+			}
+		}
 		for _, info := range node.Sessions {
 			isArchived := info.ArchivedAt != nil && !info.ArchivedAt.IsZero()
 			if isArchived != archivedView {
@@ -2049,6 +2069,11 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 		groupPaths := make([]string, 0, len(byGroup))
 		for groupPath := range byGroup {
 			groupPaths = append(groupPaths, groupPath)
+		}
+		for groupPath := range hubGroups {
+			if _, ok := byGroup[groupPath]; !ok {
+				groupPaths = append(groupPaths, groupPath)
+			}
 		}
 		sort.Strings(groupPaths)
 		if len(groupPaths) == 0 && !archivedView {
@@ -2832,6 +2857,19 @@ func (h *Home) projectHubItems() []session.Item {
 		}
 		nodeName := hubNodeDisplayName(node)
 		byGroup := make(map[string][]session.HubSessionInfo)
+		emptyGroups := make(map[string]bool)
+		if h.statusFilter != FilterModeArchived {
+			for _, group := range node.Groups {
+				groupPath := strings.Trim(strings.TrimSpace(group.Path), "/")
+				if groupPath == "" {
+					groupPath = session.DefaultGroupPath
+				}
+				if h.groupScope != "" && !h.isInGroupScope(groupPath) {
+					continue
+				}
+				emptyGroups[groupPath] = true
+			}
+		}
 		for _, info := range node.Sessions {
 			hubInfo := session.HubSessionInfo{
 				ID:               info.ID,
@@ -2864,9 +2902,13 @@ func (h *Home) projectHubItems() []session.Item {
 				continue
 			}
 			byGroup[groupPath] = append(byGroup[groupPath], hubInfo)
+			delete(emptyGroups, groupPath)
 		}
 		groupPaths := make([]string, 0, len(byGroup))
 		for groupPath := range byGroup {
+			groupPaths = append(groupPaths, groupPath)
+		}
+		for groupPath := range emptyGroups {
 			groupPaths = append(groupPaths, groupPath)
 		}
 		sort.Strings(groupPaths)
