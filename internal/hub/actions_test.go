@@ -64,6 +64,30 @@ func TestCommandDispatcherCreateUsesCreateRequest(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherDeleteUsesSessionID(t *testing.T) {
+	fake := &fakeActionBackend{}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(map[string]string{"session_id": "s1"})
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "delete",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch delete: %v", err)
+	}
+	if fake.deletedSessionID != "s1" {
+		t.Fatalf("deleted session id = %q, want s1", fake.deletedSessionID)
+	}
+	var result actionResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode delete result: %v", err)
+	}
+	if result.SessionID != "s1" {
+		t.Fatalf("delete result session_id = %q, want s1", result.SessionID)
+	}
+}
+
 func TestCommandDispatcherPreviewReturnsContent(t *testing.T) {
 	fake := &fakeActionBackend{previewContent: "remote pane content"}
 	dispatcher := CommandDispatcher{Backend: fake}
@@ -117,6 +141,7 @@ type fakeActionBackend struct {
 	sentMessage      string
 	createReq        CreateSessionRequest
 	createSessionID  string
+	deletedSessionID string
 	previewSessionID string
 	previewContent   string
 	importTmuxCalled bool
@@ -148,6 +173,11 @@ func (b *fakeActionBackend) Rename(context.Context, string, string) error {
 func (b *fakeActionBackend) Create(_ context.Context, req CreateSessionRequest) (string, error) {
 	b.createReq = req
 	return b.createSessionID, nil
+}
+
+func (b *fakeActionBackend) Delete(_ context.Context, sessionID string) error {
+	b.deletedSessionID = sessionID
+	return nil
 }
 
 func (b *fakeActionBackend) Preview(_ context.Context, sessionID string) (string, error) {

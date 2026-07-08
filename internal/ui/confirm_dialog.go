@@ -21,6 +21,8 @@ const (
 	ConfirmInstallHooks
 	ConfirmDeleteRemoteSession
 	ConfirmCloseRemoteSession
+	ConfirmDeleteHubSession
+	ConfirmCloseHubSession
 	ConfirmRemoveSession     // status-gated registry-only remove (TUI 'X')
 	ConfirmBulkRemoveErrored // bulk remove of all errored sessions (TUI Ctrl+X)
 	ConfirmArchiveSession
@@ -42,6 +44,7 @@ type ConfirmDialog struct {
 	worktree    bool // Whether the session has an associated git worktree.
 
 	remoteName string // Remote name for remote session confirmations.
+	hubNodeID  string // Hub node ID for hub session confirmations.
 
 	// Notice (ConfirmNotice) carries an acknowledge-only title/body.
 	noticeTitle string
@@ -133,6 +136,28 @@ func (c *ConfirmDialog) ShowCloseRemoteSession(remoteName, sessionID, sessionNam
 	c.targetID = sessionID
 	c.targetName = sessionName
 	c.remoteName = remoteName
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowDeleteHubSession(nodeID, nodeName, sessionID, sessionName string) {
+	c.visible = true
+	c.confirmType = ConfirmDeleteHubSession
+	c.targetID = sessionID
+	c.targetName = sessionName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowCloseHubSession(nodeID, nodeName, sessionID, sessionName string) {
+	c.visible = true
+	c.confirmType = ConfirmCloseHubSession
+	c.targetID = sessionID
+	c.targetName = sessionName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
 	c.buttonCount = 2
 	c.focusedButton = 1
 }
@@ -261,6 +286,7 @@ func (c *ConfirmDialog) Hide() {
 	c.targetName = ""
 	c.sandboxed = false
 	c.remoteName = ""
+	c.hubNodeID = ""
 	c.noticeTitle = ""
 	c.noticeBody = ""
 }
@@ -283,6 +309,10 @@ func (c *ConfirmDialog) GetConfirmType() ConfirmType {
 // GetRemoteName returns the remote name for remote session confirmations.
 func (c *ConfirmDialog) GetRemoteName() string {
 	return c.remoteName
+}
+
+func (c *ConfirmDialog) GetHubNodeID() string {
+	return c.hubNodeID
 }
 
 // SetSize updates dialog dimensions
@@ -416,6 +446,28 @@ func (c *ConfirmDialog) View() string {
 		title = "Close Remote Session?"
 		warning = fmt.Sprintf("This will close the running process for:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
 		details = "• The remote tmux session will be terminated\n• Session metadata will be kept on the remote\n• You can restart later"
+		borderColor = ColorYellow
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Close", ColorYellow, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y close · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmDeleteHubSession:
+		title = "⚠  Delete Hub Session?"
+		warning = fmt.Sprintf("This will permanently delete the hub session:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
+		details = "• The remote tmux session will be terminated\n• Session metadata will be removed on that hub node\n• Terminal history will be lost"
+		borderColor = ColorRed
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Delete", ColorRed, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y delete · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmCloseHubSession:
+		title = "Close Hub Session?"
+		warning = fmt.Sprintf("This will close the running process for:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
+		details = "• The remote tmux session will be terminated\n• Session metadata will be kept on that hub node\n• You can restart later"
 		borderColor = ColorYellow
 		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
 			renderButton("Close", ColorYellow, c.focusedButton == 0), "  ",

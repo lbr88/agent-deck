@@ -232,6 +232,8 @@ type Home struct {
 	globalSearchIndex         *session.GlobalSearchIndex // Search index (nil if disabled)
 	newDialog                 *NewDialog
 	pendingRemoteName         string                // #1353: remote target for the open new-session dialog ("" = local)
+	pendingHubNodeID          string                // hub target for the open new-session dialog ("" = local/non-hub)
+	pendingHubNodeName        string                // display name for pending hub target
 	groupDialog               *GroupDialog          // For creating/renaming groups
 	forkDialog                *ForkDialog           // For forking sessions
 	confirmDialog             *ConfirmDialog        // For confirming destructive actions
@@ -7487,6 +7489,25 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			h.clearError()
 			return h, h.createRemoteSessionWithOptions(remoteName, command, name, path, groupPath)
 		}
+		if h.pendingHubNodeID != "" {
+			nodeID := h.pendingHubNodeID
+			nodeName := h.pendingHubNodeName
+			name, path, command := h.newDialog.GetRemoteValues()
+			groupPath := h.newDialog.GetSelectedGroup()
+			rememberTool(h.stateDB(), command)
+			h.newDialog.Hide()
+			h.pendingHubNodeID = ""
+			h.pendingHubNodeName = ""
+			h.clearError()
+			req := hub.CreateSessionRequest{
+				Title:       strings.TrimSpace(name),
+				Tool:        command,
+				ProjectPath: path,
+				GroupPath:   groupPath,
+				ModelID:     h.newDialog.GetLaunchModelID(),
+			}
+			return h, h.hubCommand(nodeID, nodeName, "create", req)
+		}
 
 		// Get values including worktree settings.
 		name, path, command, branchName, worktreeEnabled := h.newDialog.GetValuesWithWorktree()
@@ -7642,6 +7663,8 @@ func (h *Home) showRemoteNewSessionDialog(item session.Item) {
 	if remoteName == "" {
 		return
 	}
+	h.pendingHubNodeID = ""
+	h.pendingHubNodeName = ""
 
 	paths := h.remotePathSuggestions(remoteName)
 	h.newDialog.SetPathSuggestions(paths)
@@ -7677,6 +7700,51 @@ func (h *Home) showRemoteNewSessionDialog(item session.Item) {
 	}
 	// Remote creation goes through the remote CLI. Disable local-only defaults
 	// that ShowInGroup may have inherited from this machine's config.
+	h.newDialog.worktreeEnabled = false
+	h.newDialog.worktreeToggled = false
+	h.newDialog.sandboxEnabled = false
+	h.newDialog.multiRepoEnabled = false
+	h.newDialog.multiRepoPaths = nil
+	h.newDialog.rebuildFocusTargets()
+}
+
+func (h *Home) showHubNewSessionDialog(item session.Item) {
+	nodeID := strings.TrimSpace(item.HubNodeID)
+	if nodeID == "" {
+		return
+	}
+	h.pendingRemoteName = ""
+	h.pendingHubNodeID = nodeID
+	h.pendingHubNodeName = strings.TrimSpace(item.HubNodeName)
+
+	groupPath := strings.TrimSpace(item.HubGroupPath)
+	groupName := groupPath
+	defaultPath := "."
+	tool := ""
+	if item.HubSession != nil {
+		if groupPath == "" {
+			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
+			groupName = groupPath
+		}
+		if path := strings.TrimSpace(item.HubSession.ProjectPath); path != "" {
+			defaultPath = path
+		}
+		tool = strings.TrimSpace(item.HubSession.Tool)
+	}
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+		groupName = session.DefaultGroupName
+	}
+	if groupName == "" {
+		groupName = groupPath
+	}
+	if tool == "" {
+		tool = resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB()))
+	}
+	h.newDialog.SetPathSuggestions(nil)
+	h.newDialog.SetRecentSessions(nil)
+	h.newDialog.SetDefaultTool(tool)
+	h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, nil, "")
 	h.newDialog.worktreeEnabled = false
 	h.newDialog.worktreeToggled = false
 	h.newDialog.sandboxEnabled = false
@@ -8852,6 +8920,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		// Reset any stale remote target from a previously abandoned flow.
 		h.pendingRemoteName = ""
+		h.pendingHubNodeID = ""
+		h.pendingHubNodeName = ""
 		// If the cursor is on a remote group/session, open the same
 		// new-session dialog as for local items but remember the remote
 		// target (#1353). The submit handler routes the create to the remote
@@ -8865,7 +8935,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return h, nil
 			}
 			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
-				return h, h.createHubSession(item)
+				h.showHubNewSessionDialog(item)
+				return h, nil
 			}
 		}
 
@@ -8993,7 +9064,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowDeleteRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
-				h.setError(fmt.Errorf("hub delete is unavailable; close the remote session instead"))
+				h.confirmDialog.ShowDeleteHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
 			} else if item.Type == session.ItemTypeGroup && item.Path == session.DefaultGroupPath {
 				// Protected default group: surface the block in the same centered modal
 				// used for the delete confirmation, so it can't be clamped off the bottom
@@ -9022,7 +9093,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
 				h.confirmDialog.ShowCloseRemoteSession(item.RemoteName, item.RemoteSession.ID, item.RemoteSession.Title)
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
-				return h, h.hubSessionCommand(item, "stop", nil)
+				h.confirmDialog.ShowCloseHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
 			}
 		}
 		return h, nil
@@ -9752,6 +9823,18 @@ func (h *Home) confirmAction() tea.Cmd {
 		title := h.confirmDialog.targetName
 		h.confirmDialog.Hide()
 		return h.closeRemoteSession(remoteName, sessionID, title)
+	case ConfirmDeleteHubSession:
+		sessionID := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		return h.hubCommand(nodeID, nodeName, "delete", map[string]string{"session_id": sessionID})
+	case ConfirmCloseHubSession:
+		sessionID := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		return h.hubCommand(nodeID, nodeName, "stop", map[string]string{"session_id": sessionID})
 	case ConfirmRemoveSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		if inst := h.getInstanceByID(sessionID); inst != nil {
@@ -15885,6 +15968,10 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 
 	case session.ItemTypeHubSession:
 		add("⏎", "attach")
+		add(newQuick, "new")
+		add(h.actionKey(hotkeyRestart), "restart")
+		add(h.actionKey(hotkeyDelete), "delete")
+		add(h.actionKey(hotkeyCloseSession), "close")
 	}
 
 	return hints

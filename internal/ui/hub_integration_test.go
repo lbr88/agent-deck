@@ -267,7 +267,7 @@ func TestHubLocalGroupRenameUsesStoredGroupName(t *testing.T) {
 	}
 }
 
-func TestHubRowsCreateSessionsThroughHubCommand(t *testing.T) {
+func TestHubSessionNOpensNewSessionDialog(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
 	h.hubLocalNodeName = "local"
@@ -292,31 +292,30 @@ func TestHubRowsCreateSessionsThroughHubCommand(t *testing.T) {
 	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	h = model.(*Home)
 	if cmd != nil {
-		msg := cmd()
-		if result, ok := msg.(hubActionResultMsg); !ok || result.err != nil {
-			t.Fatalf("n hub command msg = %#v", msg)
-		}
-	} else {
-		t.Fatal("n on hub session returned no command")
+		t.Fatal("n on hub session should open the dialog, not quick-create")
 	}
-	if h.newDialog.IsVisible() {
-		t.Fatal("n on hub session opened the local new-session dialog")
+	if !h.newDialog.IsVisible() {
+		t.Fatal("n on hub session should open the new-session dialog")
 	}
-	if len(client.commands) != 1 {
-		t.Fatalf("hub commands after n = %d, want 1", len(client.commands))
+	if len(client.commands) != 0 {
+		t.Fatalf("hub commands after n = %d, want 0", len(client.commands))
 	}
-	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "create" {
-		t.Fatalf("n command = %+v", got)
+	if got := h.newDialog.GetSelectedGroup(); got != "ops" {
+		t.Fatalf("selected group = %q, want ops", got)
 	}
-	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
-	if !ok {
-		t.Fatalf("n payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	_, path, command := h.newDialog.GetRemoteValues()
+	if path != "/srv/app" {
+		t.Fatalf("dialog path = %q, want /srv/app", path)
 	}
-	if req.GroupPath != "ops" || req.ProjectPath != "/srv/app" || req.Tool != "claude" || strings.TrimSpace(req.Title) == "" {
-		t.Fatalf("n create request = %+v", req)
+	if command != "claude" {
+		t.Fatalf("dialog command = %q, want claude", command)
 	}
+}
 
-	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+func TestHubSessionShiftNQuickCreatesThroughHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
 	h = model.(*Home)
 	if cmd == nil {
 		t.Fatal("N on hub session returned no command")
@@ -324,30 +323,72 @@ func TestHubRowsCreateSessionsThroughHubCommand(t *testing.T) {
 	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
 		t.Fatalf("N hub command error = %v", msg.(hubActionResultMsg).err)
 	}
-	if len(client.commands) != 2 {
-		t.Fatalf("hub commands after N = %d, want 2", len(client.commands))
+	if h.newDialog.IsVisible() {
+		t.Fatal("N on hub session should not open the new-session dialog")
 	}
-	if got := client.commands[1]; got.nodeID != "node_server" || got.action != "create" {
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands after N = %d, want 1", len(client.commands))
+	}
+	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "create" {
 		t.Fatalf("N command = %+v", got)
+	}
+	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
+	if !ok {
+		t.Fatalf("N payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	}
+	if req.GroupPath != "ops" || req.ProjectPath != "/srv/app" || req.Tool != "claude" || strings.TrimSpace(req.Title) == "" {
+		t.Fatalf("N create request = %+v", req)
 	}
 }
 
-func TestHubSessionStopRestartAndPromptUseHubCommand(t *testing.T) {
+func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	h, client := newHubActionHome(t)
 
-	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("d on hub session should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmDeleteHubSession {
+		t.Fatalf("d confirm type = %v, want ConfirmDeleteHubSession", h.confirmDialog.GetConfirmType())
+	}
+	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	h = model.(*Home)
 	if cmd == nil {
-		t.Fatal("D on hub session returned no command")
+		t.Fatal("confirm hub delete returned no command")
 	}
 	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
-		t.Fatalf("D hub command error = %v", msg.(hubActionResultMsg).err)
+		t.Fatalf("delete hub command error = %v", msg.(hubActionResultMsg).err)
 	}
-	assertHubCommand(t, client.commands[0], "node_server", "stop", map[string]string{
+	assertHubCommand(t, client.commands[0], "node_server", "delete", map[string]string{
 		"session_id": "r1",
 	})
 
-	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("D on hub session should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmCloseHubSession {
+		t.Fatalf("D confirm type = %v, want ConfirmCloseHubSession", h.confirmDialog.GetConfirmType())
+	}
+	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("confirm hub close returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("close hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[1], "node_server", "stop", map[string]string{
+		"session_id": "r1",
+	})
+}
+
+func TestHubSessionRestartAndPromptUseHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
 	h = model.(*Home)
 	if cmd == nil {
 		t.Fatal("R on hub session returned no command")
@@ -355,7 +396,7 @@ func TestHubSessionStopRestartAndPromptUseHubCommand(t *testing.T) {
 	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
 		t.Fatalf("R hub command error = %v", msg.(hubActionResultMsg).err)
 	}
-	assertHubCommand(t, client.commands[1], "node_server", "restart", map[string]string{
+	assertHubCommand(t, client.commands[0], "node_server", "restart", map[string]string{
 		"session_id": "r1",
 	})
 
@@ -379,7 +420,7 @@ func TestHubSessionStopRestartAndPromptUseHubCommand(t *testing.T) {
 	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
 		t.Fatalf("prompt hub command error = %v", msg.(hubActionResultMsg).err)
 	}
-	assertHubCommand(t, client.commands[2], "node_server", "send", map[string]string{
+	assertHubCommand(t, client.commands[1], "node_server", "send", map[string]string{
 		"session_id": "r1",
 		"message":    "run tests",
 	})
