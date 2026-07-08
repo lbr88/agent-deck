@@ -337,6 +337,59 @@ func TestWSEndpointHubSessionAttachesThroughHubTerminal(t *testing.T) {
 	}
 }
 
+func TestHubDashboardWSSessionAttachesThroughHubTerminal(t *testing.T) {
+	stream := newFakeHubAttachStream()
+	mutator := &fakeHubTerminalMutator{stream: stream}
+	srv := NewServer(Config{
+		ListenAddr: "127.0.0.1:0",
+		Profile:    "work",
+	})
+	srv.mutator = mutator
+
+	testServer := httptest.NewServer(srv.Handler())
+	defer testServer.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL(testServer.URL, "/hub/dashboard/node_server/ws/session/remote_sess"), nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial failed with status %d: %v", resp.StatusCode, err)
+		}
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	expectWSStatusEvent(t, conn, "connected")
+	expectWSStatusEvent(t, conn, "ready")
+	expectWSStatusEvent(t, conn, "terminal_attached")
+	if mutator.nodeID != "node_server" || mutator.sessionID != "remote_sess" {
+		t.Fatalf("hub dashboard attach target = %q/%q, want node_server/remote_sess", mutator.nodeID, mutator.sessionID)
+	}
+
+	stream.emit([]byte("dashboard-output"))
+	msgType, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read hub dashboard terminal output: %v", err)
+	}
+	if msgType != websocket.BinaryMessage || string(data) != "dashboard-output" {
+		t.Fatalf("hub dashboard terminal output type=%d data=%q", msgType, string(data))
+	}
+
+	if err := conn.WriteJSON(wsClientMessage{Type: "input", Data: "pwd\r"}); err != nil {
+		t.Fatalf("write hub dashboard input: %v", err)
+	}
+	if got := string(stream.waitWrite(t)); got != "pwd\r" {
+		t.Fatalf("hub dashboard stream input = %q, want pwd", got)
+	}
+
+	if err := conn.WriteJSON(wsClientMessage{Type: "resize", Cols: 132, Rows: 43}); err != nil {
+		t.Fatalf("write hub dashboard resize: %v", err)
+	}
+	if got := stream.waitResize(t); got.Cols != 132 || got.Rows != 43 {
+		t.Fatalf("hub dashboard stream resize = %+v, want 132x43", got)
+	}
+}
+
 func TestWSEndpointInputWithoutTerminalBridge(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr: "127.0.0.1:0",

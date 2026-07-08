@@ -37,7 +37,7 @@ func (s *Server) handleHubDashboardProxy(w http.ResponseWriter, r *http.Request)
 			writeAPIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 			return
 		}
-		writeAPIError(w, http.StatusNotImplemented, ErrCodeNotImplemented, "hub dashboard websocket proxy is not available yet")
+		s.handleHubDashboardSessionWS(w, r, nodeID, remotePath)
 		return
 	}
 	if !s.authorizeRequest(r) {
@@ -66,6 +66,98 @@ func (s *Server) handleHubDashboardProxy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeHubDashboardProxyResponse(w, nodeID, resp)
+}
+
+func (s *Server) handleHubDashboardSessionWS(w http.ResponseWriter, r *http.Request, nodeID, remotePath string) {
+	sessionID, ok := hubDashboardWSSessionID(remotePath)
+	if !ok {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "session id is required")
+		return
+	}
+
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	writer := newWSConnWriter(conn)
+	_ = writer.WriteJSON(wsServerMessage{
+		Type:      "status",
+		Event:     "connected",
+		SessionID: sessionID,
+		Profile:   s.cfg.Profile,
+		ReadOnly:  s.cfg.ReadOnly,
+		Time:      time.Now().UTC(),
+	})
+	_ = writer.WriteJSON(wsServerMessage{
+		Type:      "status",
+		Event:     "ready",
+		SessionID: sessionID,
+		Time:      time.Now().UTC(),
+	})
+
+	var bridge terminalBridge
+	attacher, ok := s.mutator.(HubTerminalAttacher)
+	if !ok {
+		_ = writer.WriteJSON(wsServerMessage{
+			Type:      "error",
+			Code:      "HUB_TERMINAL_UNAVAILABLE",
+			Message:   "hub terminal attach is not available",
+			SessionID: sessionID,
+			Time:      time.Now().UTC(),
+		})
+	} else {
+		attachCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		stream, err := attacher.OpenHubTerminal(attachCtx, nodeID, sessionID, hub.TerminalSize{Cols: 80, Rows: 24})
+		cancel()
+		if err != nil {
+			_ = writer.WriteJSON(wsServerMessage{
+				Type:      "error",
+				Code:      "HUB_TERMINAL_ATTACH_FAILED",
+				Message:   "failed to attach hub terminal bridge",
+				Hint:      "Make sure the remote hub node is online and running an agent-deck version that supports interactive hub attach.",
+				SessionID: sessionID,
+				Time:      time.Now().UTC(),
+			})
+		} else if bridge, err = newHubAttachBridge(stream, sessionID, writer); err != nil {
+			_ = stream.Close()
+			_ = writer.WriteJSON(wsServerMessage{
+				Type:      "error",
+				Code:      "HUB_TERMINAL_ATTACH_FAILED",
+				Message:   "failed to initialize hub terminal bridge",
+				SessionID: sessionID,
+				Time:      time.Now().UTC(),
+			})
+		} else {
+			defer bridge.Close()
+			_ = writer.WriteJSON(wsServerMessage{
+				Type:      "status",
+				Event:     "terminal_attached",
+				SessionID: sessionID,
+				Time:      time.Now().UTC(),
+			})
+		}
+	}
+
+	s.serveTerminalWSMessages(conn, writer, sessionID, bridge)
+}
+
+func hubDashboardWSSessionID(remotePath string) (string, bool) {
+	path, _, _ := strings.Cut(remotePath, "?")
+	const prefix = "/ws/session/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	raw := strings.TrimPrefix(path, prefix)
+	if strings.TrimSpace(raw) == "" || strings.Contains(raw, "/") {
+		return "", false
+	}
+	sessionID, err := url.PathUnescape(raw)
+	if err != nil || strings.TrimSpace(sessionID) == "" || strings.Contains(sessionID, "/") {
+		return "", false
+	}
+	return strings.TrimSpace(sessionID), true
 }
 
 func parseHubDashboardPath(r *http.Request) (nodeID, remotePath string, ok bool) {

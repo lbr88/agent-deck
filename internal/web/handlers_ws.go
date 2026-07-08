@@ -192,6 +192,10 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.serveTerminalWSMessages(conn, writer, sessionID, bridge)
+}
+
+func (s *Server) serveTerminalWSMessages(conn *websocket.Conn, writer *wsConnWriter, sessionID string, bridge terminalBridge) {
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
