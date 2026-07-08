@@ -2053,6 +2053,86 @@ func TestSessionClosedMsgUsesConfiguredRestartHint(t *testing.T) {
 	}
 }
 
+func TestSessionClosedMsgRefreshesStoppedRenderSnapshot(t *testing.T) {
+	home := NewHome()
+	home.storage = nil
+
+	inst := session.NewInstance("closed-render-session", t.TempDir())
+	inst.Tool = "shell"
+	inst.Status = session.StatusStopped
+	home.instancesMu.Lock()
+	home.instances = []*session.Instance{inst}
+	home.instanceByID[inst.ID] = inst
+	home.instancesMu.Unlock()
+	home.groupTree = session.NewGroupTree([]*session.Instance{inst})
+	home.sessionRenderSnapshot.Store(map[string]sessionRenderState{
+		inst.ID: {status: session.StatusError, tool: "shell"},
+	})
+
+	model, _ := home.Update(sessionClosedMsg{sessionID: inst.ID})
+	h, ok := model.(*Home)
+	if !ok {
+		t.Fatal("Update should return *Home")
+	}
+	if got := h.getSessionRenderState(inst).status; got != session.StatusStopped {
+		t.Fatalf("render snapshot status = %q, want %q", got, session.StatusStopped)
+	}
+}
+
+func TestSessionClosedMsgPersistsStoppedDuringReload(t *testing.T) {
+	setXDGTestHome(t)
+	profile := "_test_shift_d_close_persist"
+	home := NewHomeWithProfile(profile)
+	if home.storage == nil {
+		t.Fatal("storage is nil")
+	}
+	t.Cleanup(func() { _ = home.storage.Close() })
+
+	inst := session.NewInstance("closed-persist-session", t.TempDir())
+	inst.Tool = "shell"
+	inst.Status = session.StatusRunning
+	home.instancesMu.Lock()
+	home.instances = []*session.Instance{inst}
+	home.instanceByID[inst.ID] = inst
+	home.instancesMu.Unlock()
+	home.groupTree = session.NewGroupTree([]*session.Instance{inst})
+	if !home.forceSaveInstances() {
+		t.Fatal("initial save failed")
+	}
+
+	// Simulate the storage watcher reload window. A plain saveInstances()
+	// would skip here, which used to let the old running status survive on
+	// disk; the next reload then saw a missing tmux session and rendered error.
+	home.reloadMu.Lock()
+	home.isReloading = true
+	home.reloadMu.Unlock()
+	inst.SetStatusThreadSafe(session.StatusStopped)
+
+	model, _ := home.Update(sessionClosedMsg{sessionID: inst.ID})
+	h, ok := model.(*Home)
+	if !ok {
+		t.Fatal("Update should return *Home")
+	}
+
+	loaded, _, err := h.storage.LoadWithGroups()
+	if err != nil {
+		t.Fatalf("LoadWithGroups: %v", err)
+	}
+	var got *session.Instance
+	for _, candidate := range loaded {
+		if candidate.ID == inst.ID {
+			got = candidate
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("session %q not persisted", inst.ID)
+	}
+	if got.Status != session.StatusStopped {
+		t.Fatalf("persisted status = %q, want %q", got.Status, session.StatusStopped)
+	}
+}
+
 func TestDeleteAndCloseSessionUseDistinctActions(t *testing.T) {
 	home := NewHome()
 	home.width = 100

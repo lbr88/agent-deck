@@ -6035,21 +6035,31 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionClosedMsg:
 		// Keep session metadata, just reflect runtime termination state.
+		inst := h.getInstanceByID(msg.sessionID)
 		if msg.killErr != nil {
 			h.setError(fmt.Errorf("failed to close session: %w", msg.killErr))
 			return h, nil
+		}
+		if inst != nil {
+			inst.SetStatusThreadSafe(session.StatusStopped)
+			if err := h.persistSessionStatus(inst); err != nil {
+				uiLog.Warn("close_session_status_persist_failed",
+					slog.String("id", inst.ID),
+					slog.String("error", err.Error()))
+			}
 		}
 
 		h.cachedStatusCounts.valid.Store(false)
 		h.invalidatePreviewCache(msg.sessionID)
 		h.rebuildFlatItems()
+		h.refreshSessionRenderSnapshot(nil)
 		h.saveInstances()
 
 		restartHint := ""
 		if restartKey := h.actionKey(hotkeyRestart); restartKey != "" {
 			restartHint = fmt.Sprintf(". %s to restart", restartKey)
 		}
-		if inst := h.getInstanceByID(msg.sessionID); inst != nil {
+		if inst != nil {
 			h.setError(fmt.Errorf("closed '%s'%s", inst.Title, restartHint))
 		} else {
 			h.setError(fmt.Errorf("session closed%s", restartHint))
@@ -12933,6 +12943,25 @@ func (h *Home) closeSession(inst *session.Instance) tea.Cmd {
 		killErr := inst.Kill()
 		return sessionClosedMsg{sessionID: id, killErr: killErr}
 	}
+}
+
+func (h *Home) persistSessionStatus(inst *session.Instance) error {
+	if h.storage == nil || inst == nil {
+		return nil
+	}
+	db := h.storage.GetDB()
+	if db == nil {
+		return nil
+	}
+	if err := db.WriteStatus(inst.ID, string(inst.GetStatusThreadSafe()), inst.GetToolThreadSafe()); err != nil {
+		return err
+	}
+	if newMtime, err := h.storage.GetFileMtime(); err == nil && !newMtime.IsZero() {
+		h.reloadMu.Lock()
+		h.lastLoadMtime = newMtime
+		h.reloadMu.Unlock()
+	}
+	return nil
 }
 
 // persistArchived writes the instance's archive timestamp to the database with a
