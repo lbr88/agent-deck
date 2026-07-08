@@ -77,6 +77,8 @@ func handleHubSessions(profile string, args []string) error {
 		return handleHubSessionsSimple(profile, "restart", args[1:])
 	case "restart-fresh":
 		return handleHubSessionsSimple(profile, "restart_fresh", args[1:])
+	case "fork":
+		return handleHubSessionsSimple(profile, "fork", args[1:])
 	case "delete":
 		return handleHubSessionsSimple(profile, "delete", args[1:])
 	case "archive":
@@ -425,8 +427,17 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, fmt.Errorf("hub sessions move group path is required")
 		}
 		_, err = client.Command(ctx, resolved.NodeID, "move", map[string]string{"session_id": resolved.SessionID, "group_path": group})
-	case "stop", "restart", "restart_fresh", "delete", "archive", "unarchive", "remove", "toggle_yolo":
-		_, err = client.Command(ctx, resolved.NodeID, action, map[string]string{"session_id": resolved.SessionID})
+	case "stop", "restart", "restart_fresh", "fork", "delete", "archive", "unarchive", "remove", "toggle_yolo":
+		raw, commandErr := client.Command(ctx, resolved.NodeID, action, map[string]string{"session_id": resolved.SessionID})
+		err = commandErr
+		if err == nil && action == "fork" {
+			sessionID, decodeErr := decodeHubCreateSessionResult(raw)
+			if decodeErr != nil {
+				return hubSessionCommandResult{}, decodeErr
+			}
+			result.SessionID = sessionID
+			result.SessionTitle = resolved.SessionTitle + " (fork)"
+		}
 	default:
 		return hubSessionCommandResult{}, fmt.Errorf("unsupported hub sessions action %q", action)
 	}
@@ -639,6 +650,7 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  close <node> <session>      Stop a hub session")
 	fmt.Fprintln(w, "  restart <node> <session>    Restart a hub session")
 	fmt.Fprintln(w, "  restart-fresh <node> <session> Restart without resume")
+	fmt.Fprintln(w, "  fork <node> <session>       Fork a hub session")
 	fmt.Fprintln(w, "  rename <node> <session> <title> Rename a hub session")
 	fmt.Fprintln(w, "  move <node> <session> <group> Move a hub session to a group")
 	fmt.Fprintln(w, "  delete <node> <session>     Delete a hub session")

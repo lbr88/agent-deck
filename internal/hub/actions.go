@@ -24,6 +24,7 @@ type ActionBackend interface {
 	Stop(ctx context.Context, sessionID string) error
 	Restart(ctx context.Context, sessionID string) error
 	RestartFresh(ctx context.Context, sessionID string) error
+	Fork(ctx context.Context, sessionID string) (string, error)
 	Rename(ctx context.Context, sessionID, title string) error
 	Create(ctx context.Context, req CreateSessionRequest) (string, error)
 	Delete(ctx context.Context, sessionID string) error
@@ -173,6 +174,16 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "fork":
+		payload, err := decodeSessionAction(cmd.Payload, "fork")
+		if err != nil {
+			return nil, err
+		}
+		sessionID, err := d.Backend.Fork(ctx, payload.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: sessionID})
 	case "rename":
 		var payload renameActionPayload
 		if err := decodeCommandPayload(cmd.Payload, &payload); err != nil {
@@ -582,6 +593,37 @@ func (b LocalActionBackend) RestartFresh(ctx context.Context, sessionID string) 
 	inst.LastStartedAt = time.Now()
 	inst.PostStartSync(3 * time.Second)
 	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+}
+
+func (b LocalActionBackend) Fork(ctx context.Context, sessionID string) (string, error) {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return "", err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return "", err
+	}
+	if !inst.CanFork() {
+		return "", fmt.Errorf("session %q cannot be forked", inst.Title)
+	}
+	forkTitle := strings.TrimSpace(inst.Title)
+	if forkTitle == "" {
+		forkTitle = inst.ID
+	}
+	forked, _, err := inst.CreateForkedInstanceForTool(forkTitle+" (fork)", inst.GroupPath, nil)
+	if err != nil {
+		return "", fmt.Errorf("create fork: %w", err)
+	}
+	if err := forked.Start(); err != nil {
+		return "", fmt.Errorf("start fork: %w", err)
+	}
+	forked.PostStartSync(3 * time.Second)
+	instances = append(instances, forked)
+	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+		return "", err
+	}
+	return forked.ID, nil
 }
 
 func (b LocalActionBackend) Rename(ctx context.Context, sessionID, title string) error {

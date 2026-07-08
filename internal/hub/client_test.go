@@ -694,6 +694,46 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	}
 }
 
+func TestLocalSessionSourceMarksForkableSessions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	storage, err := session.NewStorageWithProfile("hub-forkable")
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	if err := storage.Save([]*session.Instance{{
+		ID:               "forkable",
+		Title:            "fork me",
+		ProjectPath:      "/repo",
+		GroupPath:        "default",
+		Tool:             "claude",
+		Status:           session.StatusWaiting,
+		ClaudeSessionID:  "11111111-1111-1111-1111-111111111111",
+		ClaudeDetectedAt: time.Now(),
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	snap, err := (LocalSessionSource{Profile: "hub-forkable"}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Sessions) != 1 {
+		t.Fatalf("Sessions length = %d, want 1", len(snap.Sessions))
+	}
+	if !snap.Sessions[0].CanFork {
+		t.Fatalf("CanFork = false for forkable session: %+v", snap.Sessions[0])
+	}
+}
+
 func TestLocalSessionSourceMissingProfileDoesNotCreateStorage(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

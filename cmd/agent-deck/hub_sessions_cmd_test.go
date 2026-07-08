@@ -145,6 +145,43 @@ func TestRunHubSessionActionResolvesSessionTitle(t *testing.T) {
 	}
 }
 
+func TestRunHubSessionForkUsesHubForkAction(t *testing.T) {
+	client := &fakeHubSessionsClient{
+		results: map[string]json.RawMessage{
+			"fork": json.RawMessage(`{"session_id":"forked_1"}`),
+		},
+	}
+	snapshots := []hub.NodeSessions{{
+		Node: hub.Node{ID: "node_work", Name: "work"},
+		Sessions: []hub.SessionInfo{{
+			ID:    "sess_api",
+			Title: "api",
+		}},
+	}}
+
+	result, err := runHubSessionWithClient(context.Background(), client, snapshots, hubSessionOptions{
+		Action:    "fork",
+		NodeID:    "work",
+		SessionID: "api",
+	})
+	if err != nil {
+		t.Fatalf("runHubSessionWithClient fork: %v", err)
+	}
+	if result.SessionID != "forked_1" || result.SessionTitle != "api (fork)" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_work" || client.commands[0].action != "fork" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(map[string]string)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]string", client.commands[0].payload)
+	}
+	if payload["session_id"] != "sess_api" {
+		t.Fatalf("fork payload = %+v", payload)
+	}
+}
+
 func TestRunHubSessionAttachUsesHubAttach(t *testing.T) {
 	client := &fakeHubSessionsClient{}
 	snapshots := []hub.NodeSessions{{

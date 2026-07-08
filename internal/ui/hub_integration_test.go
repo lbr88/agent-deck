@@ -82,6 +82,7 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 				Status:      "waiting",
 				GroupPath:   "ops",
 				ProjectPath: "/srv/app",
+				CanFork:     true,
 			}, {
 				ID:         "archived",
 				Title:      "old",
@@ -101,6 +102,9 @@ func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
 	}
 	if !webSnapshotHasHubSession(active, "node_server", "r1") {
 		t.Fatalf("active web snapshot missing hub session: %+v", active.Items)
+	}
+	if !webSnapshotHubSessionCanFork(active, "node_server", "r1") {
+		t.Fatalf("active web snapshot did not mark forkable hub session: %+v", active.Items)
 	}
 	if webSnapshotHasHubSession(active, "node_server", "archived") {
 		t.Fatalf("active web snapshot included archived hub session: %+v", active.Items)
@@ -499,6 +503,24 @@ func TestHubSessionShiftNQuickCreatesThroughHubCommand(t *testing.T) {
 	}
 }
 
+func TestHubSessionQuickForkUsesHubCommand(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.hubSessions["node_server"].Sessions[0].CanFork = true
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	_, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if cmd == nil {
+		t.Fatal("f on forkable hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("fork hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "fork", map[string]string{
+		"session_id": "r1",
+	})
+}
+
 func TestHubSessionDeleteAndCloseUseConfirmations(t *testing.T) {
 	h, client := newHubActionHome(t)
 
@@ -871,6 +893,22 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}
+}
+
+func TestWebMutatorForksHubSessionThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, map[string]string{"session_id": "forked_remote"})
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	gotID, err := mutator.ForkSession(webID)
+	if err != nil {
+		t.Fatalf("ForkSession: %v", err)
+	}
+	if gotID != web.HubSessionWebID("node_server", "forked_remote") {
+		t.Fatalf("ForkSession id = %q, want hub web id", gotID)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "fork", map[string]string{"session_id": "r1"})
 }
 
 func TestWebMutatorCreatesHubSessionThroughHubClient(t *testing.T) {
@@ -1310,6 +1348,19 @@ func webSnapshotHasHubSession(snapshot *web.MenuSnapshot, nodeID, sessionID stri
 	for _, item := range snapshot.Items {
 		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
 			return item.Session.Source == "hub" && item.Session.HubNodeID == nodeID && item.Session.HubSessionID == sessionID
+		}
+	}
+	return false
+}
+
+func webSnapshotHubSessionCanFork(snapshot *web.MenuSnapshot, nodeID, sessionID string) bool {
+	if snapshot == nil {
+		return false
+	}
+	wantID := web.HubSessionWebID(nodeID, sessionID)
+	for _, item := range snapshot.Items {
+		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
+			return item.Session.CanFork
 		}
 	}
 	return false

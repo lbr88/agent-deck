@@ -64,6 +64,7 @@ type SessionInfo struct {
 	GroupPath        string     `json:"group_path"`
 	ProjectPath      string     `json:"project_path,omitempty"`
 	DisplaySessionID string     `json:"display_session_id,omitempty"`
+	CanFork          bool       `json:"can_fork,omitempty"`
 	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
 	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
 }

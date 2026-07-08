@@ -89,6 +89,30 @@ func TestCommandDispatcherDeleteUsesSessionID(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherForkReturnsNewSessionID(t *testing.T) {
+	fake := &fakeActionBackend{forkedSessionID: "forked_1"}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(map[string]string{"session_id": "s1"})
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_1",
+		Action:    "fork",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch fork: %v", err)
+	}
+	if fake.forkedFromSessionID != "s1" {
+		t.Fatalf("forked from session id = %q, want s1", fake.forkedFromSessionID)
+	}
+	var result actionResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode fork result: %v", err)
+	}
+	if result.SessionID != "forked_1" {
+		t.Fatalf("fork result session_id = %q, want forked_1", result.SessionID)
+	}
+}
+
 func TestCommandDispatcherParityActionsUseBackend(t *testing.T) {
 	tests := []struct {
 		action string
@@ -244,21 +268,23 @@ func TestSanitizeWebProxyPathRejectsAbsoluteURL(t *testing.T) {
 }
 
 type fakeActionBackend struct {
-	sentSessionID    string
-	sentMessage      string
-	createReq        CreateSessionRequest
-	createSessionID  string
-	deletedSessionID string
-	previewSessionID string
-	previewContent   string
-	importTmuxCalled bool
-	importTmuxCount  int
-	lastAction       string
-	movedSessionID   string
-	movedGroupPath   string
-	updateReq        UpdateSessionRequest
-	webProxyReq      WebProxyRequest
-	webProxyResp     WebProxyResponse
+	sentSessionID       string
+	sentMessage         string
+	createReq           CreateSessionRequest
+	createSessionID     string
+	deletedSessionID    string
+	forkedFromSessionID string
+	forkedSessionID     string
+	previewSessionID    string
+	previewContent      string
+	importTmuxCalled    bool
+	importTmuxCount     int
+	lastAction          string
+	movedSessionID      string
+	movedGroupPath      string
+	updateReq           UpdateSessionRequest
+	webProxyReq         WebProxyRequest
+	webProxyResp        WebProxyResponse
 }
 
 func (b *fakeActionBackend) Send(_ context.Context, sessionID, message string) error {
@@ -282,6 +308,11 @@ func (b *fakeActionBackend) Restart(context.Context, string) error {
 func (b *fakeActionBackend) RestartFresh(_ context.Context, sessionID string) error {
 	b.lastAction = "restart_fresh:" + sessionID
 	return nil
+}
+
+func (b *fakeActionBackend) Fork(_ context.Context, sessionID string) (string, error) {
+	b.forkedFromSessionID = sessionID
+	return b.forkedSessionID, nil
 }
 
 func (b *fakeActionBackend) Rename(context.Context, string, string) error {

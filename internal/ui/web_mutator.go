@@ -472,8 +472,24 @@ func (m *WebMutator) pushUndo(inst *session.Instance) {
 
 // ForkSession forks an existing session using the proper tool-specific fork command.
 func (m *WebMutator) ForkSession(id string) (string, error) {
-	if _, _, ok := web.ParseHubSessionWebID(id); ok {
-		return "", fmt.Errorf("hub sessions cannot be forked from the web UI")
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		raw, err := m.hubCommand(nodeID, "fork", map[string]string{"session_id": sessionID})
+		if err != nil {
+			return "", err
+		}
+		var result struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return "", fmt.Errorf("decode hub fork result: %w", err)
+		}
+		result.SessionID = strings.TrimSpace(result.SessionID)
+		if result.SessionID == "" {
+			m.publishHubWebSnapshot()
+			return "", nil
+		}
+		m.publishHubWebSnapshot()
+		return web.HubSessionWebID(nodeID, result.SessionID), nil
 	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {

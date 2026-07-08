@@ -1173,6 +1173,7 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		GroupPath:        row.GroupPath,
 		ProjectPath:      row.ProjectPath,
 		DisplaySessionID: displaySessionIDFromRow(row),
+		CanFork:          canForkFromRow(row),
 		UpdatedAt:        rowUpdatedAt(row),
 	}
 	if !row.ArchivedAt.IsZero() {
@@ -1180,6 +1181,36 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		info.ArchivedAt = &archivedAt
 	}
 	return info
+}
+
+func canForkFromRow(row *statedb.InstanceRow) bool {
+	if row == nil {
+		return false
+	}
+	claudeSessionID, claudeDetectedAt,
+		_, _, _, _,
+		openCodeSessionID, openCodeDetectedAt,
+		codexSessionID, codexDetectedAt,
+		_, _, _, _,
+		sandboxJSON, _,
+		sshHost, _,
+		_, _, _, _, _, _, _, _, _, _ := statedb.UnmarshalToolData(row.ToolData)
+	proxy := &session.Instance{
+		ID:                 row.ID,
+		Tool:               row.Tool,
+		ProjectPath:        row.ProjectPath,
+		ClaudeSessionID:    claudeSessionID,
+		ClaudeDetectedAt:   claudeDetectedAt,
+		OpenCodeSessionID:  openCodeSessionID,
+		OpenCodeDetectedAt: openCodeDetectedAt,
+		CodexSessionID:     codexSessionID,
+		CodexDetectedAt:    codexDetectedAt,
+		SSHHost:            sshHost,
+	}
+	if len(sandboxJSON) > 0 {
+		_ = json.Unmarshal(sandboxJSON, &proxy.Sandbox)
+	}
+	return proxy.CanFork()
 }
 
 func displaySessionIDFromRow(row *statedb.InstanceRow) string {

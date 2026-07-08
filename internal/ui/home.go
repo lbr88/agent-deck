@@ -2095,7 +2095,7 @@ func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bo
 					HubSessionID:   info.ID,
 					HubGroupPath:   groupPath,
 					ReadOnly:       false,
-					CanFork:        false,
+					CanFork:        info.CanFork,
 				}
 				if menuSession.Title == "" {
 					menuSession.Title = info.ID
@@ -2841,6 +2841,7 @@ func (h *Home) projectHubItems() []session.Item {
 				GroupPath:        info.GroupPath,
 				ProjectPath:      info.ProjectPath,
 				DisplaySessionID: info.DisplaySessionID,
+				CanFork:          info.CanFork,
 				ArchivedAt:       info.ArchivedAt,
 			}
 			groupPath := strings.Trim(strings.TrimSpace(hubInfo.GroupPath), "/")
@@ -8965,6 +8966,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if item.Session.CanFork() {
 					return h, h.quickForkSession(item.Session)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubSession.CanFork {
+				return h, h.hubSessionCommand(item, "fork", nil)
 			}
 		}
 		return h, nil
@@ -16510,8 +16513,12 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 
 	case session.ItemTypeHubSession:
 		add("⏎", "attach")
-		add(newQuick, "new")
 		add(h.actionKey(hotkeyRestart), "restart")
+		if item.HubSession != nil && item.HubSession.CanFork {
+			add(h.actionKey(hotkeyQuickFork), "fork")
+		} else {
+			add(newQuick, "new")
+		}
 		add(h.actionKey(hotkeyDelete), "delete")
 		add(h.actionKey(hotkeyCloseSession), "close")
 	}

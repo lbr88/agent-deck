@@ -75,6 +75,7 @@ type HubSessionInfo struct {
 	GroupPath        string
 	ProjectPath      string
 	DisplaySessionID string
+	CanFork          bool
 	ArchivedAt       *time.Time
 }
 

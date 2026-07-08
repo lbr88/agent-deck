@@ -71,6 +71,25 @@ func TestIndexNoCDN(t *testing.T) {
 	}
 }
 
+func TestWebUIAllowsForkButtonForForkableHubSessions(t *testing.T) {
+	for _, file := range []string{
+		"static/app/AppShell.js",
+		"static/app/Sidebar.js",
+	} {
+		data, err := embeddedStaticFiles.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", file, err)
+		}
+		body := string(data)
+		if strings.Contains(body, "!session.isHub && session.canFork") || strings.Contains(body, "!s.isHub && s.canFork") {
+			t.Fatalf("%s still hides fork actions for hub sessions", file)
+		}
+		if !strings.Contains(body, "session.canFork") && !strings.Contains(body, "s.canFork") {
+			t.Fatalf("%s does not render fork action from canFork", file)
+		}
+	}
+}
+
 func TestVendorFilesServed(t *testing.T) {
 	s := NewServer(Config{})
 	mux := http.NewServeMux()

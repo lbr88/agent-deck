@@ -248,7 +248,11 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: newID})
 		case "archive":
 			if err := s.mutator.ArchiveSession(sessionID); err != nil {
