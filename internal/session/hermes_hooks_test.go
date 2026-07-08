@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,47 @@ func TestInjectHermesHooks_AllEventsPresent(t *testing.T) {
 		if event == "on_session_start" && !contextFound {
 			t.Errorf("event %q missing agent-deck hub context entry", event)
 		}
+	}
+}
+
+func TestInjectHermesHooks_RemovesStaleHighFrequencyContextHooks(t *testing.T) {
+	dir := t.TempDir()
+	existing := []byte(`hooks:
+  pre_tool_call:
+    - command: agent-deck hook-handler
+    - command: agent-deck agent-context --format plain
+  post_tool_call:
+    - command: agent-deck agent-context --format plain
+  on_session_start:
+    - command: agent-deck hook-handler
+    - command: agent-deck agent-context --format plain
+  on_session_end:
+    - command: agent-deck hook-handler
+`)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), existing, 0o644); err != nil {
+		t.Fatalf("seed config.yaml: %v", err)
+	}
+
+	changed, err := session.InjectHermesHooks(dir)
+	if err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected stale high-frequency context cleanup to report changed")
+	}
+
+	hooksSection := readHermesHooksSection(t, filepath.Join(dir, "config.yaml"))
+	if hermesTestEventHasCommand(hooksSection["pre_tool_call"], "agent-deck agent-context --format plain") {
+		t.Fatal("pre_tool_call must not include hub context hook")
+	}
+	if hermesTestEventHasCommand(hooksSection["post_tool_call"], "agent-deck agent-context --format plain") {
+		t.Fatal("post_tool_call must not include hub context hook")
+	}
+	if !hermesTestEventHasCommand(hooksSection["pre_tool_call"], "agent-deck hook-handler") {
+		t.Fatal("pre_tool_call status hook should remain")
+	}
+	if !hermesTestEventHasCommand(hooksSection["on_session_start"], "agent-deck agent-context --format plain") {
+		t.Fatal("on_session_start should retain hub context hook")
 	}
 }
 
@@ -213,6 +255,37 @@ func TestRemoveHermesHooks_PreservesUserHookContainingSubstring(t *testing.T) {
 	if !strings.Contains(string(data), "/usr/local/bin/wrap.sh agent-deck hook-handler --debug") {
 		t.Errorf("user hook containing agent-deck substring was clobbered; config: %s", data)
 	}
+}
+
+func readHermesHooksSection(t *testing.T, path string) map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse config.yaml: %v", err)
+	}
+	hooksSection, _ := raw["hooks"].(map[string]interface{})
+	if hooksSection == nil {
+		t.Fatal("missing hooks section")
+	}
+	return hooksSection
+}
+
+func hermesTestEventHasCommand(raw interface{}, command string) bool {
+	entries, _ := raw.([]interface{})
+	for _, entry := range entries {
+		item, _ := entry.(map[string]interface{})
+		if item == nil {
+			continue
+		}
+		if strings.TrimSpace(fmt.Sprint(item["command"])) == command {
+			return true
+		}
+	}
+	return false
 }
 
 // TestInjectRemoveHermesHooks_ConcurrentSafe runs many parallel inject/remove

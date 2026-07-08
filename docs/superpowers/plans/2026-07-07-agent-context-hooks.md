@@ -18,13 +18,13 @@ Give supported agent CLIs model-visible Agent Deck hub instructions through thei
 
 | Tool | Installer | Context hook events |
 |------|-----------|---------------------|
-| Claude | `agent-deck hooks install` | `SessionStart`, `UserPromptSubmit` |
-| Codex | `agent-deck codex-hooks install` | `SessionStart`, `UserPromptSubmit` |
-| Gemini | `agent-deck gemini-hooks install` | `SessionStart`, `BeforeAgent` |
-| Cursor | `agent-deck cursor-hooks install` | `sessionStart`, `beforeSubmitPrompt` |
+| Claude | `agent-deck hooks install` | `SessionStart` |
+| Codex | `agent-deck codex-hooks install` | `SessionStart` |
+| Gemini | `agent-deck gemini-hooks install` | `SessionStart` |
+| Cursor | `agent-deck cursor-hooks install` | `sessionStart` |
 | Hermes | `agent-deck hermes-hooks install` | `on_session_start` |
-| Kiro | `agent-deck kiro-hooks install` | `agentSpawn`, `userPromptSubmit` on global `agent-deck` custom agent |
-| OpenCode | `agent-deck opencode-hooks install` | global plugin using the system prompt transform hook |
+| Kiro | `agent-deck kiro-hooks install` | `agentSpawn` on global `agent-deck` custom agent |
+| OpenCode | `agent-deck opencode-hooks install` | none; install removes the legacy prompt-context plugin if present |
 
 Kiro hooks are attached to a custom agent. Agent Deck should launch Kiro with the generated `agent-deck` agent only when hooks are installed and no other Kiro agent is explicitly configured.
 

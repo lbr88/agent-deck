@@ -111,6 +111,8 @@ func (s *Search) WantsSwitchToGlobal() bool {
 func (s *Search) Hide() {
 	s.visible = false
 	s.input.Blur()
+	s.input.SetValue("")
+	s.updateResults()
 	s.scopedGroup = ""
 }
 

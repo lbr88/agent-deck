@@ -142,7 +142,9 @@ func InjectHermesHooks(configDir string) (bool, error) {
 		}
 	}
 
-	if hermesHooksAlreadyInstalled(raw) {
+	removedStaleContext := removeHermesContextHooksFromEvents(raw, hermesStaleContextHookEvents())
+
+	if hermesHooksAlreadyInstalled(raw) && !removedStaleContext {
 		return false, nil
 	}
 
@@ -317,6 +319,58 @@ func mergeHermesHookEntries(raw map[string]interface{}) {
 	}
 
 	raw["hooks"] = hooksSection
+}
+
+func hermesStaleContextHookEvents() []string {
+	contextEvents := make(map[string]bool, len(hermesContextHookEvents))
+	for _, event := range hermesContextHookEvents {
+		contextEvents[event] = true
+	}
+	var events []string
+	for _, event := range hermesHookEvents {
+		if !contextEvents[event] {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func removeHermesContextHooksFromEvents(raw map[string]interface{}, events []string) bool {
+	hooksSection, _ := raw["hooks"].(map[string]interface{})
+	if hooksSection == nil {
+		return false
+	}
+	removed := false
+	for _, event := range events {
+		eventHooks, _ := hooksSection[event].([]interface{})
+		if len(eventHooks) == 0 {
+			continue
+		}
+		eventRemoved := false
+		var kept []interface{}
+		for _, h := range eventHooks {
+			hm, ok := h.(map[string]interface{})
+			if !ok {
+				kept = append(kept, h)
+				continue
+			}
+			cmd, _ := hm["command"].(string)
+			if strings.TrimSpace(cmd) == agentDeckHermesContextHookCommand {
+				removed = true
+				eventRemoved = true
+				continue
+			}
+			kept = append(kept, h)
+		}
+		if eventRemoved {
+			if len(kept) == 0 {
+				delete(hooksSection, event)
+			} else {
+				hooksSection[event] = kept
+			}
+		}
+	}
+	return removed
 }
 
 func hermesEventHasCommand(eventHooks []interface{}, command string) bool {

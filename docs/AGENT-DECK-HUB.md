@@ -137,7 +137,7 @@ agent-deck kiro-hooks install
 agent-deck opencode-hooks install
 ```
 
-These installers add Agent Deck's existing status hooks where supported and also install hub context hooks by default. The context hook command is silent when the hub is not configured, so it is safe to install before a node joins a hub.
+These installers add Agent Deck's existing status hooks where supported and install hub context hooks only on narrow session-start or agent-spawn events. They do not add Agent Deck hub context to per-prompt submit hooks. The context hook command is silent when the hub is not configured, so it is safe to install before a node joins a hub.
 
 Current model-visible context support:
 
@@ -148,7 +148,6 @@ Current model-visible context support:
 - Hermes: `on_session_start`.
 - Kiro: `agentSpawn` on a generated global `agent-deck` custom agent. Agent Deck launches Kiro with that agent when Kiro hooks are installed and no other Kiro agent is configured.
 - OpenCode: no prompt-context hook is installed; `opencode-hooks install` removes the legacy Agent Deck context plugin if present.
-- OpenCode: global plugin using the system prompt transform hook.
 
 Codex may require reviewing and trusting the installed command hooks through its `/hooks` UI before they run. Tools without a verified model-visible hook contract are not wired to `agent-context`.
 

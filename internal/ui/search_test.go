@@ -63,6 +63,14 @@ func TestSearchShowClearsPreviousQuery(t *testing.T) {
 	}
 
 	s.Hide()
+
+	if got := s.input.Value(); got != "" {
+		t.Fatalf("search query after hide = %q, want empty", got)
+	}
+	if len(s.results) != 2 {
+		t.Fatalf("search results after hide = %d, want all items", len(s.results))
+	}
+
 	s.Show()
 
 	if got := s.input.Value(); got != "" {

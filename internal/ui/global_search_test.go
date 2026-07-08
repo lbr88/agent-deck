@@ -103,13 +103,27 @@ func TestGlobalSearchSelected(t *testing.T) {
 func TestGlobalSearchEnterClosesAndSelects(t *testing.T) {
 	gs := NewGlobalSearch()
 	gs.Show()
+	gs.input.SetValue("deploy")
+	gs.query = "deploy"
 	gs.results = []*GlobalSearchResult{
 		{SessionID: "test-1", Summary: "Test"},
 	}
+	gs.cursor = 0
+	gs.previewScroll = 2
+	gs.searching = true
 
 	gs.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if gs.IsVisible() {
 		t.Error("Enter should hide GlobalSearch")
+	}
+	if got := gs.input.Value(); got != "" {
+		t.Fatalf("query after Enter = %q, want empty", got)
+	}
+	if gs.query != "" {
+		t.Fatalf("stored query after Enter = %q, want empty", gs.query)
+	}
+	if len(gs.results) != 0 {
+		t.Fatalf("results after Enter = %d, want 0", len(gs.results))
 	}
 }
 

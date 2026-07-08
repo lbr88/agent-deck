@@ -146,6 +146,12 @@ func (gs *GlobalSearch) WantsSwitchToLocal() bool {
 func (gs *GlobalSearch) Hide() {
 	gs.visible = false
 	gs.input.Blur()
+	gs.input.SetValue("")
+	gs.query = ""
+	gs.results = nil
+	gs.cursor = 0
+	gs.previewScroll = 0
+	gs.searching = false
 }
 
 // IsVisible returns whether the overlay is visible
