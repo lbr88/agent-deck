@@ -209,15 +209,16 @@ type Home struct {
 	profile string // The profile this Home is displaying
 
 	// Data (protected by instancesMu for background worker access)
-	instances          []*session.Instance
-	instanceByID       map[string]*session.Instance // O(1) instance lookup by ID
-	instancesMu        sync.RWMutex                 // Protects instances slice for thread-safe background access
-	storage            *session.Storage
-	groupTree          *session.GroupTree
-	flatItems          []session.Item // Flattened view for cursor navigation
-	liveSet            *pipeLiveSet   // sessions that should hold a live control pipe
-	focusedSessionName string         // tmux name of the cursor-selected session (focusMu)
-	focusMu            sync.Mutex     // protects focusedSessionName for the reconciler goroutine
+	instances             []*session.Instance
+	instanceByID          map[string]*session.Instance // O(1) instance lookup by ID
+	instancesMu           sync.RWMutex                 // Protects instances slice for thread-safe background access
+	storage               *session.Storage
+	groupTree             *session.GroupTree
+	flatItems             []session.Item // Flattened view for cursor navigation
+	searchPinnedSessionID string         // one-shot local search result forced visible through status filter until cursor leaves it
+	liveSet               *pipeLiveSet   // sessions that should hold a live control pipe
+	focusedSessionName    string         // tmux name of the cursor-selected session (focusMu)
+	focusMu               sync.Mutex     // protects focusedSessionName for the reconciler goroutine
 
 	// headless is true when running `web --no-tui`: no bubbletea loop ever
 	// boots, so the in-memory instances/groupTree are never populated by the
@@ -2537,18 +2538,19 @@ func (h *Home) rebuildFlatItems() {
 		// headers must remain visible when they contain sessions matching the
 		// active status filter so users can expand them without switching to "all".
 		groupsWithMatches := h.statusFilterGroupsWithMatches(h.statusFilter)
+		pinnedGroupPaths := h.pinnedSearchSessionGroupPaths()
 
 		// Second pass: filter items
 		filtered := make([]session.Item, 0, len(allItems))
 		for _, item := range allItems {
 			if item.Type == session.ItemTypeGroup {
 				// Keep group if it has matching sessions
-				if groupsWithMatches[item.Path] {
+				if groupsWithMatches[item.Path] || pinnedGroupPaths[item.Path] {
 					filtered = append(filtered, item)
 				}
 			} else if item.Type == session.ItemTypeSession && item.Session != nil {
 				// Keep session if it matches the filter
-				if h.matchesStatusFilter(h.statusFilter, item.Session.Status) {
+				if h.matchesStatusFilter(h.statusFilter, item.Session.Status) || item.Session.ID == h.searchPinnedSessionID {
 					filtered = append(filtered, item)
 				}
 			}
@@ -4548,6 +4550,63 @@ func (h *Home) markNavigationActivity() {
 	h.lastNavigationTime = now
 	h.isNavigating = true
 	h.navigationHotUntil.Store(now.Add(900 * time.Millisecond).UnixNano())
+	h.clearSearchPinnedSessionIfCursorMoved()
+}
+
+func (h *Home) pinSearchResultSession(sessionID string) {
+	h.searchPinnedSessionID = strings.TrimSpace(sessionID)
+}
+
+func (h *Home) selectedLocalSessionID() string {
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return ""
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type != session.ItemTypeSession || item.Session == nil {
+		return ""
+	}
+	return item.Session.ID
+}
+
+func (h *Home) clearSearchPinnedSessionIfCursorMoved() {
+	if h.searchPinnedSessionID == "" || h.selectedLocalSessionID() == h.searchPinnedSessionID {
+		return
+	}
+	identity := h.captureSelectedItemIdentity()
+	h.searchPinnedSessionID = ""
+	h.rebuildFlatItems()
+	if !h.restoreSelectedItemIdentity(identity) && len(h.flatItems) > 0 {
+		h.cursor = min(max(h.cursor, 0), len(h.flatItems)-1)
+	}
+	h.syncViewport()
+}
+
+func (h *Home) pinnedSearchSessionGroupPaths() map[string]bool {
+	if h.searchPinnedSessionID == "" {
+		return nil
+	}
+	var groupPath string
+	h.instancesMu.RLock()
+	for _, inst := range h.instances {
+		if inst != nil && inst.ID == h.searchPinnedSessionID {
+			groupPath = inst.GroupPath
+			break
+		}
+	}
+	h.instancesMu.RUnlock()
+	if groupPath == "" {
+		return nil
+	}
+	out := make(map[string]bool)
+	parts := strings.Split(groupPath, "/")
+	for i := range parts {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		out[strings.Join(parts[:i+1], "/")] = true
+	}
+	return out
 }
 
 func (h *Home) beginAttachReturnGrace(now time.Time) {
@@ -7504,6 +7563,7 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		selected := h.search.Selected()
 		if selected != nil {
+			h.pinSearchResultSession(selected.ID)
 			// Ensure the session's group AND all parent groups are expanded so it's visible
 			if selected.GroupPath != "" {
 				h.groupTree.ExpandGroupWithParents(selected.GroupPath)
@@ -8327,6 +8387,7 @@ func (h *Home) hasModalVisible() bool {
 func (h *Home) markNavigationAndFetchPreview() tea.Cmd {
 	h.lastNavigationTime = time.Now()
 	h.isNavigating = true
+	h.clearSearchPinnedSessionIfCursorMoved()
 	return h.fetchSelectedPreview()
 }
 

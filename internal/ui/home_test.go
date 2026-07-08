@@ -4172,6 +4172,58 @@ func TestRebuildFlatItemsActiveFilterKeepsCollapsedMatchingGroupHeader(t *testin
 	}
 }
 
+func TestSearchSelectionPinsSessionHiddenByOpenFilterUntilCursorMoves(t *testing.T) {
+	running := session.NewInstanceWithGroup("running", "/tmp/running", "work")
+	running.ID = "running-id"
+	running.Status = session.StatusRunning
+	stopped := session.NewInstanceWithGroup("done", "/tmp/done", "work")
+	stopped.ID = "done-id"
+	stopped.Status = session.StatusStopped
+
+	h := NewHome()
+	h.storage = nil
+	h.statusFilter = FilterModeActive
+	h.activeFilterExcludes = (session.DisplaySettings{}).GetActiveFilterExcludes()
+	h.instances = []*session.Instance{running, stopped}
+	h.instanceByID = map[string]*session.Instance{running.ID: running, stopped.ID: stopped}
+	h.groupTree = session.NewGroupTree(h.instances)
+	h.windowsCollapsed = make(map[string]bool)
+	h.rebuildFlatItems()
+
+	if visibleSessionID(h, stopped.ID) {
+		t.Fatalf("setup: stopped session should be hidden by open filter; flat=%v", visibleSessionIDsFromFlat(h))
+	}
+
+	h.search.Show()
+	h.search.results = []*session.Instance{stopped}
+	h.search.cursor = 0
+	model, _ := h.handleSearchKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+
+	if h.searchPinnedSessionID != stopped.ID {
+		t.Fatalf("searchPinnedSessionID = %q, want %q", h.searchPinnedSessionID, stopped.ID)
+	}
+	if !visibleSessionID(h, stopped.ID) {
+		t.Fatalf("search-selected stopped session should be force-visible; flat=%v", visibleSessionIDsFromFlat(h))
+	}
+	if got := selectedSessionID(h); got != stopped.ID {
+		t.Fatalf("cursor selected %q, want searched stopped session %q", got, stopped.ID)
+	}
+
+	model, _ = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	h = model.(*Home)
+
+	if h.searchPinnedSessionID != "" {
+		t.Fatalf("search pin should clear after cursor moves away, got %q", h.searchPinnedSessionID)
+	}
+	if visibleSessionID(h, stopped.ID) {
+		t.Fatalf("stopped session should be hidden again after cursor leaves it; flat=%v", visibleSessionIDsFromFlat(h))
+	}
+	if got := selectedSessionID(h); got != running.ID {
+		t.Fatalf("cursor selected %q after moving away, want running session %q", got, running.ID)
+	}
+}
+
 func TestRebuildFlatItemsCollapsedGroupKeepsHeaderInArchivedView(t *testing.T) {
 	h := NewHome()
 	h.statusFilter = FilterModeArchived
@@ -4484,6 +4536,10 @@ func selectedSessionID(h *Home) string {
 		return item.Session.ID
 	}
 	return ""
+}
+
+func visibleSessionID(h *Home, id string) bool {
+	return sliceContainsString(visibleSessionIDsFromFlat(h), id)
 }
 
 // TestHandleMainKeyQuickApproveWaitingSession verifies that pressing the
