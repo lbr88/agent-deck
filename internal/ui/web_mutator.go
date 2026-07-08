@@ -1,16 +1,20 @@
 package ui
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/git"
+	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/vcs"
 	"github.com/asheshgoplani/agent-deck/internal/vcsbackend"
@@ -19,6 +23,7 @@ import (
 
 // Compile-time check: WebMutator must implement web.SessionMutator.
 var _ web.SessionMutator = (*WebMutator)(nil)
+var _ web.HubSessionCreator = (*WebMutator)(nil)
 
 // WebMutator bridges the web HTTP handlers to the TUI session/group management
 // methods. It wraps the Home model and implements web.SessionMutator.
@@ -138,8 +143,38 @@ func (m *WebMutator) CreateSession(title, tool, projectPath, groupPath, modelID 
 	return inst.ID, nil
 }
 
+func (m *WebMutator) CreateHubSession(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error) {
+	req := hub.CreateSessionRequest{
+		Title:       strings.TrimSpace(title),
+		Tool:        strings.TrimSpace(tool),
+		ProjectPath: strings.TrimSpace(projectPath),
+		GroupPath:   strings.Trim(strings.TrimSpace(groupPath), "/"),
+		ModelID:     strings.TrimSpace(modelID),
+	}
+	if req.ProjectPath == "" {
+		req.ProjectPath = "."
+	}
+	raw, err := m.hubCommand(strings.TrimSpace(hubNodeID), "create", req)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = json.Unmarshal(raw, &result)
+	if strings.TrimSpace(result.SessionID) == "" {
+		m.publishHubWebSnapshot()
+		return "", nil
+	}
+	m.publishHubWebSnapshot()
+	return web.HubSessionWebID(hubNodeID, result.SessionID), nil
+}
+
 // StartSession starts a stopped/idle session by ID.
 func (m *WebMutator) StartSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "start")
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -156,6 +191,9 @@ func (m *WebMutator) StartSession(id string) error {
 
 // StopSession kills (stops) a running session by ID.
 func (m *WebMutator) StopSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "stop")
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -172,6 +210,9 @@ func (m *WebMutator) StopSession(id string) error {
 
 // RestartSession restarts a session by ID.
 func (m *WebMutator) RestartSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "restart")
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -190,6 +231,14 @@ func (m *WebMutator) RestartSession(id string) error {
 // Before removal, the instance is pushed onto the web undo stack so a
 // subsequent UndoDelete (POST /api/sessions/undelete) can restore it.
 func (m *WebMutator) DeleteSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if err := m.hubSessionAction(nodeID, sessionID, "delete"); err != nil {
+			return err
+		}
+		m.h.removeHubSessionFromCache(nodeID, sessionID)
+		m.publishHubWebSnapshot()
+		return nil
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -225,6 +274,9 @@ func (m *WebMutator) DeleteSession(id string) error {
 // the front-end can express the user-visible intent ("close, but don't
 // delete").
 func (m *WebMutator) CloseSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.hubSessionAction(nodeID, sessionID, "stop")
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -242,6 +294,14 @@ func (m *WebMutator) CloseSession(id string) error {
 // ArchiveSession stops the session process and marks it archived so it
 // is hidden from active lists but retained in storage.
 func (m *WebMutator) ArchiveSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if err := m.hubSessionAction(nodeID, sessionID, "archive"); err != nil {
+			return err
+		}
+		m.h.updateHubSessionArchived(nodeID, sessionID, time.Now().UTC())
+		m.publishHubWebSnapshot()
+		return nil
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -264,6 +324,14 @@ func (m *WebMutator) ArchiveSession(id string) error {
 
 // UnarchiveSession clears the archive flag without starting tmux.
 func (m *WebMutator) UnarchiveSession(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if err := m.hubSessionAction(nodeID, sessionID, "unarchive"); err != nil {
+			return err
+		}
+		m.h.updateHubSessionArchived(nodeID, sessionID, time.Time{})
+		m.publishHubWebSnapshot()
+		return nil
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return err
@@ -377,6 +445,9 @@ func (m *WebMutator) pushUndo(inst *session.Instance) {
 
 // ForkSession forks an existing session using the proper tool-specific fork command.
 func (m *WebMutator) ForkSession(id string) (string, error) {
+	if _, _, ok := web.ParseHubSessionWebID(id); ok {
+		return "", fmt.Errorf("hub sessions cannot be forked from the web UI")
+	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return "", err
@@ -427,6 +498,9 @@ func (m *WebMutator) ForkSession(id string) (string, error) {
 func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]string, bool, []string, error) {
 	if len(updates) == 0 {
 		return nil, false, nil, nil
+	}
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		return m.updateHubSession(nodeID, sessionID, updates)
 	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
@@ -509,6 +583,60 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 		}
 	}
 	return changed, restartRequired, warnings, nil
+}
+
+func (m *WebMutator) updateHubSession(nodeID, sessionID string, updates map[string]string) ([]string, bool, []string, error) {
+	changes := make([]hub.SessionFieldChange, 0, len(updates))
+	changed := make([]string, 0, len(updates))
+	for field, value := range updates {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		changes = append(changes, hub.SessionFieldChange{Field: field, Value: value})
+		changed = append(changed, field)
+	}
+	if len(changes) == 0 {
+		return nil, false, nil, nil
+	}
+	sort.Strings(changed)
+	if _, err := m.hubCommand(nodeID, "update", hub.UpdateSessionRequest{SessionID: sessionID, Changes: changes}); err != nil {
+		return nil, false, nil, err
+	}
+	m.h.applyHubSessionFieldChanges(nodeID, sessionID, changes)
+	m.publishHubWebSnapshot()
+	return changed, false, nil, nil
+}
+
+func (m *WebMutator) hubSessionAction(nodeID, sessionID, action string) error {
+	_, err := m.hubCommand(nodeID, action, map[string]string{"session_id": sessionID})
+	if err == nil {
+		m.publishHubWebSnapshot()
+	}
+	return err
+}
+
+func (m *WebMutator) hubCommand(nodeID, action string, payload any) (json.RawMessage, error) {
+	if m == nil || m.h == nil || m.h.hubClient == nil {
+		return nil, fmt.Errorf("hub client is not connected")
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	action = strings.TrimSpace(action)
+	if nodeID == "" || action == "" {
+		return nil, fmt.Errorf("hub action target is incomplete")
+	}
+	ctx := m.h.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return m.h.hubClient.Command(ctx, nodeID, action, payload)
+}
+
+func (m *WebMutator) publishHubWebSnapshot() {
+	if m == nil || m.h == nil {
+		return
+	}
+	m.h.publishWebMenuSnapshot()
 }
 
 // CreateGroup creates a new group (or subgroup if parentPath is non-empty) and

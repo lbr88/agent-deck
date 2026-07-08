@@ -52,6 +52,10 @@ type MenuGroup struct {
 	Expanded     bool   `json:"expanded"`
 	Order        int    `json:"order"`
 	SessionCount int    `json:"sessionCount"`
+	Source       string `json:"source,omitempty"`
+	HubNodeID    string `json:"hubNodeId,omitempty"`
+	HubNodeName  string `json:"hubNodeName,omitempty"`
+	HubGroupPath string `json:"hubGroupPath,omitempty"`
 }
 
 // MenuSession contains metadata for a session item.
@@ -130,6 +134,30 @@ type MenuSession struct {
 	// claude_analytics has no underlying struct on *Instance so the matrix
 	// keeps it MISSING; only gemini is exposed today.
 	GeminiAnalytics *session.GeminiSessionAnalytics `json:"geminiAnalytics,omitempty"`
+
+	Source       string `json:"source,omitempty"`
+	HubNodeID    string `json:"hubNodeId,omitempty"`
+	HubNodeName  string `json:"hubNodeName,omitempty"`
+	HubSessionID string `json:"hubSessionId,omitempty"`
+	HubGroupPath string `json:"hubGroupPath,omitempty"`
+	ReadOnly     bool   `json:"readOnly,omitempty"`
+}
+
+func HubSessionWebID(nodeID, sessionID string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return ""
+	}
+	return "hub:" + nodeID + ":" + sessionID
+}
+
+func ParseHubSessionWebID(id string) (nodeID, sessionID string, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(id), ":", 3)
+	if len(parts) != 3 || parts[0] != "hub" || parts[1] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[1], parts[2], true
 }
 
 type storageLoader interface {

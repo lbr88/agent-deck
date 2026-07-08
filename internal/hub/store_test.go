@@ -276,6 +276,34 @@ func TestStoreSnapshotPreservesNanosecondSentAt(t *testing.T) {
 	}
 }
 
+func TestStoreLatestSessionsIncludesOnlineNodeWithoutSnapshot(t *testing.T) {
+	store := openTestStore(t)
+	node, err := store.UpsertNode("node_empty", "empty-node", "secret_hash", "1.2.3", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	if err := store.MarkNodeOnline(node.ID); err != nil {
+		t.Fatalf("MarkNodeOnline: %v", err)
+	}
+
+	got, err := store.LatestSessions()
+	if err != nil {
+		t.Fatalf("LatestSessions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LatestSessions length = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Node.ID != "node_empty" || got[0].Node.Name != "empty-node" {
+		t.Fatalf("node = %+v", got[0].Node)
+	}
+	if len(got[0].Sessions) != 0 {
+		t.Fatalf("sessions length = %d, want 0", len(got[0].Sessions))
+	}
+	if got[0].SentAt.IsZero() {
+		t.Fatal("SentAt is zero")
+	}
+}
+
 func TestStoreLatestSessionsIncludesNodeMetadataAndStatus(t *testing.T) {
 	store := openTestStore(t)
 	node, err := store.UpsertNode("node_1", "laptop", "secret_hash", "1.2.3", "linux", "amd64")

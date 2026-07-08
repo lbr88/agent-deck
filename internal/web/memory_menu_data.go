@@ -18,9 +18,10 @@ type MenuSessionState struct {
 // It can optionally fall back to a loader (e.g. storage-backed) until the
 // first in-memory snapshot is published.
 type MemoryMenuData struct {
-	mu       sync.RWMutex
-	snapshot *MenuSnapshot
-	fallback MenuDataLoader
+	mu               sync.RWMutex
+	snapshot         *MenuSnapshot
+	archivedSnapshot *MenuSnapshot
+	fallback         MenuDataLoader
 }
 
 // NewMemoryMenuData creates an in-memory menu data store.
@@ -53,7 +54,16 @@ func (m *MemoryMenuData) LoadMenuSnapshot() (*MenuSnapshot, error) {
 
 // LoadArchivedMenuSnapshot returns archived sessions from the storage fallback.
 func (m *MemoryMenuData) LoadArchivedMenuSnapshot() (*MenuSnapshot, error) {
-	if m == nil || m.fallback == nil {
+	if m == nil {
+		return nil, fmt.Errorf("menu snapshot is unavailable")
+	}
+	m.mu.RLock()
+	current := cloneMenuSnapshot(m.archivedSnapshot)
+	m.mu.RUnlock()
+	if current != nil {
+		return current, nil
+	}
+	if m.fallback == nil {
 		return nil, fmt.Errorf("menu snapshot is unavailable")
 	}
 	if loader, ok := m.fallback.(interface {
@@ -74,6 +84,7 @@ func (m *MemoryMenuData) InvalidateCache() {
 	}
 	m.mu.Lock()
 	m.snapshot = nil
+	m.archivedSnapshot = nil
 	m.mu.Unlock()
 }
 
@@ -84,6 +95,16 @@ func (m *MemoryMenuData) SetSnapshot(snapshot *MenuSnapshot) {
 	}
 	m.mu.Lock()
 	m.snapshot = cloneMenuSnapshot(snapshot)
+	m.mu.Unlock()
+}
+
+// SetArchivedSnapshot replaces the stored archived menu snapshot.
+func (m *MemoryMenuData) SetArchivedSnapshot(snapshot *MenuSnapshot) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.archivedSnapshot = cloneMenuSnapshot(snapshot)
 	m.mu.Unlock()
 }
 

@@ -602,8 +602,9 @@ func (s *Store) LatestSessions() ([]NodeSessions, error) {
 	rows, err := s.db.Query(
 		`SELECT n.id, n.name, n.token_hash, n.version, n.os, n.arch, n.status, n.last_seen_at, n.admin,
 		        s.sent_at, s.payload_json
-		 FROM snapshots s
-		 JOIN nodes n ON n.id = s.node_id
+		 FROM nodes n
+		 LEFT JOIN snapshots s ON s.node_id = n.id
+		 WHERE s.node_id IS NOT NULL OR n.status = 'online'
 		 ORDER BY n.name, n.id`,
 	)
 	if err != nil {
@@ -614,18 +615,27 @@ func (s *Store) LatestSessions() ([]NodeSessions, error) {
 	var out []NodeSessions
 	for rows.Next() {
 		var node Node
-		var sentAtUnix int64
-		var payloadJSON string
+		var sentAtUnix sql.NullInt64
+		var payloadJSON sql.NullString
 		if err := scanNodeFields(rows, &node, &sentAtUnix, &payloadJSON); err != nil {
 			return nil, fmt.Errorf("scan latest sessions: %w", err)
 		}
 		var snapshot SnapshotPayload
-		if err := json.Unmarshal([]byte(payloadJSON), &snapshot); err != nil {
-			return nil, fmt.Errorf("decode snapshot for node %s: %w", node.ID, err)
+		sentAt := time.Now().UTC()
+		if sentAtUnix.Valid {
+			sentAt = time.Unix(0, sentAtUnix.Int64)
+		}
+		if payloadJSON.Valid && strings.TrimSpace(payloadJSON.String) != "" {
+			if err := json.Unmarshal([]byte(payloadJSON.String), &snapshot); err != nil {
+				return nil, fmt.Errorf("decode snapshot for node %s: %w", node.ID, err)
+			}
+			if !snapshot.SentAt.IsZero() {
+				sentAt = snapshot.SentAt
+			}
 		}
 		out = append(out, NodeSessions{
 			Node:     node,
-			SentAt:   time.Unix(0, sentAtUnix),
+			SentAt:   sentAt,
 			Sessions: snapshot.Sessions,
 		})
 	}

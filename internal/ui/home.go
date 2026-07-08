@@ -1997,7 +1997,138 @@ func (h *Home) publishWebMenuSnapshot() {
 		})
 	}
 
-	menuData.SetSnapshot(web.BuildMenuSnapshot(h.profile, instancesCopy, groupsData, time.Now()))
+	now := time.Now()
+	active := session.FilterInstancesByArchive(instancesCopy, false)
+	archived := session.FilterInstancesByArchive(instancesCopy, true)
+	activeSnapshot := web.BuildMenuSnapshot(h.profile, active, groupsData, now)
+	archivedSnapshot := web.BuildMenuSnapshot(h.profile, archived, groupsData, now)
+	h.appendHubWebMenuItems(activeSnapshot, false)
+	h.appendHubWebMenuItems(archivedSnapshot, true)
+	menuData.SetSnapshot(activeSnapshot)
+	menuData.SetArchivedSnapshot(archivedSnapshot)
+}
+
+func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bool) {
+	if snapshot == nil || !h.hubConfigured {
+		return
+	}
+
+	nodes := h.hubSessionSnapshots()
+	for _, node := range nodes {
+		if h.isLocalHubNode(node) {
+			continue
+		}
+		nodeID := strings.TrimSpace(node.Node.ID)
+		if nodeID == "" {
+			continue
+		}
+		nodeName := hubNodeDisplayName(node)
+		byGroup := make(map[string][]hub.SessionInfo)
+		for _, info := range node.Sessions {
+			isArchived := info.ArchivedAt != nil && !info.ArchivedAt.IsZero()
+			if isArchived != archivedView {
+				continue
+			}
+			groupPath := strings.Trim(strings.TrimSpace(info.GroupPath), "/")
+			if groupPath == "" {
+				groupPath = session.DefaultGroupPath
+			}
+			info.GroupPath = groupPath
+			byGroup[groupPath] = append(byGroup[groupPath], info)
+		}
+
+		groupPaths := make([]string, 0, len(byGroup))
+		for groupPath := range byGroup {
+			groupPaths = append(groupPaths, groupPath)
+		}
+		sort.Strings(groupPaths)
+		if len(groupPaths) == 0 && !archivedView {
+			groupPaths = append(groupPaths, session.DefaultGroupPath)
+		}
+
+		for _, groupPath := range groupPaths {
+			webGroupPath := hubWebGroupPath(nodeID, groupPath)
+			sessions := byGroup[groupPath]
+			group := &web.MenuGroup{
+				Name:         hubDisplayGroupPath(nodeName, groupPath),
+				Path:         webGroupPath,
+				Expanded:     true,
+				Order:        snapshot.TotalGroups + 1000,
+				SessionCount: len(sessions),
+				Source:       "hub",
+				HubNodeID:    nodeID,
+				HubNodeName:  nodeName,
+				HubGroupPath: groupPath,
+			}
+			snapshot.Items = append(snapshot.Items, web.MenuItem{
+				Index: len(snapshot.Items),
+				Type:  web.MenuItemTypeGroup,
+				Level: 0,
+				Path:  webGroupPath,
+				Group: group,
+			})
+			snapshot.TotalGroups++
+
+			for i, info := range sessions {
+				menuSession := &web.MenuSession{
+					ID:             web.HubSessionWebID(nodeID, info.ID),
+					Title:          info.Title,
+					Tool:           info.Tool,
+					Status:         session.Status(strings.TrimSpace(info.Status)),
+					GroupPath:      webGroupPath,
+					ProjectPath:    info.ProjectPath,
+					Order:          i,
+					LastAccessedAt: hubSessionUpdatedAt(info),
+					ArchivedAt:     hubArchivedAtValue(info),
+					Source:         "hub",
+					HubNodeID:      nodeID,
+					HubNodeName:    nodeName,
+					HubSessionID:   info.ID,
+					HubGroupPath:   groupPath,
+					ReadOnly:       false,
+					CanFork:        false,
+				}
+				if menuSession.Title == "" {
+					menuSession.Title = info.ID
+				}
+				if menuSession.Status == "" {
+					menuSession.Status = session.StatusIdle
+				}
+				snapshot.Items = append(snapshot.Items, web.MenuItem{
+					Index:         len(snapshot.Items),
+					Type:          web.MenuItemTypeSession,
+					Level:         1,
+					Path:          webGroupPath,
+					IsLastInGroup: i == len(sessions)-1,
+					Session:       menuSession,
+				})
+				snapshot.TotalSessions++
+			}
+		}
+	}
+}
+
+func hubWebGroupPath(nodeID, groupPath string) string {
+	nodeID = strings.TrimSpace(nodeID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	return "hub/" + nodeID + "/" + groupPath
+}
+
+func hubSessionUpdatedAt(info hub.SessionInfo) time.Time {
+	if info.UpdatedAt == nil {
+		return time.Time{}
+	}
+	return info.UpdatedAt.UTC()
+}
+
+func hubArchivedAtValue(info hub.SessionInfo) time.Time {
+	if info.ArchivedAt == nil {
+		return time.Time{}
+	}
+	return info.ArchivedAt.UTC()
 }
 
 func (h *Home) publishWebSessionStates(instances []*session.Instance) {

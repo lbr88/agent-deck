@@ -64,7 +64,7 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "title is required")
 			return
 		}
-		if req.ProjectPath == "" {
+		if req.ProjectPath == "" && strings.TrimSpace(req.HubNodeID) == "" {
 			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "projectPath is required")
 			return
 		}
@@ -72,12 +72,32 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
 			return
 		}
-		sessionID, err := s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+		var sessionID string
+		var err error
+		hubCreate := false
+		if hubNodeID := strings.TrimSpace(req.HubNodeID); hubNodeID != "" {
+			hubCreator, ok := s.mutator.(HubSessionCreator)
+			if !ok {
+				writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "hub session creation not available")
+				return
+			}
+			hubCreate = true
+			if strings.TrimSpace(req.ProjectPath) == "" {
+				req.ProjectPath = "."
+			}
+			sessionID, err = hubCreator.CreateHubSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID, hubNodeID)
+		} else {
+			sessionID, err = s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+		}
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 			return
 		}
-		s.notifyMenuChanged()
+		if hubCreate {
+			s.notifyMenuChangedWithoutInvalidation()
+		} else {
+			s.notifyMenuChanged()
+		}
 		writeJSON(w, http.StatusCreated, SessionActionResponse{SessionID: sessionID})
 
 	default:
@@ -105,6 +125,7 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 {
 		action = parts[1]
 	}
+	_, _, isHubSession := ParseHubSessionWebID(sessionID)
 
 	// Skills sub-routes: /api/sessions/{id}/skills            (GET)
 	//                    /api/sessions/{id}/skills/{name}     (POST/DELETE)
@@ -152,7 +173,11 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 			return
 		}
-		s.notifyMenuChanged()
+		if isHubSession {
+			s.notifyMenuChangedWithoutInvalidation()
+		} else {
+			s.notifyMenuChanged()
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"deleted": sessionID})
 		return
 	}
@@ -175,7 +200,11 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "close":
 			// Non-destructive close: stop process, keep metadata. Mirrors
@@ -185,21 +214,33 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "start":
 			if err := s.mutator.StartSession(sessionID); err != nil {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "restart":
 			if err := s.mutator.RestartSession(sessionID); err != nil {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "fork":
 			newID, err := s.mutator.ForkSession(sessionID)
@@ -218,7 +259,11 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "unarchive":
 			if err := s.mutator.UnarchiveSession(sessionID); err != nil {
@@ -233,7 +278,11 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
 				return
 			}
-			s.notifyMenuChanged()
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		default:
 			writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, "unknown session action")
@@ -344,7 +393,11 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request, sess
 	}
 
 	if len(changed) > 0 {
-		s.notifyMenuChanged()
+		if _, _, ok := ParseHubSessionWebID(sessionID); ok {
+			s.notifyMenuChangedWithoutInvalidation()
+		} else {
+			s.notifyMenuChanged()
+		}
 	}
 	writeJSON(w, http.StatusOK, UpdateSessionResponse{
 		SessionID:       sessionID,

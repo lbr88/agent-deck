@@ -33,6 +33,11 @@ type fakeMutator struct {
 	finishWorktreeFn   func(id string, opts WorktreeFinishOptions) (WorktreeFinishResult, error)
 }
 
+type fakeHubCreateMutator struct {
+	fakeMutator
+	createHubSessionFn func(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error)
+}
+
 func (f *fakeMutator) CreateSession(title, tool, projectPath, groupPath, modelID string) (string, error) {
 	if f.createSessionFn == nil {
 		return "", fmt.Errorf("createSession not configured")
@@ -138,6 +143,13 @@ func (f *fakeMutator) FinishWorktree(id string, opts WorktreeFinishOptions) (Wor
 	return f.finishWorktreeFn(id, opts)
 }
 
+func (f *fakeHubCreateMutator) CreateHubSession(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error) {
+	if f.createHubSessionFn == nil {
+		return "", fmt.Errorf("createHubSession not configured")
+	}
+	return f.createHubSessionFn(title, tool, projectPath, groupPath, modelID, hubNodeID)
+}
+
 func TestSessionsCollectionGET(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -237,6 +249,40 @@ func TestSessionsCollectionPOSTForwardsModelID(t *testing.T) {
 	}
 	if gotModel != "claude-sonnet-4-6" {
 		t.Fatalf("modelID = %q, want %q", gotModel, "claude-sonnet-4-6")
+	}
+}
+
+func TestSessionsCollectionPOSTCreatesHubSession(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+
+	var got struct {
+		title, tool, projectPath, groupPath, modelID, hubNodeID string
+	}
+	srv.mutator = &fakeHubCreateMutator{
+		createHubSessionFn: func(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error) {
+			got.title, got.tool, got.projectPath, got.groupPath, got.modelID, got.hubNodeID = title, tool, projectPath, groupPath, modelID, hubNodeID
+			return HubSessionWebID(hubNodeID, "remote-new"), nil
+		},
+	}
+
+	body := strings.NewReader(`{"title":"Remote","tool":"codex","groupPath":"ops","modelId":"gpt-5","hubNodeId":"node_server"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rr.Code, rr.Body.String())
+	}
+	if got.title != "Remote" || got.tool != "codex" || got.projectPath != "." || got.groupPath != "ops" || got.modelID != "gpt-5" || got.hubNodeID != "node_server" {
+		t.Fatalf("hub create args = %+v", got)
+	}
+	if !strings.Contains(rr.Body.String(), HubSessionWebID("node_server", "remote-new")) {
+		t.Errorf("expected hub session id in response, got: %s", rr.Body.String())
 	}
 }
 

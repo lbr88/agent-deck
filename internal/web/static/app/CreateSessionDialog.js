@@ -9,6 +9,7 @@ import {
 } from './state.js'
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
+import { menuModelSignal } from './dataModel.js'
 import { displayLabelForTool, resolveCreateSessionPickerTools } from './pickerTools.js'
 
 const CUSTOM_MODEL = '__custom__'
@@ -79,6 +80,7 @@ export function CreateSessionDialog() {
   const [modelId, setModelId] = useState('')
   const [customModel, setCustomModel] = useState('')
   const [path, setPath] = useState('')
+  const [hubNodeId, setHubNodeId] = useState('')
   const [error, setError] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -92,7 +94,9 @@ export function CreateSessionDialog() {
     setError(null)
     setSubmitting(true)
     try {
-      const payload = { title, tool, projectPath: path }
+      const targetHubNode = hubNodeId.trim()
+      const payload = { title, tool, projectPath: targetHubNode ? (path || '.') : path }
+      if (targetHubNode) payload.hubNodeId = targetHubNode
       const modelId = selectedModelId()
       if (modelId) payload.modelId = modelId
       await apiFetch('POST', '/api/sessions', payload)
@@ -120,7 +124,22 @@ export function CreateSessionDialog() {
   const modelIDs = modelIDsForTool(tool)
   const shownTools = resolveCreateSessionPickerTools(pickerToolsSignal.value)
   const needsCustomModel = modelId === CUSTOM_MODEL
-  const submitDisabled = submitting || !title || !path || (needsCustomModel && !customModel.trim())
+  const { groups, sessions } = menuModelSignal.value
+  const hubNodes = []
+  const seenHubNodes = new Set()
+  for (const g of groups || []) {
+    if (!g?.isHub || !g.hubNodeId || seenHubNodes.has(g.hubNodeId)) continue
+    hubNodes.push({ id: g.hubNodeId, name: g.hubNodeName || g.hubNodeId })
+    seenHubNodes.add(g.hubNodeId)
+  }
+  for (const s of sessions || []) {
+    if (!s?.isHub || !s.hubNodeId || seenHubNodes.has(s.hubNodeId)) continue
+    hubNodes.push({ id: s.hubNodeId, name: s.hubNodeName || s.hubNodeId })
+    seenHubNodes.add(s.hubNodeId)
+  }
+  hubNodes.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  const creatingOnHub = !!hubNodeId.trim()
+  const submitDisabled = submitting || !title || (!creatingOnHub && !path) || (needsCustomModel && !customModel.trim())
 
   return html`
     <div class="overlay" onClick=${handleBackdropClick}>
@@ -138,8 +157,16 @@ export function CreateSessionDialog() {
             <input autofocus required value=${title} onInput=${e => setTitle(e.target.value)} placeholder="my-session"/>
           </div>
           <div class="field">
+            <label>TARGET</label>
+            <select value=${hubNodeId} onInput=${e => setHubNodeId(e.target.value)}>
+              <option value="">Local</option>
+              ${hubNodes.map(n => html`<option key=${n.id} value=${n.id}>${n.name}</option>`)}
+            </select>
+          </div>
+          <div class="field">
             <label>WORKING DIR</label>
-            <input required value=${path} onInput=${e => setPath(e.target.value)} placeholder="/absolute/path/to/project"/>
+            <input required=${!creatingOnHub} value=${path} onInput=${e => setPath(e.target.value)}
+                   placeholder=${creatingOnHub ? ". on selected hub node" : "/absolute/path/to/project"}/>
           </div>
           <div class="field">
             <label>TOOL</label>

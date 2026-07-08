@@ -27,6 +27,13 @@ function projectSession(item) {
   return {
     id,
     kind: deriveKind(s),
+    source: s.source || '',
+    isHub: s.source === 'hub',
+    hubNodeId: s.hubNodeId || '',
+    hubNodeName: s.hubNodeName || '',
+    hubSessionId: s.hubSessionId || '',
+    hubGroupPath: s.hubGroupPath || '',
+    readOnly: !!s.readOnly,
     title: s.title || id,
     group: groupPath,
     tool: s.tool || '',
@@ -67,6 +74,11 @@ function projectGroup(item) {
     expanded: !!g.expanded,
     sessionCount: g.sessionCount || 0,
     order: g.order || 0,
+    source: g.source || '',
+    isHub: g.source === 'hub',
+    hubNodeId: g.hubNodeId || '',
+    hubNodeName: g.hubNodeName || '',
+    hubGroupPath: g.hubGroupPath || '',
     kind: g.path === 'conductor' ? 'conductor' : g.path === 'watchers' ? 'watcher' : null,
   }
 }

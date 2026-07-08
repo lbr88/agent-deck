@@ -136,6 +136,10 @@ type SessionMutator interface {
 	FinishWorktree(sessionID string, opts WorktreeFinishOptions) (WorktreeFinishResult, error)
 }
 
+type HubSessionCreator interface {
+	CreateHubSession(title, tool, projectPath, groupPath, modelID, hubNodeID string) (string, error)
+}
+
 // Server wraps an HTTP server for Agent Deck web mode.
 type Server struct {
 	cfg         Config
@@ -421,6 +425,14 @@ func (s *Server) HasMutator() bool {
 }
 
 func (s *Server) notifyMenuChanged() {
+	s.notifyMenuChangedWithInvalidation(true)
+}
+
+func (s *Server) notifyMenuChangedWithoutInvalidation() {
+	s.notifyMenuChangedWithInvalidation(false)
+}
+
+func (s *Server) notifyMenuChangedWithInvalidation(invalidate bool) {
 	s.menuSubscribersMu.Lock()
 	for ch := range s.menuSubscribers {
 		select {
@@ -435,8 +447,10 @@ func (s *Server) notifyMenuChanged() {
 	// there is no TUI loop to call publishWebMenuSnapshot(), so without this
 	// the menu snapshot would remain frozen at its first-load state and new
 	// sessions created via the API would never appear until server restart.
-	if mmd, ok := s.menuData.(*MemoryMenuData); ok {
-		mmd.InvalidateCache()
+	if invalidate {
+		if mmd, ok := s.menuData.(*MemoryMenuData); ok {
+			mmd.InvalidateCache()
+		}
 	}
 }
 

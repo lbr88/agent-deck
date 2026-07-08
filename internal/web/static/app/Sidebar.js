@@ -96,6 +96,7 @@ function SessionItem({ s, sel, onSelect, showCols }) {
         <span class="tt">${s.title}</span>
       </div>
       <div class="meta">
+        ${s.isHub && html`<span class="tag">hub:${s.hubNodeName || s.hubNodeId}</span>`}
         ${showCols.tool && s.tool && html`<span class="tag">${s.tool}</span>`}
         ${showCols.cost && s.cost > 0 && html`<span class="cost">$${s.cost.toFixed(2)}</span>`}
         <button class="row-chev" title="Details" onClick=${e => { e.stopPropagation(); setExp(v => !v) }}>
@@ -114,6 +115,7 @@ function SessionItem({ s, sel, onSelect, showCols }) {
       ${exp && html`
         <div class="row-detail" onClick=${e => e.stopPropagation()}>
           <div class="rd-row"><span class="rd-k">tool</span><span class="rd-v">${s.tool || '—'}</span></div>
+          ${s.isHub && html`<div class="rd-row"><span class="rd-k">hub</span><span class="rd-v">${s.hubNodeName || s.hubNodeId}</span></div>`}
           ${s.branch && s.branch !== '—' && html`<div class="rd-row"><span class="rd-k">branch</span><span class="rd-v">${s.branch}</span></div>`}
           ${s.path && html`<div class="rd-row"><span class="rd-k">path</span><span class="rd-v" title=${s.path}>${s.path}</span></div>`}
           ${s.cost > 0 && html`<div class="rd-row"><span class="rd-k">cost</span><span class="rd-v ok">$${s.cost.toFixed(2)}</span></div>`}
@@ -125,8 +127,8 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           : html`<button class="mini good" title="Start" data-testid="session-start-btn" onClick=${() => doAction('start', s)}><${Icon} d=${ICONS.play} size=${12}/></button>`}
         <button class="mini good" title="Restart" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}><${Icon} d=${ICONS.restart} size=${12}/></button>
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>
-        ${s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
-        ${s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}
+        ${!s.isHub && s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
+        ${!s.isHub && s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}
         <button class="mini" title="Archive" onClick=${() => doAction('archive', s)}>⌂</button>
         <button class="mini danger" title="Delete" data-testid="session-delete-btn" onClick=${() => doAction('delete', s)}><${Icon} d=${ICONS.trash} size=${12}/></button>
       </div>

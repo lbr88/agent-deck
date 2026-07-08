@@ -57,6 +57,7 @@ function WorkHead() {
   const kindLabel = (session.kind || 'agent').toUpperCase()
   const profile = profileSignal.value || ''
   const canMutate = mutationsEnabledSignal.value
+  const scopeLabel = session.isHub ? `hub:${session.hubNodeName || session.hubNodeId}` : profile
   const modelLabel = session.model
     ? `${session.model}${session.modelVersion ? ` ${session.modelVersion}` : ''}`
     : ''
@@ -71,7 +72,7 @@ function WorkHead() {
     <div class="work-head">
       <div class="path">
         <span class=${`kind ${session.kind || ''}`}>${kindLabel}</span>
-        ${profile && html`<span class="seg">${profile} /</span>`}
+        ${scopeLabel && html`<span class="seg">${scopeLabel} /</span>`}
         <span class="seg">${session.group || 'default'} /</span>
         <span class="cur">${session.title}</span>
       </div>
@@ -84,7 +85,7 @@ function WorkHead() {
             ? html`<button class="btn ghost" onClick=${() => action('stop')}><${Icon} d=${ICONS.stop} size=${12}/>Stop</button>`
             : html`<button class="btn ghost" onClick=${() => action('start')}><${Icon} d=${ICONS.play} size=${12}/>Start</button>`}
           <button class="btn ghost" onClick=${() => action('restart')}><${Icon} d=${ICONS.restart} size=${12}/>Restart</button>
-          ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
+          ${!session.isHub && session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
           <button class="btn primary" onClick=${() => (createSessionDialogSignal.value = true)}>
             <${Icon} d=${ICONS.plus} size=${12}/>New <span class="kbd">n</span>
           </button>

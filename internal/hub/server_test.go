@@ -229,10 +229,7 @@ func TestServerTrustAPIDenyClearsRequesterSnapshot(t *testing.T) {
 	requester := dialTestNodeWebSocket(t, httpServer.URL, "node_requester", "requester_secret")
 	defer requester.Close()
 	readTestWelcome(t, requester)
-	initial := readTestEnvelope(t, requester)
-	if initial.Type != MsgSnapshot || initial.NodeID != "node_owner" {
-		t.Fatalf("initial snapshot envelope = %+v", initial)
-	}
+	_ = readTestEnvelopeOf(t, requester, MsgSnapshot, "node_owner")
 
 	denyReq := httptest.NewRequest(http.MethodPost, "/api/trust/deny?node_id=node_owner", strings.NewReader(`{"node_id":"node_requester"}`))
 	denyReq.Header.Set("Authorization", "Bearer owner_secret")
@@ -682,16 +679,16 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 		t.Fatalf("WriteJSON snapshot: %v", err)
 	}
 
-	var got Envelope
-	if err := second.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("SetReadDeadline: %v", err)
-	}
-	if err := second.ReadJSON(&got); err != nil {
-		t.Fatalf("second node did not receive snapshot fanout: %v", err)
-	}
-	if got.Type != MsgSnapshot || got.NodeID != "node_1" {
-		t.Fatalf("fanout envelope = %+v", got)
-	}
+	got := readTestEnvelopeMatching(t, second, "snapshot from node_1 with sessions", func(env Envelope) bool {
+		if env.Type != MsgSnapshot || env.NodeID != "node_1" {
+			return false
+		}
+		var payload SnapshotPayload
+		if err := json.Unmarshal(env.Payload, &payload); err != nil {
+			return false
+		}
+		return len(payload.Sessions) == 1
+	})
 	var payload SnapshotPayload
 	if err := json.Unmarshal(got.Payload, &payload); err != nil {
 		t.Fatalf("fanout payload: %v", err)
@@ -773,10 +770,7 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if err := requester.WriteJSON(open); err != nil {
 		t.Fatalf("requester WriteJSON open: %v", err)
 	}
-	gotOpen := readTestEnvelope(t, owner)
-	if gotOpen.Type != MsgAttachOpen || gotOpen.NodeID != "node_requester" {
-		t.Fatalf("owner open envelope = %+v", gotOpen)
-	}
+	_ = readTestEnvelopeOf(t, owner, MsgAttachOpen, "node_requester")
 
 	input, err := MarshalEnvelope(MsgAttachData, "node_requester", NewAttachData("stream_1", []byte("input")))
 	if err != nil {
@@ -785,10 +779,8 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if err := requester.WriteJSON(input); err != nil {
 		t.Fatalf("requester WriteJSON input: %v", err)
 	}
-	gotInput := readTestEnvelope(t, owner)
-	if gotInput.Type != MsgAttachData || gotInput.NodeID != "node_requester" {
-		t.Fatalf("owner input envelope = %+v", gotInput)
-	}
+	gotInput := readTestEnvelopeOf(t, owner, MsgAttachData, "node_requester")
+	assertAttachDataBytes(t, gotInput, "input")
 
 	ready, err := MarshalEnvelope(MsgAttachReady, "node_owner", AttachOpenPayload{StreamID: "stream_1", SessionID: "sess_1", Cols: 120, Rows: 40})
 	if err != nil {
@@ -797,10 +789,7 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if err := owner.WriteJSON(ready); err != nil {
 		t.Fatalf("owner WriteJSON ready: %v", err)
 	}
-	gotReady := readTestEnvelope(t, requester)
-	if gotReady.Type != MsgAttachReady || gotReady.NodeID != "node_owner" {
-		t.Fatalf("requester ready envelope = %+v", gotReady)
-	}
+	_ = readTestEnvelopeOf(t, requester, MsgAttachReady, "node_owner")
 
 	output, err := MarshalEnvelope(MsgAttachData, "node_owner", NewAttachData("stream_1", []byte("output")))
 	if err != nil {
@@ -809,10 +798,8 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if err := owner.WriteJSON(output); err != nil {
 		t.Fatalf("owner WriteJSON output: %v", err)
 	}
-	gotOutput := readTestEnvelope(t, requester)
-	if gotOutput.Type != MsgAttachData || gotOutput.NodeID != "node_owner" {
-		t.Fatalf("requester output envelope = %+v", gotOutput)
-	}
+	gotOutput := readTestEnvelopeOf(t, requester, MsgAttachData, "node_owner")
+	assertAttachDataBytes(t, gotOutput, "output")
 
 	closed, err := MarshalEnvelope(MsgAttachClosed, "node_owner", AttachClosePayload{StreamID: "stream_1", Reason: "done"})
 	if err != nil {
@@ -821,10 +808,7 @@ func TestHubNodeWebSocketRoutesAttachRelay(t *testing.T) {
 	if err := owner.WriteJSON(closed); err != nil {
 		t.Fatalf("owner WriteJSON closed: %v", err)
 	}
-	gotClosed := readTestEnvelope(t, requester)
-	if gotClosed.Type != MsgAttachClosed || gotClosed.NodeID != "node_owner" {
-		t.Fatalf("requester closed envelope = %+v", gotClosed)
-	}
+	_ = readTestEnvelopeOf(t, requester, MsgAttachClosed, "node_owner")
 }
 
 func TestHubNodeWebSocketRoutesCommandRelay(t *testing.T) {
@@ -861,10 +845,7 @@ func TestHubNodeWebSocketRoutesCommandRelay(t *testing.T) {
 	if err := requester.WriteJSON(command); err != nil {
 		t.Fatalf("requester WriteJSON command: %v", err)
 	}
-	gotCommand := readTestEnvelope(t, owner)
-	if gotCommand.Type != MsgCommand || gotCommand.NodeID != "node_requester" {
-		t.Fatalf("owner command envelope = %+v", gotCommand)
-	}
+	gotCommand := readTestEnvelopeOf(t, owner, MsgCommand, "node_requester")
 	var gotPayload CommandPayload
 	if err := json.Unmarshal(gotCommand.Payload, &gotPayload); err != nil {
 		t.Fatalf("decode command payload: %v", err)
@@ -880,10 +861,7 @@ func TestHubNodeWebSocketRoutesCommandRelay(t *testing.T) {
 	if err := owner.WriteJSON(result); err != nil {
 		t.Fatalf("owner WriteJSON result: %v", err)
 	}
-	gotResult := readTestEnvelope(t, requester)
-	if gotResult.Type != MsgCommandResult || gotResult.NodeID != "node_owner" {
-		t.Fatalf("requester result envelope = %+v", gotResult)
-	}
+	_ = readTestEnvelopeOf(t, requester, MsgCommandResult, "node_owner")
 }
 
 func TestServerCommandResultFromWrongOwnerPeerDoesNotCloseRoute(t *testing.T) {
@@ -1060,6 +1038,32 @@ func readTestEnvelope(t *testing.T, conn *websocket.Conn) Envelope {
 		t.Fatalf("ReadJSON envelope: %v", err)
 	}
 	return env
+}
+
+func readTestEnvelopeOf(t *testing.T, conn *websocket.Conn, typ MessageType, nodeID string) Envelope {
+	t.Helper()
+	return readTestEnvelopeMatching(t, conn, string(typ)+" from "+nodeID, func(env Envelope) bool {
+		return env.Type == typ && env.NodeID == nodeID
+	})
+}
+
+func readTestEnvelopeMatching(t *testing.T, conn *websocket.Conn, desc string, match func(Envelope) bool) Envelope {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var last Envelope
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("SetReadDeadline: %v", err)
+		}
+		var env Envelope
+		if err := conn.ReadJSON(&env); err != nil {
+			t.Fatalf("ReadJSON waiting for %s: %v (last=%+v)", desc, err, last)
+		}
+		last = env
+		if match(env) {
+			return env
+		}
+	}
 }
 
 func expectNoTestEnvelope(t *testing.T, conn *websocket.Conn, timeout time.Duration) {

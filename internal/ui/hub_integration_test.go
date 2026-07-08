@@ -13,6 +13,7 @@ import (
 
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/web"
 )
 
 func TestHubConfiguredPrefixesLocalGroupsWithLocal(t *testing.T) {
@@ -58,6 +59,62 @@ func TestHubRemoteSnapshotAppearsAsNodePrefixedGroup(t *testing.T) {
 	}
 	if strings.Contains(got, "remotes/") {
 		t.Fatalf("hub sessions should render inline, not under remotes/:\n%s", got)
+	}
+}
+
+func TestWebMenuSnapshotIncludesHubSessionsAndEmptyNodes(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	menuData := web.NewMemoryMenuData(nil)
+	h.SetWebMenuData(menuData)
+	archivedAt := time.Unix(123, 0).UTC()
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_empty": {
+			Node: hub.Node{ID: "node_empty", Name: "empty"},
+		},
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:          "r1",
+				Title:       "deploy",
+				Tool:        "claude",
+				Status:      "waiting",
+				GroupPath:   "ops",
+				ProjectPath: "/srv/app",
+			}, {
+				ID:         "archived",
+				Title:      "old",
+				Tool:       "codex",
+				Status:     "stopped",
+				GroupPath:  "ops",
+				ArchivedAt: &archivedAt,
+			}},
+		},
+	}
+
+	h.rebuildFlatItems()
+
+	active, err := menuData.LoadMenuSnapshot()
+	if err != nil {
+		t.Fatalf("LoadMenuSnapshot: %v", err)
+	}
+	if !webSnapshotHasHubSession(active, "node_server", "r1") {
+		t.Fatalf("active web snapshot missing hub session: %+v", active.Items)
+	}
+	if webSnapshotHasHubSession(active, "node_server", "archived") {
+		t.Fatalf("active web snapshot included archived hub session: %+v", active.Items)
+	}
+	if !webSnapshotHasHubGroup(active, "node_empty", session.DefaultGroupPath, 0) {
+		t.Fatalf("active web snapshot missing empty hub node group: %+v", active.Items)
+	}
+
+	archived, err := menuData.LoadArchivedMenuSnapshot()
+	if err != nil {
+		t.Fatalf("LoadArchivedMenuSnapshot: %v", err)
+	}
+	if !webSnapshotHasHubSession(archived, "node_server", "archived") {
+		t.Fatalf("archived web snapshot missing archived hub session: %+v", archived.Items)
 	}
 }
 
@@ -773,6 +830,71 @@ func TestHubSessionMoveAndEditUseHubCommands(t *testing.T) {
 	}
 }
 
+func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	mutator := NewWebMutator(h)
+	webID := web.HubSessionWebID("node_server", "r1")
+
+	if err := mutator.StopSession(webID); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "stop", map[string]string{"session_id": "r1"})
+
+	changed, restartRequired, warnings, err := mutator.UpdateSession(webID, map[string]string{
+		session.FieldTitle: "deploy-api",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+	if restartRequired || len(warnings) != 0 || len(changed) != 1 || changed[0] != session.FieldTitle {
+		t.Fatalf("UpdateSession result changed=%v restart=%v warnings=%v", changed, restartRequired, warnings)
+	}
+	if got := client.commands[1]; got.nodeID != "node_server" || got.action != "update" {
+		t.Fatalf("update command = %+v", got)
+	} else {
+		req, ok := got.payload.(hub.UpdateSessionRequest)
+		if !ok {
+			t.Fatalf("update payload type = %T, want hub.UpdateSessionRequest", got.payload)
+		}
+		if req.SessionID != "r1" || len(req.Changes) != 1 || req.Changes[0].Field != session.FieldTitle || req.Changes[0].Value != "deploy-api" {
+			t.Fatalf("update request = %+v", req)
+		}
+	}
+
+	if err := mutator.DeleteSession(webID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	assertHubCommand(t, client.commands[2], "node_server", "delete", map[string]string{"session_id": "r1"})
+	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
+		t.Fatal("DeleteSession did not remove hub session from cache")
+	}
+}
+
+func TestWebMutatorCreatesHubSessionThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, map[string]string{"session_id": "remote_new"})
+	mutator := NewWebMutator(h)
+
+	gotID, err := mutator.CreateHubSession("worker", "codex", ".", "ops", "gpt-5", "node_server")
+	if err != nil {
+		t.Fatalf("CreateHubSession: %v", err)
+	}
+	if gotID != web.HubSessionWebID("node_server", "remote_new") {
+		t.Fatalf("CreateHubSession id = %q, want hub web id", gotID)
+	}
+	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "create" {
+		t.Fatalf("create command = %+v", got)
+	} else {
+		req, ok := got.payload.(hub.CreateSessionRequest)
+		if !ok {
+			t.Fatalf("create payload type = %T, want hub.CreateSessionRequest", got.payload)
+		}
+		if req.Title != "worker" || req.Tool != "codex" || req.ProjectPath != "." || req.GroupPath != "ops" || req.ModelID != "gpt-5" {
+			t.Fatalf("create request = %+v", req)
+		}
+	}
+}
+
 func TestHubSessionImportHotkeyOpensLocalImportDialog(t *testing.T) {
 	h, client := newHubActionHome(t)
 	codexHome := filepath.Join(t.TempDir(), ".codex")
@@ -1168,6 +1290,34 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatalf("marshal JSON: %v", err)
 	}
 	return raw
+}
+
+func webSnapshotHasHubSession(snapshot *web.MenuSnapshot, nodeID, sessionID string) bool {
+	if snapshot == nil {
+		return false
+	}
+	wantID := web.HubSessionWebID(nodeID, sessionID)
+	for _, item := range snapshot.Items {
+		if item.Type == web.MenuItemTypeSession && item.Session != nil && item.Session.ID == wantID {
+			return item.Session.Source == "hub" && item.Session.HubNodeID == nodeID && item.Session.HubSessionID == sessionID
+		}
+	}
+	return false
+}
+
+func webSnapshotHasHubGroup(snapshot *web.MenuSnapshot, nodeID, groupPath string, sessionCount int) bool {
+	if snapshot == nil {
+		return false
+	}
+	for _, item := range snapshot.Items {
+		if item.Type != web.MenuItemTypeGroup || item.Group == nil {
+			continue
+		}
+		if item.Group.Source == "hub" && item.Group.HubNodeID == nodeID && item.Group.HubGroupPath == groupPath && item.Group.SessionCount == sessionCount {
+			return true
+		}
+	}
+	return false
 }
 
 func indexHubSession(t *testing.T, h *Home, id string) int {
