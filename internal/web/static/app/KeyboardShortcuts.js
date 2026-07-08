@@ -19,6 +19,8 @@ const BINDINGS = [
   { keys: ['e'],               label: 'Edit focused session notes' },
   { keys: ['u'],               label: 'Mark focused session unread' },
   { keys: ['a'],               label: 'Quick approve focused Claude session' },
+  { keys: ['c'],               label: 'Copy focused terminal output' },
+  { keys: ['Shift', 'C'],      label: 'Copy focused session info' },
   { keys: ['o'],               label: 'Prompt focused session' },
   { keys: ['Shift', 'M'],      label: 'Move focused session to group' },
   { keys: ['Shift', 'D'],      label: 'Close focused session (stop process, keep metadata)' },

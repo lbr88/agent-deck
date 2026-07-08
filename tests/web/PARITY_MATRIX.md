@@ -57,8 +57,8 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Prompt session | `internal/ui/home.go` (`o` key) | POST `/api/sessions/{id}/send` | `SendSessionPrompt` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | One-line prompt without attaching; web `o` opens PromptSessionDialog and supports hub sessions |
 | Mark session unread | `internal/ui/home.go:6366` (`u` key) | POST `/api/sessions/{id}/unread` | `MarkSessionUnread` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | idle → waiting transition; routes hub sessions through hub command `mark_unread` |
 | Quick approve | `internal/ui/home.go:6387` (default hotkey) | POST `/api/sessions/{id}/approve` | `QuickApproveSession` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Send "1"+Enter without attach; routes hub sessions through hub `send` |
-| Copy output | `internal/ui/home.go:6511` (`c` key) | MISSING | N/A | N/A | Last AI response → clipboard |
-| Copy session info | `internal/ui/home.go:6521` (`C`/`shift+c`) | MISSING | N/A | N/A | Repo/path/branch → clipboard |
+| Copy output | `internal/ui/home.go:6511` (`c` key) | UI `c` shortcut | `TerminalPanel` buffer → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Copies focused terminal scrollback to clipboard |
+| Copy session info | `internal/ui/home.go:6521` (`C`/`shift+c`) | UI `Shift+C` shortcut | `sessionInfoText` → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Repo/path/branch/session metadata → clipboard |
 | Send output to session | `internal/ui/home.go:6532` (`x` key) | MISSING | N/A | N/A | TUI session picker dialog |
 | Exec shell | `internal/ui/home.go:6161` (`E` key) | MISSING | N/A | N/A | Sandbox container shell only |
 | Toggle preview mode | `internal/ui/home.go:6413` (`v` key) | MISSING | N/A | N/A | Cycle: both → output → analytics |
@@ -167,20 +167,20 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  9 MISSING actions have plausible URL patterns probed by
+  7 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  9 are TUI-UX-only (copy, jump, global search, …) where no plausible web
+  7 are TUI-UX-only (jump, global search, exec shell, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web/API/UI surfaces implemented:** 43
-- **MISSING web actions:** 9 (~17% gap)
+- **Web/API/UI surfaces implemented:** 45
+- **MISSING web actions:** 7 (~13% gap)
 - **Key gaps:**
   - Multi-repo path editor
-  - Content/navigation operations (copy output/info, send output, jump mode, global search)
+  - Content/navigation operations (send output, jump mode, global search)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
 
@@ -200,7 +200,7 @@ tiers:
 
 1. **Remaining Session Metadata Gap**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
 
-2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: copy output/info, send output to another session, global search, jump mode, fork-with-options, exec-shell, and preview-mode cycling.
+2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: send output to another session, global search, jump mode, fork-with-options, exec-shell, and preview-mode cycling.
 
 3. **Implemented Non-HTTP Surfaces**: Some parity rows are intentionally UI/WS rather than HTTP: `/` search focus, `?` help overlay, Enter terminal attach via `/ws/session/{id}`, and Ctrl/Cmd+R manual refresh via GET `/api/menu`.
 
@@ -223,6 +223,6 @@ tiers:
 ## Recommendations
 
 1. Implement the multi-repo path editor in web and route hub sessions through hub update commands.
-2. Add web UX for remaining content workflows: copy output/info, send output to session, and fork-with-options.
+2. Add web UX for remaining content workflows: send output to session and fork-with-options.
 3. Decide whether global search, jump mode, preview-mode cycling, and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
 4. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.

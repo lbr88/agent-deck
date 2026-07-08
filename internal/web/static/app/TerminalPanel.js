@@ -25,6 +25,20 @@ function wsURLForSession(sessionId, token) {
   return url.toString()
 }
 
+function terminalBufferText(terminal) {
+  if (!terminal || !terminal.buffer || !terminal.buffer.active) return ''
+  const buffer = terminal.buffer.active
+  const lines = []
+  for (let i = 0; i < buffer.length; i += 1) {
+    const line = buffer.getLine(i)
+    if (line) lines.push(line.translateToString(true))
+  }
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop()
+  }
+  return lines.join('\n')
+}
+
 // Install touch-to-scroll on the terminal container.
 // PERF-E: takes the shared AbortController so every listener registered here
 // is torn down by the single controller.abort() in the useEffect cleanup. No
@@ -249,6 +263,14 @@ export function TerminalPanel() {
     // Touch scrolling for mobile -- listeners attach via the shared
     // AbortController (PERF-E). No local dispose handle is needed.
     installTouchScroll(container, terminal.element, controller)
+
+    window.addEventListener('agentdeck:copy-terminal-output', (event) => {
+      if (!event.detail || ctx.sessionId !== selectedIdSignal.value) return
+      event.detail.handled = true
+      event.detail.text = terminalBufferText(terminal)
+    }, {
+      signal: controller.signal,
+    })
 
     // Keyboard input forwarding (desktop + mobile; server gates on ReadOnly).
     const inputDisposable = terminal.onData((data) => {

@@ -181,6 +181,37 @@ test.describe('keyboard parity (#780)', () => {
     }).toBe('1')
   })
 
+  test('c copies focused terminal output', async ({ page }) => {
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (text) => { window.__agentDeckClipboard = text },
+        },
+      })
+    })
+    await page.keyboard.press('c')
+    await expect.poll(() => page.evaluate(() => window.__agentDeckClipboard || '')).toContain('Connecting to terminal')
+  })
+
+  test('Shift+C copies focused session info', async ({ page }) => {
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (text) => { window.__agentDeckClipboard = text },
+        },
+      })
+    })
+    await page.keyboard.down('Shift')
+    await page.keyboard.press('C')
+    await page.keyboard.up('Shift')
+    const copied = await page.evaluate(() => window.__agentDeckClipboard || '')
+    expect(copied).toContain('Title:')
+    expect(copied).toContain('ID: sess-001')
+    expect(copied).toContain('Project path:')
+  })
+
   test('Shift+M opens the move session dialog', async ({ page }) => {
     await page.keyboard.down('Shift')
     await page.keyboard.press('M')

@@ -131,6 +131,61 @@ function Panes({ tab }) {
   `
 }
 
+async function copyTextToClipboard(text, successMessage) {
+  const value = String(text || '').trim()
+  if (!value) {
+    addToast('Nothing to copy', 'info')
+    return false
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(value)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = value
+      textarea.setAttribute('readonly', 'readonly')
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      textarea.remove()
+    }
+    addToast(successMessage, 'success')
+    return true
+  } catch (_err) {
+    addToast('Copy failed', 'error')
+    return false
+  }
+}
+
+function sessionInfoText(session) {
+  if (!session) return ''
+  const raw = session.raw || {}
+  const rows = [
+    ['Title', session.title],
+    ['ID', session.id],
+    ['Tool', session.tool],
+    ['Status', session.status],
+    ['Group', session.group],
+    ['Project path', session.path],
+    ['Branch', session.branch && session.branch !== '—' ? session.branch : ''],
+    ['Model', session.modelId || session.model],
+  ]
+  if (session.isHub) {
+    rows.push(['Hub node', session.hubNodeName || session.hubNodeId])
+    rows.push(['Hub session', session.hubSessionId || raw.hubSessionId])
+  }
+  if (raw.claudeSessionId) rows.push(['Claude session', raw.claudeSessionId])
+  if (raw.codexSessionId) rows.push(['Codex session', raw.codexSessionId])
+  if (raw.geminiSessionId) rows.push(['Gemini session', raw.geminiSessionId])
+  if (raw.opencodeSessionId) rows.push(['OpenCode session', raw.opencodeSessionId])
+  return rows
+    .filter(([, value]) => value != null && String(value).trim() !== '')
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('\n')
+}
+
 export function AppShell() {
   const activeTab = activeTabSignal.value
   const showCreateSession = createSessionDialogSignal.value
@@ -342,6 +397,17 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           apiFetch('POST', `/api/sessions/${s.id}/approve`).catch(() => {})
+        }
+      } else if (e.key === 'c' && !e.shiftKey) {
+        const detail = { handled: false, text: '' }
+        window.dispatchEvent(new CustomEvent('agentdeck:copy-terminal-output', { detail }))
+        e.preventDefault()
+        copyTextToClipboard(detail.text, 'Copied terminal output')
+      } else if (e.key === 'C' || (e.key === 'c' && e.shiftKey)) {
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          copyTextToClipboard(sessionInfoText(s), 'Copied session info')
         }
       } else if (e.key === 'M') {
         if (!mutationsEnabledSignal.value) return
