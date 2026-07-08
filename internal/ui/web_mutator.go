@@ -801,6 +801,85 @@ func (m *WebMutator) updateHubSession(nodeID, sessionID string, updates map[stri
 	return changed, false, nil, nil
 }
 
+// MoveSessionToGroup moves a session between groups. Hub session IDs route to
+// the owner node's native move action; local IDs use the same GroupTree helper
+// as the TUI move dialog.
+func (m *WebMutator) MoveSessionToGroup(id, groupPath string) error {
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		return fmt.Errorf("group path is required")
+	}
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if _, err := m.hubCommand(nodeID, "move", map[string]string{"session_id": sessionID, "group_path": groupPath}); err != nil {
+			return err
+		}
+		m.h.updateHubSessionGroup(nodeID, sessionID, groupPath)
+		m.publishHubWebSnapshot()
+		return nil
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	if m.h.groupTree == nil {
+		m.h.instancesMu.RLock()
+		instances := make([]*session.Instance, len(m.h.instances))
+		copy(instances, m.h.instances)
+		m.h.instancesMu.RUnlock()
+		m.h.groupTree = session.NewGroupTree(instances)
+	}
+	m.h.groupTree.MoveSessionToGroup(inst, groupPath)
+	m.h.instancesMu.Lock()
+	m.h.instances = m.h.groupTree.GetAllInstances()
+	m.h.instancesMu.Unlock()
+	return m.persistAllInstances()
+}
+
+// SendSessionPrompt submits a one-line prompt to a local or hub session without
+// opening an interactive attach. This is the web equivalent of the TUI `o`
+// prompt-session shortcut.
+func (m *WebMutator) SendSessionPrompt(id, message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return fmt.Errorf("message is required")
+	}
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		_, err := m.hubCommand(nodeID, "send", map[string]string{"session_id": sessionID, "message": message})
+		return err
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	ts := inst.GetTmuxSession()
+	if ts == nil || strings.TrimSpace(ts.Name) == "" {
+		return fmt.Errorf("session %q is not running; start it before prompting", inst.Title)
+	}
+	tmuxName := ts.Name
+	go func() {
+		if err := deliverToConductorPane(ts, message); err != nil {
+			uiLog.Warn("web_prompt_send_failed",
+				slog.String("tmux_session", tmuxName),
+				slog.String("error", err.Error()))
+		}
+	}()
+	return nil
+}
+
 func (m *WebMutator) hubSessionAction(nodeID, sessionID, action string) error {
 	_, err := m.hubCommand(nodeID, action, map[string]string{"session_id": sessionID})
 	if err == nil {

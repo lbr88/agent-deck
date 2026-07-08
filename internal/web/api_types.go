@@ -57,6 +57,16 @@ type UpdateSessionRequest struct {
 	AutoMode        *bool   `json:"autoMode,omitempty"`
 }
 
+// MoveSessionRequest is the body for POST /api/sessions/{id}/group.
+type MoveSessionRequest struct {
+	GroupPath string `json:"groupPath"`
+}
+
+// SendSessionRequest is the body for POST /api/sessions/{id}/send.
+type SendSessionRequest struct {
+	Message string `json:"message"`
+}
+
 // UpdateSessionResponse confirms a PATCH succeeded. RestartRequired is true
 // when any updated field only takes effect on next launch (tool, extra-args,
 // plugins, skip-permissions, auto-mode). Clients use it to prompt before/after

@@ -22,7 +22,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Start session | `internal/ui/home.go:6284` (via dialog/menu) | POST `/api/sessions/{id}/start` | `StartSession` | `handlers_sessions_test.go` | Resumes stopped/idle session |
 | Stop session | `internal/ui/home.go:6284` (via dialog/menu) | POST `/api/sessions/{id}/stop` | `StopSession` | `handlers_sessions_test.go` | Kills running tmux session |
 | Restart session | `internal/ui/home.go:6473` (`R` key) | POST `/api/sessions/{id}/restart` | `RestartSession` | `handlers_sessions_test.go` | Recreate tmux with resume |
-| Restart fresh | `internal/ui/home.go:6494` (`T` key) | MISSING | `RestartSessionFresh` | N/A | Discards tool binding, no web equivalent |
+| Restart fresh | `internal/ui/home.go:6494` (`T` key) | POST `/api/sessions/{id}/restart-fresh` | `RestartFreshSession` | `handlers_sessions_test.go`, `tests/web/e2e/parity-actions.spec.js` | Discards tool binding and restarts from a fresh conversation; web row/header Fresh action |
 | Delete session | `internal/ui/home.go:6302` (`d` key) | DELETE `/api/sessions/{id}` | `DeleteSession` | `handlers_sessions_test.go` | Kills + removes from storage |
 | Close session | `internal/ui/home.go:6318` (`D` key) | POST `/api/sessions/{id}/close` | `CloseSession` | `handlers_sessions_test.go`, `tests/web/e2e/close-undo.spec.js` | Non-destructive close (stops process, keeps metadata); Shift+D in web UI |
 | Archive session | `internal/ui/home.go` (`A` key) | POST `/api/sessions/{id}/archive` | `ArchiveSession` | `handlers_sessions_test.go`, `tests/e2e/session-lifecycle.spec.ts` | Stops tmux/agent then hides from active lists (`archived_at`); web sidebar ⌂ button |
@@ -30,13 +30,13 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | View archived sessions | `internal/ui/home.go` (`^` filter) | GET `/api/sessions/archived` | `LoadArchivedMenuSnapshot` | `handlers_sessions_test.go`, `tests/e2e/session-lifecycle.spec.ts` | Web Archived tab + TUI archived-only list |
 | Fork session | `internal/ui/home.go` (`f` key, quick) | POST `/api/sessions/{id}/fork` | `ForkSession` | `handlers_sessions_test.go`, WebUI action tests | Web creates a plain tool-native fork; TUI quick fork also applies `[fork]` defaults |
 | Fork with dialog | `internal/ui/home.go` (`F`/`shift+f`) | MISSING | N/A | N/A | Shift+F title/group/branch/worktree controls are TUI-only until Web gets a dedicated async fork workflow |
-| Rename session | `internal/ui/home.go:6119` (`r` key) | MISSING | N/A | N/A | Title edit via GroupDialog |
+| Rename session | `internal/ui/home.go:6119` (`r` key) | PATCH `/api/sessions/{id}` | `UpdateSession` | `handlers_sessions_test.go`, `tests/web/e2e/edit-session.spec.js`, `tests/web/e2e/keyboard-parity.spec.js` | Title edit via web EditSessionDialog; `r` opens the same dialog |
 | Undo delete | `internal/ui/home.go:6572` (`ctrl+z`) | POST `/api/sessions/undelete` | `UndoDelete` | `handlers_sessions_test.go`, `tests/web/e2e/close-undo.spec.js` | Chrome-style undo within 30s window (web.DefaultUndoWindow); Ctrl+Z in web UI |
 | **GROUP OPERATIONS** |
 | Create group | `internal/ui/home.go:6094` (`g` key) | POST `/api/groups` | `CreateGroup` | `handlers_groups_test.go` | Root or as subgroup |
 | Rename group | `internal/ui/home.go:6119` (`r` key, group) | PATCH `/api/groups/{path}` | `RenameGroup` | `handlers_groups_test.go` | Via GroupDialog |
 | Delete group | `internal/ui/home.go:6302` (`d` key, group) | DELETE `/api/groups/{path}` | `DeleteGroup` | `handlers_groups_test.go` | Moves children to default group |
-| Move session to group | `internal/ui/home.go:6028` (`M`/`shift+m`) | MISSING | N/A | N/A | TUI-only via GroupDialog move mode |
+| Move session to group | `internal/ui/home.go:6028` (`M`/`shift+m`) | POST `/api/sessions/{id}/group` | `MoveSessionToGroup` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/parity-actions.spec.js` | Web Move dialog and Shift+M shortcut; routes hub sessions through hub command `move` |
 | **MCP MANAGEMENT** |
 | Attach MCP | `internal/ui/home.go:5965` (`m` key → MCPDialog) | POST `/api/sessions/{id}/mcps/{name}` | `MCPManager.Attach` | `handlers_mcps_test.go` | Body `{scope?}`; default scope=local; writes `.mcp.json` via session helpers |
 | Detach MCP | `internal/ui/home.go:5965` (`m` key → MCPDialog) | DELETE `/api/sessions/{id}/mcps/{name}` | `MCPManager.Detach` | `handlers_mcps_test.go` | Body `{scope?}`; scope auto-detected if omitted |
@@ -51,9 +51,10 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Edit session settings | `internal/ui/home.go:5953` (`P`/`shift+p` → EditSessionDialog) | PATCH `/api/sessions/{id}` | `UpdateSession` (delegates to `session.SetField`) | `handlers_sessions_test.go` + `tests/web/e2e/edit-session.spec.js` | Title, color, notes, tool, extra-args, plugins, channels, skip-permissions, auto-mode. Returns `restartRequired` for restart-policy fields. Web UI: `EditSessionDialog.js` + Sidebar Edit button. |
 | Edit multi-repo paths | `internal/ui/home.go:5942` (`p` → EditPathsDialog) | MISSING | N/A | N/A | Multi-repo session paths |
 | Edit notes inline | `internal/ui/home.go:6548` (`e` key) | MISSING | N/A | N/A | TUI-only textarea editor |
-| Toggle YOLO mode | `internal/ui/home.go:6418` (`y` key) | MISSING | N/A | N/A | Gemini/Codex only; requires restart |
+| Toggle YOLO mode | `internal/ui/home.go:6418` (`y` key) | POST `/api/sessions/{id}/toggle-yolo` | `ToggleYoloSession` | `handlers_sessions_test.go`, `static_files_test.go` | Gemini/Codex/Hermes; requires restart for some tools; web row/header YOLO action |
 | Open settings panel | `internal/ui/home.go:6148` (`S` key) | GET `/api/settings` | N/A | `handlers_settings_test.go` | Read-only; displays profile, version |
 | **WORKFLOW & NAVIGATION** |
+| Prompt session | `internal/ui/home.go` (`o` key) | POST `/api/sessions/{id}/send` | `SendSessionPrompt` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | One-line prompt without attaching; web `o` opens PromptSessionDialog and supports hub sessions |
 | Mark session unread | `internal/ui/home.go:6366` (`u` key) | MISSING | N/A | N/A | idle → waiting transition |
 | Quick approve | `internal/ui/home.go:6387` (default hotkey) | MISSING | N/A | N/A | Send "1"+Enter without attach |
 | Copy output | `internal/ui/home.go:6511` (`c` key) | MISSING | N/A | N/A | Last AI response → clipboard |
@@ -165,25 +166,24 @@ tiers:
   (`/api/push/{subscribe,unsubscribe,presence}`). The fixture binary
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
-- **MISSING-stays-missing** (regression guard, 404/405 expected): 15 of the
-  30 MISSING actions have plausible URL patterns probed by
+- **MISSING-stays-missing** (regression guard, 404/405 expected): 2 of the
+  16 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  15 are TUI-UX-only (search, copy, jump, help, …) where no plausible web
+  14 are TUI-UX-only (search, copy, jump, help, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
-- **Total TUI actions:** 47 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web endpoints implemented:** 17
-- **MISSING web actions:** 30 (~64% gap)
+- **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
+- **Web endpoints implemented:** 36
+- **MISSING web actions:** 16 (~31% gap)
 - **Key gaps:**
-  - Session settings edits (rename, color, notes, tool options)
-  - MCP/Skill management (no web equivalent)
-  - Content operations (copy, send, search)
-  - Worktree operations
-  - Non-destructive close
-  - Restart fresh (no web)
+  - Multi-repo path editor
+  - Inline notes editor and unread marking
+  - Content operations (copy/search/jump/navigation-only flows)
+  - Fork-with-options dialog
+  - Exec shell and TUI-only preview toggles
 
 ### State Field Parity
 - **Total TUI-visible fields:** ~50
@@ -199,13 +199,7 @@ tiers:
 
 ### Sync Gaps (Actions)
 
-1. **Session Metadata Edits** (7 actions): The TUI has comprehensive edit dialogs (`EditSessionDialog`, `GroupDialog`) for:
-   - Title/name changes (`r` key)
-   - Color tint (`P` → EditSessionDialog)
-   - Notes (`e` key inline)
-   - Tool options, channels, extra_args (`P` → EditSessionDialog)
-
-   **Web only reads these via MenuSession but has NO write path.** The `SetField` mutator in `internal/session/mutators.go` exists but is not exposed via HTTP.
+1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path and POST `/api/sessions/{id}/group` for group moves. Remaining gaps are narrower: inline notes (`e` textarea), multi-repo path editing, and unread marking.
 
 2. **MCP & Skill Management** (6 actions): MCPDialog and SkillDialog are TUI-only. They:
    - Write `.mcp.json` and project config

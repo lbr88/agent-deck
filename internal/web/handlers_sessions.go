@@ -287,6 +287,56 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				s.notifyMenuChanged()
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "group":
+			var req MoveSessionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+				return
+			}
+			req.GroupPath = strings.Trim(strings.TrimSpace(req.GroupPath), "/")
+			if req.GroupPath == "" {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "groupPath is required")
+				return
+			}
+			if err := s.mutator.MoveSessionToGroup(sessionID, req.GroupPath); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "send":
+			var req SendSessionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+				return
+			}
+			req.Message = strings.TrimSpace(req.Message)
+			if req.Message == "" {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "message is required")
+				return
+			}
+			if err := s.mutator.SendSessionPrompt(sessionID, req.Message); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
 		case "fork":
 			newID, err := s.mutator.ForkSession(sessionID)
 			if err != nil {

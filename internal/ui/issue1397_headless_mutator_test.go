@@ -131,6 +131,37 @@ func TestIssue1397_HeadlessCreateGroupDoesNotTripGuard(t *testing.T) {
 	}
 }
 
+func TestHeadlessWebMutatorMoveSessionToGroupPersists(t *testing.T) {
+	h, storage := newHeadlessHomeForTest(t, "_test_web_move_group")
+	_ = seedSession(t, storage, nil, "web-move-001", "move me")
+
+	m := NewWebMutator(h)
+	if err := m.MoveSessionToGroup("web-move-001", "work/api"); err != nil {
+		t.Fatalf("MoveSessionToGroup: %v", err)
+	}
+
+	instances, groups, err := storage.LoadWithGroups()
+	if err != nil {
+		t.Fatalf("LoadWithGroups: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("instances len = %d, want 1", len(instances))
+	}
+	if got := instances[0].GroupPath; got != "work/api" {
+		t.Fatalf("GroupPath = %q, want work/api", got)
+	}
+	found := false
+	for _, group := range groups {
+		if group.Path == "work/api" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("persisted groups missing work/api: %+v", groups)
+	}
+}
+
 // TestIssue1397_LiveModeDoesNotHydrate ensures the hydration path is gated on
 // headless: in live-TUI mode (headless=false) beginHeadlessTx must be a no-op so
 // it never races the bubbletea loop that owns the in-memory state.

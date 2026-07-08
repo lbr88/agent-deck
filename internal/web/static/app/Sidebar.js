@@ -12,6 +12,7 @@ import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, mutationsEnabledSignal, confirmDialogSignal,
   createSessionDialogSignal, editSessionDialogSignal,
+  moveSessionDialogSignal, promptSessionDialogSignal,
 } from './state.js'
 import { statusFiltersSignal, showColsSignal, activeTabSignal } from './uiState.js'
 import { apiFetch } from './api.js'
@@ -95,6 +96,12 @@ function doAction(action, s) {
   if (action === 'edit') {
     editSessionDialogSignal.value = { sessionId: id }
   }
+  if (action === 'move') {
+    moveSessionDialogSignal.value = { sessionId: id }
+  }
+  if (action === 'prompt') {
+    promptSessionDialogSignal.value = { sessionId: id }
+  }
 }
 
 function SessionItem({ s, sel, onSelect, showCols }) {
@@ -149,6 +156,8 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           <button class="mini" title="Toggle YOLO / auto-approve" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>YOLO</button>
         `}
         <button class="mini" title="Close process; keep metadata" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>D</button>
+        <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
+        <button class="mini" title="Move to group" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>M</button>
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>
         ${s.canFork && html`<button class="mini fork" title="Fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}><${Icon} d=${ICONS.fork} size=${12}/></button>`}
         ${!s.isHub && s.worktree && html`<button class="mini" title="Finish worktree (merge + cleanup)" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">⎇✓</button>`}

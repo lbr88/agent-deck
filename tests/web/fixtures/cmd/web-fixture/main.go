@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -505,6 +506,40 @@ func (s *fixtureStore) UpdateSession(id string, updates map[string]string) ([]st
 		}
 	}
 	return changed, restartRequired, nil, nil
+}
+
+func (s *fixtureStore) MoveSessionToGroup(id, groupPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		return fmt.Errorf("group path is required")
+	}
+	if _, ok := s.groups[groupPath]; !ok {
+		parts := strings.Split(groupPath, "/")
+		s.groups[groupPath] = &web.MenuGroup{Name: parts[len(parts)-1], Path: groupPath, Order: len(s.groups)}
+	}
+	sess.GroupPath = groupPath
+	return nil
+}
+
+func (s *fixtureStore) SendSessionPrompt(id, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return fmt.Errorf("message is required")
+	}
+	sess.LatestPrompt = message
+	return nil
 }
 
 func (s *fixtureStore) ForkSession(parentID string) (string, error) {

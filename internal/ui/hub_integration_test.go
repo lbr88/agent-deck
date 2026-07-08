@@ -934,10 +934,23 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	}
 	assertHubCommand(t, client.commands[3], "node_server", "toggle_yolo", map[string]string{"session_id": "r1"})
 
+	if err := mutator.MoveSessionToGroup(webID, "infra"); err != nil {
+		t.Fatalf("MoveSessionToGroup: %v", err)
+	}
+	assertHubCommand(t, client.commands[4], "node_server", "move", map[string]string{"session_id": "r1", "group_path": "infra"})
+	if got := h.hubSessions["node_server"].Sessions[0].GroupPath; got != "infra" {
+		t.Fatalf("hub group after MoveSessionToGroup = %q, want infra", got)
+	}
+
+	if err := mutator.SendSessionPrompt(webID, "run tests"); err != nil {
+		t.Fatalf("SendSessionPrompt: %v", err)
+	}
+	assertHubCommand(t, client.commands[5], "node_server", "send", map[string]string{"session_id": "r1", "message": "run tests"})
+
 	if err := mutator.DeleteSession(webID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	assertHubCommand(t, client.commands[4], "node_server", "delete", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[6], "node_server", "delete", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}

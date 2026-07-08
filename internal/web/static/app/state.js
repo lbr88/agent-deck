@@ -95,6 +95,14 @@ export const groupNameDialogSignal = signal(null)
 // settings" MISSING row in tests/web/PARITY_MATRIX.md.
 export const editSessionDialogSignal = signal(null)
 
+// moveSessionDialogSignal: null or { sessionId: string }
+// Opens a modal that POSTs /api/sessions/{id}/group.
+export const moveSessionDialogSignal = signal(null)
+
+// promptSessionDialogSignal: null or { sessionId: string }
+// Web parity for the TUI `o` shortcut: POSTs /api/sessions/{id}/send.
+export const promptSessionDialogSignal = signal(null)
+
 // WebSocket connection state for terminal: 'disconnected' | 'connecting' | 'connected' | 'error'
 export const wsStateSignal = signal('disconnected')
 

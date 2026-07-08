@@ -132,11 +132,27 @@ test.describe('keyboard parity (#780)', () => {
     await expect(dialog).toBeVisible()
   })
 
-  test('r surfaces the rename-not-supported toast (web API gap)', async ({ page }) => {
+  test('r opens the edit session dialog', async ({ page }) => {
     await page.keyboard.press('r')
-    // Toast container shows the info-level message.
-    const toast = page.locator('.toast', { hasText: /rename/i }).first()
-    await expect(toast).toBeVisible({ timeout: 2000 })
+    const dialog = page.locator('.overlay .dialog, [role="dialog"]').first()
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(/edit session/i)
+  })
+
+  test('o opens the prompt session dialog', async ({ page }) => {
+    await page.keyboard.press('o')
+    const dialog = page.locator('.overlay .dialog, [role="dialog"]').first()
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(/prompt session/i)
+  })
+
+  test('Shift+M opens the move session dialog', async ({ page }) => {
+    await page.keyboard.down('Shift')
+    await page.keyboard.press('M')
+    await page.keyboard.up('Shift')
+    const dialog = page.locator('.overlay .dialog, [role="dialog"]').first()
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(/move session/i)
   })
 
   test('Shift+D opens the stop-session confirm dialog', async ({ page }) => {

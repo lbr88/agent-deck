@@ -126,6 +126,48 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "move_session_to_group",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				body, _ := json.Marshal(map[string]string{"groupPath": "work/moved"})
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/group", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web move: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.MoveSessionToGroup(id, "work/moved"); err != nil {
+					t.Fatalf("direct MoveSessionToGroup: %v", err)
+				}
+				return id
+			},
+		},
+		{
+			name: "send_session_prompt",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				body, _ := json.Marshal(map[string]string{"message": "run tests"})
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/send", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web send: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.SendSessionPrompt(id, "run tests"); err != nil {
+					t.Fatalf("direct SendSessionPrompt: %v", err)
+				}
+				return id
+			},
+		},
+		{
 			// Web POST /api/groups vs direct CreateGroup mutator. Asserts both
 			// paths produce a snapshot containing the new group.
 			name: "create_group",
@@ -585,6 +627,40 @@ func (s *parityStore) ToggleYoloSession(id string) error {
 	if sess.Tool != "gemini" && sess.Tool != "codex" && sess.Tool != "hermes" {
 		return parityErr("session tool " + sess.Tool + " does not support yolo toggle")
 	}
+	return nil
+}
+
+func (s *parityStore) MoveSessionToGroup(id, groupPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		return parityErr("group path is required")
+	}
+	if _, ok := s.groups[groupPath]; !ok {
+		parts := strings.Split(groupPath, "/")
+		s.groups[groupPath] = &MenuGroup{Name: parts[len(parts)-1], Path: groupPath, Order: len(s.groups)}
+	}
+	sess.GroupPath = groupPath
+	return nil
+}
+
+func (s *parityStore) SendSessionPrompt(id, message string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return parityErr("message is required")
+	}
+	sess.LatestPrompt = message
 	return nil
 }
 

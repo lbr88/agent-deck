@@ -28,7 +28,7 @@ import { Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
-  editSessionDialogSignal,
+  editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
   groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
   profilesSignal, systemStatsSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
@@ -40,6 +40,8 @@ import {
 } from './uiState.js'
 import { CreateSessionDialog } from './CreateSessionDialog.js'
 import { EditSessionDialog } from './EditSessionDialog.js'
+import { MoveSessionDialog } from './MoveSessionDialog.js'
+import { PromptSessionDialog } from './PromptSessionDialog.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
 import { GroupNameDialog } from './GroupNameDialog.js'
 import { ToastContainer, addToast } from './Toast.js'
@@ -89,6 +91,8 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => action('restart')}><${Icon} d=${ICONS.restart} size=${12}/>Restart</button>
           <button class="btn ghost" onClick=${() => action('restart-fresh')}>Fresh</button>
           ${supportsYolo && html`<button class="btn ghost" onClick=${() => action('toggle-yolo')}>YOLO</button>`}
+          <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
+          <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
           ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
           <button class="btn primary" onClick=${() => (createSessionDialogSignal.value = true)}>
             <${Icon} d=${ICONS.plus} size=${12}/>New <span class="kbd">n</span>
@@ -125,6 +129,8 @@ function Panes({ tab }) {
 export function AppShell() {
   const activeTab = activeTabSignal.value
   const showCreateSession = createSessionDialogSignal.value
+  const showMoveSession = moveSessionDialogSignal.value
+  const showPromptSession = promptSessionDialogSignal.value
   const confirmData = confirmDialogSignal.value
   const groupNameData = groupNameDialogSignal.value
   const drawerOpen = infoDrawerOpenSignal.value
@@ -233,6 +239,9 @@ export function AppShell() {
       createSessionDialogSignal.value = false
       confirmDialogSignal.value = null
       groupNameDialogSignal.value = null
+      editSessionDialogSignal.value = null
+      moveSessionDialogSignal.value = null
+      promptSessionDialogSignal.value = null
       infoDrawerOpenSignal.value = false
     }
     const onKey = (e) => {
@@ -289,6 +298,20 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           editSessionDialogSignal.value = { sessionId: s.id }
+        }
+      } else if (e.key === 'o') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          promptSessionDialogSignal.value = { sessionId: s.id }
+        }
+      } else if (e.key === 'M') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          moveSessionDialogSignal.value = { sessionId: s.id }
         }
       } else if (e.key === 'D') {
         // Shift+D — non-destructive close of focused session. Mirrors
@@ -351,6 +374,8 @@ export function AppShell() {
 
       ${showCreateSession && html`<${CreateSessionDialog}/>`}
       <${EditSessionDialog}/>
+      ${showMoveSession && html`<${MoveSessionDialog} ...${showMoveSession}/>`}
+      ${showPromptSession && html`<${PromptSessionDialog} ...${showPromptSession}/>`}
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}
       ${groupNameData && html`<${GroupNameDialog} ...${groupNameData}/>`}
 

@@ -18,17 +18,11 @@ const MATRIX = loadMatrix()
 
 // Pinned row counts. If the matrix grows or shrinks, these MUST be updated
 // in the same PR — the failure is the point.
-const EXPECTED_ACTION_ROWS = 51
+const EXPECTED_ACTION_ROWS = 52
 // Probeable = MISSING rows that inferMissingProbe() maps to a URL. Decremented
-// as endpoints land and their matrix rows flip MISSING → Present:
-//   15 (PR-A #804) → 9 (#1124 skills+MCP, 6 closed) → 7 (#1129 Close + Undo
-//   Delete, 2 closed) → 6 (#1126/#1153 Finish worktree, 1 closed) → 5 (#1132
-//   PATCH /sessions/{id} + Edit dialog, "Edit session settings" closed).
-// #1129 flipped the close/undelete rows but missed this decrement (9→7), so the
-// pin was stuck 2 high and the suite went red on every later PR. Re-baselined to
-// the true count: Restart fresh, Rename session, Move session to group, Edit
-// notes inline, Mark session unread.
-const EXPECTED_PROBEABLE_MISSING = 5
+// as endpoints land and their matrix rows flip MISSING → Present. The true
+// remaining probeable gaps are now: Edit notes inline and Mark session unread.
+const EXPECTED_PROBEABLE_MISSING = 2
 
 test.describe.configure({ mode: 'serial' })
 
@@ -129,6 +123,32 @@ test.describe('parity: session lifecycle', () => {
     expect(res.ok()).toBe(true)
     const after = await snapshot(request)
     expect(findSession(after, (s) => s.id === 'sess-001').status).toBe('running')
+  })
+
+  test('restart fresh session — status returns to running', async ({ request }) => {
+    await request.post('/api/sessions/sess-001/stop')
+    const res = await request.post('/api/sessions/sess-001/restart-fresh')
+    expect(res.ok()).toBe(true)
+    const after = await snapshot(request)
+    expect(findSession(after, (s) => s.id === 'sess-001').status).toBe('running')
+  })
+
+  test('move session to group — POST updates groupPath', async ({ request }) => {
+    const res = await request.post('/api/sessions/sess-001/group', {
+      data: { groupPath: 'work/moved' },
+    })
+    expect(res.ok()).toBe(true)
+    const after = await snapshot(request)
+    expect(findSession(after, (s) => s.id === 'sess-001').groupPath).toBe('work/moved')
+  })
+
+  test('prompt focused session — POST records latest prompt', async ({ request }) => {
+    const res = await request.post('/api/sessions/sess-001/send', {
+      data: { message: 'run tests' },
+    })
+    expect(res.ok()).toBe(true)
+    const after = await snapshot(request)
+    expect(findSession(after, (s) => s.id === 'sess-001').latestPrompt).toBe('run tests')
   })
 
   test('fork session — web POST creates child with parent reference', async ({ request }) => {

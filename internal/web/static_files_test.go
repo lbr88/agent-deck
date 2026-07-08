@@ -152,9 +152,23 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		"session-toggle-yolo-btn",
 		"session-remove-btn",
 		"session-close-btn",
+		"session-move-btn",
+		"session-prompt-btn",
 	} {
 		if !strings.Contains(sidebarBody, want) {
 			t.Fatalf("Sidebar.js missing %q; web session rows must expose native action parity", want)
+		}
+	}
+	for file, want := range map[string]string{
+		"static/app/MoveSessionDialog.js":   "/group",
+		"static/app/PromptSessionDialog.js": "/send",
+	} {
+		data, err := embeddedStaticFiles.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", file, err)
+		}
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("%s missing %q; web dialogs must call native action parity endpoints", file, want)
 		}
 	}
 
@@ -163,9 +177,19 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		t.Fatalf("ReadFile(AppShell.js): %v", err)
 	}
 	appShellBody := string(appShell)
-	for _, want := range []string{"restart-fresh", "toggle-yolo"} {
+	for _, want := range []string{"restart-fresh", "toggle-yolo", "MoveSessionDialog", "PromptSessionDialog"} {
 		if !strings.Contains(appShellBody, want) {
 			t.Fatalf("AppShell.js missing %q; focused session header must expose native action parity", want)
+		}
+	}
+
+	shortcuts, err := embeddedStaticFiles.ReadFile("static/app/KeyboardShortcuts.js")
+	if err != nil {
+		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
+	}
+	for _, want := range []string{"Prompt focused session", "Move focused session to group"} {
+		if !strings.Contains(string(shortcuts), want) {
+			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
 		}
 	}
 }
