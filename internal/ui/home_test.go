@@ -4103,6 +4103,30 @@ func TestRebuildFlatItemsCollapsedGroupKeepsHeaderWithArchivedSessions(t *testin
 	}
 }
 
+func TestRebuildFlatItemsActiveFilterKeepsCollapsedMatchingGroupHeader(t *testing.T) {
+	inst := session.NewInstanceWithGroup("running", "/tmp/a", "work")
+	inst.Status = session.StatusRunning
+	h := &Home{
+		statusFilter:         FilterModeActive,
+		activeFilterExcludes: (session.DisplaySettings{}).GetActiveFilterExcludes(),
+		groupTree:            session.NewGroupTree([]*session.Instance{inst}),
+		windowsCollapsed:     make(map[string]bool),
+	}
+	h.groupTree.CollapseGroup("work")
+
+	h.rebuildFlatItems()
+
+	if h.statusFilter != FilterModeActive {
+		t.Fatalf("statusFilter = %q, want %q", h.statusFilter, FilterModeActive)
+	}
+	if len(h.flatItems) != 1 {
+		t.Fatalf("open filter + collapsed matching group: got %d flat items, want 1 group header", len(h.flatItems))
+	}
+	if h.flatItems[0].Type != session.ItemTypeGroup || h.flatItems[0].Path != "work" {
+		t.Fatalf("expected collapsed work group header under open filter, got %+v", h.flatItems[0])
+	}
+}
+
 func TestRebuildFlatItemsCollapsedGroupKeepsHeaderInArchivedView(t *testing.T) {
 	h := NewHome()
 	h.statusFilter = FilterModeArchived

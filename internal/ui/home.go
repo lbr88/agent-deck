@@ -2476,22 +2476,11 @@ func (h *Home) rebuildFlatItems() {
 
 	// Apply status filter if active (skip when browsing archived list).
 	if h.statusFilter != "" && h.statusFilter != FilterModeArchived {
-		// First pass: identify groups that have matching sessions
-		groupsWithMatches := make(map[string]bool)
-		for _, item := range allItems {
-			if item.Type == session.ItemTypeSession && item.Session != nil {
-				if h.matchesStatusFilter(h.statusFilter, item.Session.Status) {
-					// Mark this session's group and all parent groups as having matches
-					groupsWithMatches[item.Path] = true
-					// Also mark parent paths
-					parts := strings.Split(item.Path, "/")
-					for i := range parts {
-						parentPath := strings.Join(parts[:i+1], "/")
-						groupsWithMatches[parentPath] = true
-					}
-				}
-			}
-		}
+		// Identify groups from the full tree, not the flattened view. Collapsed
+		// groups intentionally omit their session rows from Flatten(), but their
+		// headers must remain visible when they contain sessions matching the
+		// active status filter so users can expand them without switching to "all".
+		groupsWithMatches := h.statusFilterGroupsWithMatches(h.statusFilter)
 
 		// Second pass: filter items
 		filtered := make([]session.Item, 0, len(allItems))
@@ -20561,6 +20550,31 @@ func (h *Home) archiveGroupsWithMatches(viewArchived bool) map[string]bool {
 				continue
 			}
 			markGroupPathAndAncestors(groupsWithMatches, group.Path)
+		}
+	}
+	return groupsWithMatches
+}
+
+// statusFilterGroupsWithMatches returns group paths that contain at least one
+// non-archived local session matching filter. It deliberately walks the full
+// group tree instead of h.flatItems/Flatten() so collapsed groups keep their
+// headers under status filters.
+func (h *Home) statusFilterGroupsWithMatches(filter session.Status) map[string]bool {
+	groupsWithMatches := make(map[string]bool)
+	if h == nil || h.groupTree == nil {
+		return groupsWithMatches
+	}
+	for _, group := range h.groupTree.GroupList {
+		if group == nil {
+			continue
+		}
+		for _, sess := range group.Sessions {
+			if sess == nil || sess.IsArchived() {
+				continue
+			}
+			if h.matchesStatusFilter(filter, sess.Status) {
+				markGroupPathAndAncestors(groupsWithMatches, group.Path)
+			}
 		}
 	}
 	return groupsWithMatches
