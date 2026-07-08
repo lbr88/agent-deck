@@ -343,6 +343,37 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				s.notifyMenuChanged()
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "send-output":
+			var req SendSessionOutputRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid request body")
+				return
+			}
+			req.TargetSessionID = strings.TrimSpace(req.TargetSessionID)
+			if req.TargetSessionID == "" {
+				writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, "targetSessionId is required")
+				return
+			}
+			if err := s.mutator.SendSessionOutput(sessionID, req.TargetSessionID); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				if strings.Contains(err.Error(), "target") || strings.Contains(err.Error(), "source") || strings.Contains(err.Error(), "output") {
+					writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else if _, _, targetIsHub := ParseHubSessionWebID(req.TargetSessionID); targetIsHub {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: req.TargetSessionID})
 		case "approve":
 			if err := s.mutator.QuickApproveSession(sessionID); err != nil {
 				if strings.Contains(err.Error(), "not found") {

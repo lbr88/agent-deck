@@ -1086,6 +1086,26 @@ func TestWebMutatorUpdatesHubSessionPathsThroughHubClient(t *testing.T) {
 	}
 }
 
+func TestWebMutatorSendsHubSessionOutputThroughHubClient(t *testing.T) {
+	h, client := newHubActionHome(t)
+	client.commandResult = mustJSON(t, hub.PreviewSessionResponse{Content: "Hub answer"})
+	mutator := NewWebMutator(h)
+	sourceID := web.HubSessionWebID("node_server", "r1")
+	targetID := web.HubSessionWebID("node_server", "r2")
+
+	if err := mutator.SendSessionOutput(sourceID, targetID); err != nil {
+		t.Fatalf("SendSessionOutput: %v", err)
+	}
+	if len(client.commands) != 2 {
+		t.Fatalf("commands length = %d, want 2", len(client.commands))
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "preview", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[1], "node_server", "send", map[string]string{
+		"session_id": "r2",
+		"message":    "--- Output from [deploy] ---\nHub answer\n--- End output from [deploy] ---",
+	})
+}
+
 func TestWebMutatorForksHubSessionThroughHubClient(t *testing.T) {
 	h, client := newHubActionHome(t)
 	client.commandResult = mustJSON(t, map[string]string{"session_id": "forked_remote"})

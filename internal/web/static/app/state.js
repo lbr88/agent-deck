@@ -103,6 +103,10 @@ export const moveSessionDialogSignal = signal(null)
 // Web parity for the TUI `o` shortcut: POSTs /api/sessions/{id}/send.
 export const promptSessionDialogSignal = signal(null)
 
+// sendOutputDialogSignal: null or { sourceSessionId: string }
+// Web parity for the TUI `x` shortcut: send source output to another session.
+export const sendOutputDialogSignal = signal(null)
+
 // notesSessionDialogSignal: null or { sessionId: string }
 // Web parity for the TUI `e` shortcut: POSTs /api/sessions/{id}/notes.
 export const notesSessionDialogSignal = signal(null)

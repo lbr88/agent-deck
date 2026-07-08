@@ -59,7 +59,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Quick approve | `internal/ui/home.go:6387` (default hotkey) | POST `/api/sessions/{id}/approve` | `QuickApproveSession` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Send "1"+Enter without attach; routes hub sessions through hub `send` |
 | Copy output | `internal/ui/home.go:6511` (`c` key) | UI `c` shortcut | `TerminalPanel` buffer → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Copies focused terminal scrollback to clipboard |
 | Copy session info | `internal/ui/home.go:6521` (`C`/`shift+c`) | UI `Shift+C` shortcut | `sessionInfoText` → clipboard | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Repo/path/branch/session metadata → clipboard |
-| Send output to session | `internal/ui/home.go:6532` (`x` key) | MISSING | N/A | N/A | TUI session picker dialog |
+| Send output to session | `internal/ui/home.go:6532` (`x` key) | POST `/api/sessions/{id}/send-output` | `SendSessionOutput` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `static_files_test.go` | Web `x` opens a target picker; works with hub session IDs through preview/send commands |
 | Exec shell | `internal/ui/home.go:6161` (`E` key) | MISSING | N/A | N/A | Sandbox container shell only |
 | Toggle preview mode | `internal/ui/home.go:6413` (`v` key) | MISSING | N/A | N/A | Cycle: both → output → analytics |
 | Open search | `internal/ui/home.go:6133` (`/` key) | UI `/` shortcut | Sidebar filter/search UI | `tests/web/e2e/keyboard-parity.spec.js` | Web `/` focuses the session filter; search pane covers session search navigation |
@@ -167,19 +167,18 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  4 MISSING actions have plausible URL patterns probed by
+  3 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  4 are TUI-UX-only (exec shell, preview cycling, …) where no plausible web
+  3 are TUI-UX-only (exec shell, preview cycling, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web/API/UI surfaces implemented:** 48
-- **MISSING web actions:** 4 (~8% gap)
+- **Web/API/UI surfaces implemented:** 49
+- **MISSING web actions:** 3 (~6% gap)
 - **Key gaps:**
-  - Content workflow operations (send output to session)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
 
@@ -199,7 +198,7 @@ tiers:
 
 1. **Session Metadata Parity**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, POST `/api/sessions/{id}/group` for group moves, and POST `/api/sessions/{id}/paths` for multi-repo path editing.
 
-2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: send output to another session, fork-with-options, exec-shell, and preview-mode cycling.
+2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: fork-with-options, exec-shell, and preview-mode cycling.
 
 3. **Implemented Non-HTTP Surfaces**: Some parity rows are intentionally UI/WS rather than HTTP: `/` search focus, `?` help overlay, Enter terminal attach via `/ws/session/{id}`, and Ctrl/Cmd+R manual refresh via GET `/api/menu`.
 
@@ -221,6 +220,6 @@ tiers:
 
 ## Recommendations
 
-1. Add web UX for remaining content workflows: send output to session and fork-with-options.
+1. Add web UX for the remaining fork-with-options workflow.
 2. Decide whether preview-mode cycling and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
 3. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.

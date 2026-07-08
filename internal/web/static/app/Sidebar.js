@@ -12,7 +12,7 @@ import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, mutationsEnabledSignal, confirmDialogSignal,
   createSessionDialogSignal, editSessionDialogSignal,
-  moveSessionDialogSignal, promptSessionDialogSignal, notesSessionDialogSignal,
+  moveSessionDialogSignal, promptSessionDialogSignal, sendOutputDialogSignal, notesSessionDialogSignal,
   pathsSessionDialogSignal,
 } from './state.js'
 import { statusFiltersSignal, showColsSignal, activeTabSignal } from './uiState.js'
@@ -105,6 +105,9 @@ function doAction(action, s) {
   if (action === 'prompt') {
     promptSessionDialogSignal.value = { sessionId: id }
   }
+  if (action === 'sendOutput') {
+    sendOutputDialogSignal.value = { sourceSessionId: id }
+  }
   if (action === 'notes') {
     notesSessionDialogSignal.value = { sessionId: id }
   }
@@ -169,6 +172,7 @@ function SessionItem({ s, sel, onSelect, showCols }) {
         <button class="mini" title="Quick approve Claude prompt" data-testid="session-approve-btn" onClick=${() => doAction('approve', s)}>a</button>
         <button class="mini" title="Edit notes" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>e</button>
         <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
+        <button class="mini" title="Send output to session" data-testid="session-send-output-btn" onClick=${() => doAction('sendOutput', s)}>x</button>
         <button class="mini" title="Move to group" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>M</button>
         ${s.multiRepoEnabled && html`<button class="mini" title="Edit multi-repo paths" data-testid="session-paths-btn" onClick=${() => doAction('paths', s)}>p</button>`}
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>

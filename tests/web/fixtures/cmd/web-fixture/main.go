@@ -569,6 +569,26 @@ func (s *fixtureStore) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+func (s *fixtureStore) SendSessionOutput(sourceID, targetID string) error {
+	s.mu.Lock()
+	source, ok := s.sessions[sourceID]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("session not found: %s", sourceID)
+	}
+	content := strings.TrimSpace(source.LatestPrompt)
+	if content == "" {
+		content = strings.TrimSpace(source.Title)
+	}
+	title := source.Title
+	s.mu.Unlock()
+	if content == "" {
+		return fmt.Errorf("no output available for source session")
+	}
+	wrapped := fmt.Sprintf("--- Output from [%s] ---\n%s\n--- End output from [%s] ---\n", title, content, title)
+	return s.SendSessionPrompt(targetID, wrapped)
+}
+
 func (s *fixtureStore) QuickApproveSession(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

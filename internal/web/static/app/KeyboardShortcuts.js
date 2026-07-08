@@ -24,6 +24,7 @@ const BINDINGS = [
   { keys: ['c'],               label: 'Copy focused terminal output' },
   { keys: ['Shift', 'C'],      label: 'Copy focused session info' },
   { keys: ['o'],               label: 'Prompt focused session' },
+  { keys: ['x'],               label: 'Send focused output to another session' },
   { keys: ['Shift', 'M'],      label: 'Move focused session to group' },
   { keys: ['Shift', 'D'],      label: 'Close focused session (stop process, keep metadata)' },
   { keys: ['Ctrl', 'Z'],       label: 'Undo last delete (within 30s)' },

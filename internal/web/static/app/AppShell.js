@@ -29,7 +29,7 @@ import { menuModelSignal } from './dataModel.js'
 import {
   selectedIdSignal, createSessionDialogSignal, confirmDialogSignal,
   editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
-  notesSessionDialogSignal, pathsSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
+  sendOutputDialogSignal, notesSessionDialogSignal, pathsSessionDialogSignal, groupNameDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
   profilesSignal, systemStatsSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
@@ -42,6 +42,7 @@ import { CreateSessionDialog } from './CreateSessionDialog.js'
 import { EditSessionDialog } from './EditSessionDialog.js'
 import { MoveSessionDialog } from './MoveSessionDialog.js'
 import { PromptSessionDialog } from './PromptSessionDialog.js'
+import { SendOutputDialog } from './SendOutputDialog.js'
 import { NotesSessionDialog } from './NotesSessionDialog.js'
 import { EditPathsDialog } from './EditPathsDialog.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
@@ -98,6 +99,7 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => action('approve')}>Approve</button>
           <button class="btn ghost" onClick=${() => (notesSessionDialogSignal.value = { sessionId: session.id })}>Notes</button>
           <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
+          <button class="btn ghost" onClick=${() => (sendOutputDialogSignal.value = { sourceSessionId: session.id })}>Send output</button>
           <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
           ${session.multiRepoEnabled && html`<button class="btn ghost" onClick=${() => (pathsSessionDialogSignal.value = { sessionId: session.id })}>Paths</button>`}
           ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
@@ -261,6 +263,7 @@ export function AppShell() {
   const showCreateSession = createSessionDialogSignal.value
   const showMoveSession = moveSessionDialogSignal.value
   const showPromptSession = promptSessionDialogSignal.value
+  const showSendOutput = sendOutputDialogSignal.value
   const showNotesSession = notesSessionDialogSignal.value
   const showPathsSession = pathsSessionDialogSignal.value
   const confirmData = confirmDialogSignal.value
@@ -376,6 +379,7 @@ export function AppShell() {
       editSessionDialogSignal.value = null
       moveSessionDialogSignal.value = null
       promptSessionDialogSignal.value = null
+      sendOutputDialogSignal.value = null
       notesSessionDialogSignal.value = null
       pathsSessionDialogSignal.value = null
       infoDrawerOpenSignal.value = false
@@ -482,6 +486,13 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           promptSessionDialogSignal.value = { sessionId: s.id }
+        }
+      } else if (e.key === 'x') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          sendOutputDialogSignal.value = { sourceSessionId: s.id }
         }
       } else if (e.key === 'e') {
         if (!mutationsEnabledSignal.value) return
@@ -592,6 +603,7 @@ export function AppShell() {
       <${EditSessionDialog}/>
       ${showMoveSession && html`<${MoveSessionDialog} ...${showMoveSession}/>`}
       ${showPromptSession && html`<${PromptSessionDialog} ...${showPromptSession}/>`}
+      ${showSendOutput && html`<${SendOutputDialog} ...${showSendOutput}/>`}
       ${showNotesSession && html`<${NotesSessionDialog} ...${showNotesSession}/>`}
       ${showPathsSession && html`<${EditPathsDialog} ...${showPathsSession}/>`}
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}

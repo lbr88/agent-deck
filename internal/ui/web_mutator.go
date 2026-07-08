@@ -1013,6 +1013,91 @@ func (m *WebMutator) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+// SendSessionOutput mirrors the TUI `x` workflow: capture the source session's
+// displayable output, wrap it with source labels, and submit it to a target
+// session without opening an attach. Local sessions use the same content
+// extraction helper as the TUI; hub sessions use the owner's preview command.
+func (m *WebMutator) SendSessionOutput(sourceID, targetID string) error {
+	sourceID = strings.TrimSpace(sourceID)
+	targetID = strings.TrimSpace(targetID)
+	if sourceID == "" {
+		return fmt.Errorf("source session id is required")
+	}
+	if targetID == "" {
+		return fmt.Errorf("target session id is required")
+	}
+	if sourceID == targetID {
+		return fmt.Errorf("target session must be different from source")
+	}
+	content, title, err := m.sessionOutputForWeb(sourceID)
+	if err != nil {
+		return err
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("no output available for source session")
+	}
+	if len(content) > maxTransferSize {
+		content = content[:maxTransferSize] + "\n[Truncated at 500KB]"
+	}
+	if strings.TrimSpace(title) == "" {
+		title = sourceID
+	}
+	wrapped := fmt.Sprintf("--- Output from [%s] ---\n%s\n--- End output from [%s] ---\n", title, content, title)
+	return m.SendSessionPrompt(targetID, wrapped)
+}
+
+func (m *WebMutator) sessionOutputForWeb(id string) (content, title string, err error) {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		raw, err := m.hubCommand(nodeID, "preview", map[string]string{"session_id": sessionID})
+		if err != nil {
+			return "", "", err
+		}
+		var result hub.PreviewSessionResponse
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return "", "", fmt.Errorf("decode hub preview response: %w", err)
+		}
+		return result.Content, m.hubSessionTitle(nodeID, sessionID, id), nil
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return "", "", err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return "", "", fmt.Errorf("source session not found: %s", id)
+	}
+	content, err = getSessionContent(inst)
+	if err != nil {
+		return "", "", err
+	}
+	return content, inst.Title, nil
+}
+
+func (m *WebMutator) hubSessionTitle(nodeID, sessionID, fallback string) string {
+	if m == nil || m.h == nil {
+		return fallback
+	}
+	m.h.hubSessionsMu.RLock()
+	defer m.h.hubSessionsMu.RUnlock()
+	snapshot, ok := m.h.hubSessions[nodeID]
+	if !ok {
+		return fallback
+	}
+	for _, info := range snapshot.Sessions {
+		if info.ID == sessionID {
+			if title := strings.TrimSpace(info.Title); title != "" {
+				return title
+			}
+			break
+		}
+	}
+	return fallback
+}
+
 // QuickApproveSession mirrors the TUI `a` quick-approve shortcut: send
 // "1"+Enter to Claude-compatible sessions without opening an attach. Non-Claude
 // sessions intentionally no-op, matching Home.handleMainKey's guard.

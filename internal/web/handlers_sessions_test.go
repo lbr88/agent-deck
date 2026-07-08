@@ -36,6 +36,7 @@ type fakeMutator struct {
 	updatePathsFn      func(id string, paths []string) error
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
+	sendOutputFn       func(sourceID, targetID string) error
 	quickApproveFn     func(id string) error
 	updateNotesFn      func(id, notes string) error
 	markUnreadFn       func(id string) error
@@ -174,6 +175,13 @@ func (f *fakeMutator) SendSessionPrompt(id, message string) error {
 		return fmt.Errorf("sendSessionPrompt not configured")
 	}
 	return f.sendSessionFn(id, message)
+}
+
+func (f *fakeMutator) SendSessionOutput(sourceID, targetID string) error {
+	if f.sendOutputFn == nil {
+		return fmt.Errorf("sendSessionOutput not configured")
+	}
+	return f.sendOutputFn(sourceID, targetID)
 }
 
 func (f *fakeMutator) QuickApproveSession(id string) error {
@@ -727,6 +735,57 @@ func TestSessionSendPromptRejectsEmptyMessage(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/test-id/send", strings.NewReader(`{"message":"   "}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionSendOutputOK(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	var gotSource, gotTarget string
+	srv.mutator = &fakeMutator{
+		sendOutputFn: func(sourceID, targetID string) error {
+			gotSource = sourceID
+			gotTarget = targetID
+			return nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/source-id/send-output", strings.NewReader(`{"targetSessionId":"target-id"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	if gotSource != "source-id" || gotTarget != "target-id" {
+		t.Fatalf("send output call = source %q target %q, want source-id/target-id", gotSource, gotTarget)
+	}
+	if !strings.Contains(rr.Body.String(), `"sessionId":"target-id"`) {
+		t.Fatalf("response missing target sessionId: %s", rr.Body.String())
+	}
+}
+
+func TestSessionSendOutputRejectsMissingTarget(t *testing.T) {
+	srv := NewServer(Config{
+		ListenAddr:   "127.0.0.1:0",
+		WebMutations: true,
+	})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	srv.mutator = &fakeMutator{
+		sendOutputFn: func(sourceID, targetID string) error { return nil },
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/source-id/send-output", strings.NewReader(`{"targetSessionId":"   "}`))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)

@@ -189,6 +189,36 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "send_output_to_session",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("source", "claude", "/srv/source", "work", "")
+				_, _ = webFx.store.CreateSession("target", "claude", "/srv/target", "work", "")
+				_, _ = directFx.store.CreateSession("source", "claude", "/srv/source", "work", "")
+				_, _ = directFx.store.CreateSession("target", "claude", "/srv/target", "work", "")
+				const sourceID = "sess-005"
+				const targetID = "sess-006"
+				if err := webFx.store.SendSessionPrompt(sourceID, "source output"); err != nil {
+					t.Fatalf("seed web source output: %v", err)
+				}
+				if err := directFx.store.SendSessionPrompt(sourceID, "source output"); err != nil {
+					t.Fatalf("seed direct source output: %v", err)
+				}
+
+				body, _ := json.Marshal(SendSessionOutputRequest{TargetSessionID: targetID})
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sourceID+"/send-output", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web send-output: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.SendSessionOutput(sourceID, targetID); err != nil {
+					t.Fatalf("direct SendSessionOutput: %v", err)
+				}
+				return targetID
+			},
+		},
+		{
 			name: "quick_approve",
 			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
 				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
@@ -750,6 +780,26 @@ func (s *parityStore) SendSessionPrompt(id, message string) error {
 	}
 	sess.LatestPrompt = message
 	return nil
+}
+
+func (s *parityStore) SendSessionOutput(sourceID, targetID string) error {
+	s.mu.Lock()
+	source, ok := s.sessions[sourceID]
+	if !ok {
+		s.mu.Unlock()
+		return errNotFound(sourceID)
+	}
+	content := strings.TrimSpace(source.LatestPrompt)
+	if content == "" {
+		content = strings.TrimSpace(source.Title)
+	}
+	title := source.Title
+	s.mu.Unlock()
+	if content == "" {
+		return parityErr("no output available for source session")
+	}
+	wrapped := fmt.Sprintf("--- Output from [%s] ---\n%s\n--- End output from [%s] ---\n", title, content, title)
+	return s.SendSessionPrompt(targetID, wrapped)
 }
 
 func (s *parityStore) QuickApproveSession(id string) error {

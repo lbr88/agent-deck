@@ -133,6 +133,7 @@ type SessionMutator interface {
 	UpdateSessionPaths(sessionID string, paths []string) error
 	MoveSessionToGroup(sessionID, groupPath string) error
 	SendSessionPrompt(sessionID, message string) error
+	SendSessionOutput(sourceSessionID, targetSessionID string) error
 	QuickApproveSession(sessionID string) error
 	UpdateSessionNotes(sessionID, notes string) error
 	MarkSessionUnread(sessionID string) error
