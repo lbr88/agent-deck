@@ -51,7 +51,7 @@ import { SettingsPanel } from './SettingsPanel.js'
 import { KeyboardShortcuts } from './KeyboardShortcuts.js'
 import { apiFetch } from './api.js'
 import { refreshMenuSnapshot } from './menuRefresh.js'
-import { shortcutsOverlaySignal, jumpModeSignal } from './state.js'
+import { shortcutsOverlaySignal, jumpModeSignal, globalSearchModeSignal } from './state.js'
 
 function WorkHead() {
   const { sessions } = menuModelSignal.value
@@ -444,6 +444,10 @@ export function AppShell() {
       } else if (e.key === '/') {
         e.preventDefault()
         document.querySelector('.side-filter input')?.focus()
+      } else if (e.key === 'G') {
+        e.preventDefault()
+        globalSearchModeSignal.value = true
+        activeTabSignal.value = 'search'
       } else if (e.key === ' ') {
         e.preventDefault()
         jumpBuffer = ''

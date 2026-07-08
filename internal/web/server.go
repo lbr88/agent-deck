@@ -255,6 +255,7 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/api/groups/", s.handleGroupByPath)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
+	mux.HandleFunc("/api/search/global", s.handleGlobalSearch)
 	mux.HandleFunc("/api/push/config", s.handlePushConfig)
 	mux.HandleFunc("/api/push/subscribe", s.handlePushSubscribe)
 	mux.HandleFunc("/api/push/unsubscribe", s.handlePushUnsubscribe)

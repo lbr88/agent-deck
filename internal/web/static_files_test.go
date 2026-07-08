@@ -210,6 +210,20 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 			t.Fatalf("AppShell.js missing %q; web must expose jump-mode parity", want)
 		}
 	}
+	searchPane, err := embeddedStaticFiles.ReadFile("static/app/panes/SearchPane.js")
+	if err != nil {
+		t.Fatalf("ReadFile(SearchPane.js): %v", err)
+	}
+	for _, want := range []string{"globalSearchModeSignal", "/api/search/global", "GLOBAL CONVERSATION SEARCH", "global-search-result"} {
+		if !strings.Contains(string(searchPane), want) {
+			t.Fatalf("SearchPane.js missing %q; web must expose global-search parity", want)
+		}
+	}
+	for _, want := range []string{"globalSearchModeSignal", "activeTabSignal.value = 'search'"} {
+		if !strings.Contains(appShellBody, want) {
+			t.Fatalf("AppShell.js missing %q; G shortcut must open global search", want)
+		}
+	}
 	for file, want := range map[string]string{
 		"static/app/AppShell.js":           "copyTextToClipboard",
 		"static/app/AppShell.js\x00a":      "agentdeck:copy-terminal-output",

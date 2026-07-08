@@ -136,6 +136,10 @@ export const shortcutsOverlaySignal = signal(false)
 // overlays short labels for visible sessions, then opens the hinted session.
 export const jumpModeSignal = signal(false)
 
+// Search pane mode. false = current Agent Deck sessions, true = Claude
+// conversation global-search index. Web parity for TUI `G`.
+export const globalSearchModeSignal = signal(false)
+
 // Toast history (WEB-P0-4 + POL-7): capped at 50 dismissed toasts.
 // Persisted to localStorage key `agentdeck_toast_history`.
 // Schema is localStorage-only per milestone rule: NO SQLite schema changes.

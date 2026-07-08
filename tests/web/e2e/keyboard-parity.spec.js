@@ -145,6 +145,38 @@ test.describe('keyboard parity (#780)', () => {
     })).toBe(true)
   })
 
+  test('Shift+G opens global conversation search', async ({ page }) => {
+    await page.route('**/api/search/global**', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          query: 'observability',
+          count: 1,
+          tier: 'instant',
+          entryCount: 1,
+          loading: false,
+          results: [{
+            sessionId: 'claude-global-1',
+            summary: 'observability metrics',
+            snippet: 'implement observability metrics',
+            cwd: '/srv/agent-deck',
+            score: 10,
+            matchCount: 1,
+          }],
+        }),
+      })
+    })
+    await page.keyboard.down('Shift')
+    await page.keyboard.press('G')
+    await page.keyboard.up('Shift')
+    await expect(page.locator('[data-testid="search-pane"]')).toBeVisible()
+    await expect(page.locator('[data-testid="search-mode-toggle"]')).toContainText('Global')
+    await expect(page.locator('[data-testid="search-pane"] label').first()).toContainText('GLOBAL CONVERSATION SEARCH')
+    await page.locator('[data-testid="search-input"]').fill('observability')
+    await expect(page.locator('[data-testid="global-search-result"]')).toContainText('observability metrics')
+  })
+
   test('n opens the New Session dialog', async ({ page }) => {
     await page.keyboard.press('n')
     // CreateSessionDialog renders as an overlay containing form fields.

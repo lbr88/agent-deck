@@ -87,7 +87,7 @@ function parseStateFields(section) {
 
 // inferMissingProbe maps a MISSING action row to an HTTP {method, path}
 // probe suitable for asserting the endpoint really stays unimplemented.
-// Returns null for remaining TUI-UX-only gaps (global search, exec shell,
+// Returns null for remaining TUI-UX-only gaps (exec shell, preview cycling,
 // etc.) where no plausible web endpoint would ever exist.
 export function inferMissingProbe(row) {
   if (!row.isMissing) return null

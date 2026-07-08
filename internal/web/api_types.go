@@ -1,6 +1,10 @@
 package web
 
-import "github.com/asheshgoplani/agent-deck/internal/session"
+import (
+	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/session"
+)
 
 // Error code constants for API error responses.
 const (
@@ -137,6 +141,29 @@ type SettingsResponse struct {
 type ProfilesResponse struct {
 	Current  string   `json:"current"`
 	Profiles []string `json:"profiles"`
+}
+
+// GlobalSearchResponse is returned by GET /api/search/global.
+type GlobalSearchResponse struct {
+	Query      string               `json:"query"`
+	Count      int                  `json:"count"`
+	Results    []GlobalSearchResult `json:"results"`
+	Tier       string               `json:"tier,omitempty"`
+	EntryCount int                  `json:"entryCount,omitempty"`
+	Loading    bool                 `json:"loading"`
+}
+
+// GlobalSearchResult mirrors the TUI global-search result shape for web.
+type GlobalSearchResult struct {
+	SessionID  string    `json:"sessionId"`
+	Summary    string    `json:"summary,omitempty"`
+	Snippet    string    `json:"snippet,omitempty"`
+	Content    string    `json:"content,omitempty"`
+	CWD        string    `json:"cwd,omitempty"`
+	FilePath   string    `json:"filePath,omitempty"`
+	ModTime    time.Time `json:"modTime,omitempty"`
+	Score      int       `json:"score"`
+	MatchCount int       `json:"matchCount"`
 }
 
 // SSESessionEvent is emitted on session:created and session:updated events.
