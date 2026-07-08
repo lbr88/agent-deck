@@ -25,6 +25,7 @@ const BINDINGS = [
   { keys: ['q'],               label: 'Close current modal / overlay' },
   { keys: ['Esc'],             label: 'Close modal / unfocus input' },
   { keys: ['?'],               label: 'Toggle this help overlay' },
+  { keys: ['Ctrl', 'R'],       label: 'Refresh session list' },
   { keys: ['Ctrl', 'K'],       label: 'Command palette' },
   { keys: [']'],               label: 'Toggle right rail' },
 ]

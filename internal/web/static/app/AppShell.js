@@ -50,6 +50,7 @@ import { ToastHistoryDrawer } from './ToastHistoryDrawer.js'
 import { SettingsPanel } from './SettingsPanel.js'
 import { KeyboardShortcuts } from './KeyboardShortcuts.js'
 import { apiFetch } from './api.js'
+import { refreshMenuSnapshot } from './menuRefresh.js'
 import { shortcutsOverlaySignal } from './state.js'
 
 function WorkHead() {
@@ -256,6 +257,15 @@ export function AppShell() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         paletteOpenSignal.value = true
+        return
+      }
+      // Ctrl/Cmd+R mirrors the TUI manual refresh without forcing a full page
+      // reload. The server snapshot is authoritative and includes hub nodes.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'r') {
+        e.preventDefault()
+        refreshMenuSnapshot()
+          .then(() => addToast('Session list refreshed', 'success'))
+          .catch(() => addToast('Refresh failed', 'error'))
         return
       }
       // Esc unfocuses inputs and closes overlays — fires even while typing.

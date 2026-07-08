@@ -2,17 +2,14 @@
 // Handles: auth token extraction, SSE connection, route sync, service worker registration
 import { render, html } from 'htm/preact'
 import { App } from './App.js'
-import { apiFetch } from './api.js'
 import {
-  sessionsSignal,
-  hubNodesSignal,
-  sessionsLoadedSignal,
   selectedIdSignal,
   connectionSignal,
   authTokenSignal,
   commandCenterSignal,
 } from './state.js'
 import { addToast } from './Toast.js'
+import { refreshMenuSnapshot } from './menuRefresh.js'
 
 // ---------- Auth token extraction ----------
 
@@ -143,13 +140,7 @@ export function startCommandCenterSSE() {
 
 export async function loadMenu() {
   try {
-    const data = await apiFetch('GET', '/api/menu')
-    sessionsSignal.value = data.items || []
-    hubNodesSignal.value = Array.isArray(data.hubNodes) ? data.hubNodes : []
-    // POL-1: first real data arrived — unmount the skeleton. Do NOT set
-    // this in the catch branch; the skeleton is the correct state when
-    // we're offline.
-    sessionsLoadedSignal.value = true
+    await refreshMenuSnapshot()
     startSSE()
     startCommandCenterSSE()
   } catch (_) {

@@ -203,6 +203,20 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
 		}
 	}
+	for file, want := range map[string]string{
+		"static/app/menuRefresh.js":       "refreshMenuSnapshot",
+		"static/app/AppShell.js":          "refreshMenuSnapshot",
+		"static/app/KeyboardShortcuts.js": "Refresh session list",
+		"static/app/main.js":              "refreshMenuSnapshot",
+	} {
+		data, err := embeddedStaticFiles.ReadFile(file)
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", file, err)
+		}
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("%s missing %q; web must expose manual refresh parity", file, want)
+		}
+	}
 }
 
 func TestVendorFilesServed(t *testing.T) {

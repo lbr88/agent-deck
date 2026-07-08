@@ -210,6 +210,17 @@ test.describe('keyboard parity (#780)', () => {
     expect(activeTag).not.toBe('INPUT')
   })
 
+  test('Ctrl+R refreshes the menu snapshot without browser reload', async ({ page }) => {
+    let menuRefreshes = 0
+    await page.route('**/api/menu', async (route) => {
+      menuRefreshes += 1
+      await route.continue()
+    })
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+R' : 'Control+R')
+    await expect.poll(() => menuRefreshes).toBeGreaterThan(0)
+    await expect(page.locator('text=Session list refreshed')).toBeVisible()
+  })
+
   test('typing in the filter input does NOT trigger navigation bindings', async ({ page }) => {
     // This is the critical regression guard: pressing `j` or `n` inside the
     // search field must type the letter, not trigger navigation.

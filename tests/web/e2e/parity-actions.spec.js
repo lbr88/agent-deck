@@ -64,8 +64,10 @@ test.describe('parity: matrix structural invariants', () => {
     ).toBe(EXPECTED_PROBEABLE_MISSING)
   })
 
-  test('every implemented action row has a parseable METHOD path', () => {
-    const broken = MATRIX.actions.filter((a) => !a.isMissing && !a.method)
+  test('every implemented action row has a parseable HTTP path or explicit UI/WS surface', () => {
+    const implementedWithoutHTTP = (a) =>
+      /^UI\s+`/.test(a.webEndpoint) || /^WS\s+`/.test(a.webEndpoint)
+    const broken = MATRIX.actions.filter((a) => !a.isMissing && !a.method && !implementedWithoutHTTP(a))
     expect(broken, `unparseable matrix rows: ${broken.map((b) => b.action).join(', ')}`).toEqual([])
   })
 })

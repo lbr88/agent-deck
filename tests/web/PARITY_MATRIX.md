@@ -62,12 +62,12 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Send output to session | `internal/ui/home.go:6532` (`x` key) | MISSING | N/A | N/A | TUI session picker dialog |
 | Exec shell | `internal/ui/home.go:6161` (`E` key) | MISSING | N/A | N/A | Sandbox container shell only |
 | Toggle preview mode | `internal/ui/home.go:6413` (`v` key) | MISSING | N/A | N/A | Cycle: both → output → analytics |
-| Open search | `internal/ui/home.go:6133` (`/` key) | MISSING | N/A | N/A | Local or global session search |
+| Open search | `internal/ui/home.go:6133` (`/` key) | UI `/` shortcut | Sidebar filter/search UI | `tests/web/e2e/keyboard-parity.spec.js` | Web `/` focuses the session filter; search pane covers session search navigation |
 | Open global search | `internal/ui/home.go:5691` (`G` key) | MISSING | N/A | N/A | Cross-profile session search |
-| Open help | `internal/ui/home.go:6143` (`?` key) | MISSING | N/A | N/A | Keyboard shortcuts overlay |
-| Manual refresh | `internal/ui/home.go:6590` (`ctrl+r`) | MISSING | N/A | N/A | Force reload session list from disk |
+| Open help | `internal/ui/home.go:6143` (`?` key) | UI `?` shortcut | `KeyboardShortcuts.js` | `tests/web/e2e/keyboard-parity.spec.js` | Web `?` toggles the keyboard shortcuts overlay |
+| Manual refresh | `internal/ui/home.go:6590` (`ctrl+r`) | GET `/api/menu` | `refreshMenuSnapshot` | `tests/web/e2e/keyboard-parity.spec.js` | Ctrl/Cmd+R refreshes the session/hub-node snapshot without a full page reload |
 | Jump mode | `internal/ui/home.go:6406` (`space` key) | MISSING | N/A | N/A | Vimium-style hint navigation |
-| Attach session | `internal/ui/home.go:5744` (`enter` key) | MISSING | N/A | N/A | PTY attach via tmux; web uses WS for streaming |
+| Attach session | `internal/ui/home.go:5744` (`enter` key) | WS `/ws/session/{id}` | `TerminalBridge` / `OpenHubTerminal` | `handlers_ws_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Enter switches to the terminal pane; TerminalPanel streams local and hub sessions through the websocket bridge |
 | **WORKTREE OPERATIONS** |
 | Finish worktree | `internal/ui/home.go:6038` (`W`/`shift+w`) | POST `/api/sessions/{id}/worktree/finish` | `FinishWorktree` | `issue1126_worktree_finish_test.go`, `tests/web/e2e/worktree-finish.spec.js` | Merge + cleanup; body accepts `into`, `noMerge`, `keepBranch`, `force` (mirrors CLI flags). Issue #1126. |
 | **COST TRACKING** |
@@ -167,20 +167,20 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  14 MISSING actions have plausible URL patterns probed by
+  10 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  14 are TUI-UX-only (search, copy, jump, help, …) where no plausible web
+  10 are TUI-UX-only (copy, jump, global search, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web endpoints implemented:** 38
-- **MISSING web actions:** 14 (~27% gap)
+- **Web/API/UI surfaces implemented:** 42
+- **MISSING web actions:** 10 (~19% gap)
 - **Key gaps:**
   - Multi-repo path editor
-  - Content operations (copy/search/jump/navigation-only flows)
+  - Content/navigation operations (copy output/info, send output, jump mode, global search)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
 
@@ -198,34 +198,17 @@ tiers:
 
 ### Sync Gaps (Actions)
 
-1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
+1. **Remaining Session Metadata Gap**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
 
-2. **MCP & Skill Management** (6 actions): MCPDialog and SkillDialog are TUI-only. They:
-   - Write `.mcp.json` and project config
-   - Have no web HTTP equivalent
-   - Require session restart
+2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: copy output/info, send output to another session, quick approve, global search, jump mode, fork-with-options, exec-shell, and preview-mode cycling.
 
-3. **Workflow Actions** (8 actions): Search, copy, send, jump, approve are all TUI-only optimized UX.
-
-4. **Worktree Finish** (1 action): The `W` key dialog performs merge + cleanup; no web equivalent.
-
-5. **Close vs Delete**: TUI distinguishes:
-   - `d` = delete (kill + remove from registry)
-   - `D` = close (kill, keep metadata)
-   
-   Web only has delete.
+3. **Implemented Non-HTTP Surfaces**: Some parity rows are intentionally UI/WS rather than HTTP: `/` search focus, `?` help overlay, Enter terminal attach via `/ws/session/{id}`, and Ctrl/Cmd+R manual refresh via GET `/api/menu`.
 
 ### Sync Gaps (State)
 
-1. **Tool-Specific IDs & State**: Claude/Gemini/Codex session IDs, models, YOLO mode, analytics are persisted but **never surfaced in MenuSession JSON**. The web cannot display or mutate them.
+1. **Transient Instance Flags**: `is_fork_awaiting_start` and `skip_mcp_regenerate` are intentionally transient `json:"-"` fields; no persisted web state exists to expose.
 
-2. **Configuration as Data**: Command, wrapper, channels, extra_args, tool_options are **loaded but never returned**. A web client cannot render an edit form without this data.
-
-3. **Content & Metadata**: Notes, latest_prompt, color are **persisted but not exposed**.
-
-4. **Worktree & Multirepo**: Entire worktree/multirepo metadata is **loaded but hidden** from the web API.
-
-5. **MCP State**: `loaded_mcp_names` tracks active MCPs but is not exposed, so the web cannot display the current MCP set.
+2. **Claude Analytics**: Gemini analytics are surfaced, but there is no modeled `ClaudeAnalytics` field on `*session.Instance` today.
 
 ---
 
@@ -233,15 +216,13 @@ tiers:
 
 - **Watcher Management** (create, fire, remove): Documented in CLAUDE.md but not found in codebase. Internal event watcher system exists (`internal/watcher/`) but has no TUI/web entry points.
 - **Conductor Operations** (create, attach channel, send, receive): Not implemented in this codebase snapshot. Conductor sessions are recognized as a flag but no specific conductor management actions are implemented.
-- **Channel Management**: Channels are configuration fields but no TUI/web interface exists to manage them.
-- **Plugin Management**: No TUI/web action exists (only as config).
+- **Channel Management**: Channels are configuration fields surfaced through the session edit path; there is no standalone channel-management workflow.
 
 ---
 
 ## Recommendations
 
-1. **Expose session metadata endpoints** (PATCH `/api/sessions/{id}` with `{title, color, notes, tool, wrapper, channels, extraArgs, toolOptions}`).
-2. **Extend MenuSession JSON** to include at minimum: `command`, `wrapper`, `channels`, `extraArgs`, `toolOptions`, `notes`, `color`, `loadedMcpNames`.
-3. **Add MCP/Skill endpoints** (POST/DELETE `/api/sessions/{id}/mcps`, `/api/sessions/{id}/skills`) or mark as web-unsafe and TUI-exclusive.
-4. **Unify close semantics**: Either expose both delete/close on web or consolidate to one.
-5. **Document API surface** in a companion `API.md` that lists all endpoints and their request/response schemas.
+1. Implement the multi-repo path editor in web and route hub sessions through hub update commands.
+2. Add web UX for remaining content workflows: copy output/info, send output to session, quick approve, and fork-with-options.
+3. Decide whether global search, jump mode, preview-mode cycling, and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
+4. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.
