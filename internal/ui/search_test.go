@@ -48,6 +48,31 @@ func TestSearchVisibility(t *testing.T) {
 	}
 }
 
+func TestSearchShowClearsPreviousQuery(t *testing.T) {
+	s := NewSearch()
+	items := []*session.Instance{
+		{Title: "api"},
+		{Title: "worker"},
+	}
+	s.SetItems(items)
+	s.Show()
+	s.input.SetValue("api")
+	s.updateResults()
+	if len(s.results) != 1 || s.results[0].Title != "api" {
+		t.Fatalf("precondition results = %+v", s.results)
+	}
+
+	s.Hide()
+	s.Show()
+
+	if got := s.input.Value(); got != "" {
+		t.Fatalf("search query after reopen = %q, want empty", got)
+	}
+	if len(s.results) != 2 {
+		t.Fatalf("search results after reopen = %d, want all items", len(s.results))
+	}
+}
+
 func TestSearchSelected(t *testing.T) {
 	s := NewSearch()
 	items := []*session.Instance{

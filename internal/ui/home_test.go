@@ -1117,6 +1117,51 @@ func TestHomeUpdateSearch(t *testing.T) {
 	}
 }
 
+func TestHomeLocalSearchEnterThenReopenStartsEmpty(t *testing.T) {
+	home := NewHome()
+	instances := []*session.Instance{
+		{ID: "api-id", Title: "api", ProjectPath: "/tmp/api", Tool: "claude", GroupPath: session.DefaultGroupPath},
+		{ID: "worker-id", Title: "worker", ProjectPath: "/tmp/worker", Tool: "claude", GroupPath: session.DefaultGroupPath},
+	}
+	home.instancesMu.Lock()
+	home.instances = instances
+	for _, inst := range instances {
+		home.instanceByID[inst.ID] = inst
+	}
+	home.instancesMu.Unlock()
+	home.groupTree = session.NewGroupTree(instances)
+	home.width = 100
+	home.height = 30
+	home.globalSearchIndex = nil
+	home.rebuildFlatItems()
+
+	model, _ := home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	h := model.(*Home)
+	model, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	h = model.(*Home)
+	model, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	h = model.(*Home)
+	model, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	h = model.(*Home)
+	if got := h.search.input.Value(); got != "api" {
+		t.Fatalf("search query before enter = %q, want api", got)
+	}
+	model, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if h.search.IsVisible() {
+		t.Fatal("search should be hidden after Enter")
+	}
+
+	model, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	h = model.(*Home)
+	if !h.search.IsVisible() {
+		t.Fatal("search should reopen after /")
+	}
+	if got := h.search.input.Value(); got != "" {
+		t.Fatalf("search query after reopen = %q, want empty", got)
+	}
+}
+
 func TestHomeUpdateNewDialog(t *testing.T) {
 	home := NewHome()
 	home.width = 100

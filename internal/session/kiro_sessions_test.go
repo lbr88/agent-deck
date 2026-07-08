@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -91,6 +92,46 @@ func TestResolveKiroSavedSessionAmbiguousTitle(t *testing.T) {
 	var amb *KiroSessionAmbiguousError
 	if !errors.As(err, &amb) || len(amb.Matches) != 2 {
 		t.Fatalf("ambiguous error = %#v, want two matches", err)
+	}
+}
+
+func TestSyncKiroSessionNameUpdatesSavedSessionTitle(t *testing.T) {
+	dir := t.TempDir()
+	id := "75e59a16-9f76-433d-baa3-3cb8e5ef4c5d"
+	now := time.Date(2026, 7, 8, 10, 0, 0, 123, time.UTC)
+	body, err := json.Marshal(map[string]any{
+		"session_id": id,
+		"title":      "old title",
+		"cwd":        "/repo",
+		"created_at": "2026-07-08T09:00:00Z",
+		"updated_at": "2026-07-08T09:00:00Z",
+		"extra":      "preserved",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeKiroSessionFile(t, dir, "session.json", string(body))
+
+	if err := SyncKiroSessionName(dir, id, "new title", now); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["title"] != "new title" {
+		t.Fatalf("title = %v, want new title", got["title"])
+	}
+	if got["extra"] != "preserved" {
+		t.Fatalf("extra = %v, want preserved", got["extra"])
+	}
+	if got["updated_at"] != now.Format(time.RFC3339Nano) {
+		t.Fatalf("updated_at = %v, want %s", got["updated_at"], now.Format(time.RFC3339Nano))
 	}
 }
 

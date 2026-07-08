@@ -93,6 +93,8 @@ func (s *Search) SetSize(width, height int) {
 func (s *Search) Show() {
 	s.visible = true
 	s.input.Focus()
+	s.input.SetValue("")
+	s.updateResults()
 	s.switchToGlobal = false
 }
 

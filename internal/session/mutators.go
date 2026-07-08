@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -147,19 +148,30 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		// next hook event. Unlock via `session set <id> title-locked false`.
 		inst.TitleLocked = true
 		inst.SyncTmuxDisplayName()
-		if IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "" && strings.TrimSpace(value) != "" {
-			codexHome := inst.getCodexHomeDir()
-			sessionID := inst.CodexSessionID
+		if strings.TrimSpace(value) != "" && ((IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "") || (inst.Tool == "kiro" && inst.KiroSessionID != "")) {
 			title := inst.Title
 			postCommit = func() error {
-				if err := AppendCodexSessionIndexName(codexHome, sessionID, title, time.Now()); err != nil {
-					sessionLog.Warn("codex_session_name_sync_failed",
-						slog.String("session_id", sessionID),
-						slog.String("title", title),
-						slog.String("error", err.Error()))
-					return fmt.Errorf("Codex session name sync failed: %w", err)
+				var syncErr error
+				if IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "" {
+					sessionID := inst.CodexSessionID
+					if err := SyncCodexSessionNameIn(inst.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
+						sessionLog.Warn("codex_session_name_sync_failed",
+							slog.String("session_id", sessionID),
+							slog.String("title", title),
+							slog.String("error", err.Error()))
+						syncErr = errors.Join(syncErr, fmt.Errorf("Codex session name sync failed: %w", err))
+					}
 				}
-				return nil
+				if inst.Tool == "kiro" && inst.KiroSessionID != "" {
+					if err := SyncKiroSessionNameForInstance(inst); err != nil {
+						sessionLog.Warn("kiro_session_name_sync_failed",
+							slog.String("session_id", inst.KiroSessionID),
+							slog.String("title", title),
+							slog.String("error", err.Error()))
+						syncErr = errors.Join(syncErr, fmt.Errorf("Kiro session name sync failed: %w", err))
+					}
+				}
+				return syncErr
 			}
 		}
 

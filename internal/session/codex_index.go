@@ -200,6 +200,15 @@ func codexSQLiteReadOnlyDSN(path string) string {
 	return u.String()
 }
 
+func codexSQLiteReadWriteDSN(path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Set("mode", "rw")
+	q.Add("_pragma", "busy_timeout(5000)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func isMissingCodexStateSchema(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no such table") || strings.Contains(msg, "no such column")
@@ -420,4 +429,50 @@ func AppendCodexSessionIndexName(codexHome, sessionID, title string, now time.Ti
 	}
 	_, err = f.Write(append(line, '\n'))
 	return err
+}
+
+// SyncCodexSessionNameIn updates all Codex title indexes Agent Deck knows about
+// for sessionID. Newer Codex builds read state_5.sqlite for the resume picker;
+// older builds and Agent Deck's fallback importer read session_index.jsonl.
+func SyncCodexSessionNameIn(codexHome, sessionID, title string, now time.Time) error {
+	if err := AppendCodexSessionIndexName(codexHome, sessionID, title, now); err != nil {
+		return err
+	}
+	return updateCodexStateThreadTitle(codexHome, sessionID, title)
+}
+
+func updateCodexStateThreadTitle(codexHome, sessionID, title string) error {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	title = strings.TrimSpace(title)
+	if sessionID == "" || title == "" {
+		return nil
+	}
+	if !isCodexSessionUUID(sessionID) {
+		return fmt.Errorf("invalid codex session id %q", sessionID)
+	}
+	if codexHome == "" {
+		return fmt.Errorf("codex home is empty")
+	}
+
+	path := filepath.Join(codexHome, "state_5.sqlite")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	db, err := sql.Open("sqlite", codexSQLiteReadWriteDSN(path))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`UPDATE threads SET title = ? WHERE id = ?`, title, sessionID)
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

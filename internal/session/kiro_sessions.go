@@ -77,6 +77,75 @@ func KiroSessionsDir() string {
 	return filepath.Join(home, ".kiro", "sessions", "cli")
 }
 
+// SyncKiroSessionNameForInstance writes Agent Deck's explicit title back to
+// Kiro's saved-session metadata when the instance is backed by a Kiro session.
+func SyncKiroSessionNameForInstance(inst *Instance) error {
+	if inst == nil || inst.Tool != "kiro" {
+		return nil
+	}
+	sessionID := strings.ToLower(strings.TrimSpace(inst.KiroSessionID))
+	title := strings.TrimSpace(inst.Title)
+	if sessionID == "" || title == "" {
+		return nil
+	}
+	return SyncKiroSessionName(KiroSessionsDir(), sessionID, title, time.Now())
+}
+
+// SyncKiroSessionName updates the saved Kiro CLI session JSON title for
+// sessionID. Unknown JSON fields are preserved.
+func SyncKiroSessionName(dir, sessionID, title string, now time.Time) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = KiroSessionsDir()
+	}
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	title = strings.TrimSpace(title)
+	if sessionID == "" || title == "" {
+		return nil
+	}
+	if !kiroSessionUUIDPattern.MatchString(sessionID) {
+		return fmt.Errorf("invalid kiro session id %q", sessionID)
+	}
+	if info, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() {
+		return fmt.Errorf("kiro sessions path is not a directory: %s", dir)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		return err
+	}
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(raw["session_id"])), sessionID) {
+			continue
+		}
+		raw["title"] = title
+		raw["updated_at"] = now.UTC().Format(time.RFC3339Nano)
+		body, err := json.MarshalIndent(raw, "", "  ")
+		if err != nil {
+			return err
+		}
+		body = append(body, '\n')
+		mode := os.FileMode(0o600)
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode().Perm()
+		}
+		return os.WriteFile(path, body, mode)
+	}
+	return fmt.Errorf("%w: %s", ErrKiroSessionNotFound, sessionID)
+}
+
 // ListKiroSavedSessions reads Kiro CLI session metadata JSON files and returns
 // entries newest first.
 func ListKiroSavedSessions(dir string) ([]KiroSavedSession, error) {

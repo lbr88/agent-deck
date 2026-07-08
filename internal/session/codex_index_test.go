@@ -278,6 +278,55 @@ func TestAppendCodexSessionIndexNameCreatesJSONLRecord(t *testing.T) {
 	}
 }
 
+func TestSyncCodexSessionNameInUpdatesStateDBThreadTitleAndJSONIndex(t *testing.T) {
+	home := t.TempDir()
+	id := "55555555-5555-5555-5555-555555555555"
+	now := time.Date(2026, 6, 30, 10, 0, 0, 123, time.UTC)
+	writeCodexStateThread(t, home, id, "old title", "old preview", "/repo", now.Add(-time.Hour).UnixMilli())
+
+	if err := SyncCodexSessionNameIn(home, id, "renamed", now); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var title string
+	if err := db.QueryRow(`SELECT title FROM threads WHERE id = ?`, id).Scan(&title); err != nil {
+		t.Fatal(err)
+	}
+	if title != "renamed" {
+		t.Fatalf("state thread title = %q, want renamed", title)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, "session_index.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"thread_name":"renamed"`) {
+		t.Fatalf("session_index.jsonl missing renamed title:\n%s", string(data))
+	}
+}
+
+func TestSyncCodexSessionNameInMissingStateDBStillWritesJSONIndex(t *testing.T) {
+	home := t.TempDir()
+	id := "66666666-6666-6666-6666-666666666666"
+
+	if err := SyncCodexSessionNameIn(home, id, "json-only", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != id || entries[0].ThreadName != "json-only" {
+		t.Fatalf("entries = %#v, want json-only title", entries)
+	}
+}
+
 func TestCodexSessionBindSyncsAgentDeckTitleToIndex(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)

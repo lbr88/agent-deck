@@ -601,7 +601,12 @@ func (b LocalActionBackend) Rename(ctx context.Context, sessionID, title string)
 		return err
 	}
 	if postCommit != nil {
-		return postCommit()
+		if err := postCommit(); err != nil {
+			return err
+		}
+	}
+	if err := session.SyncClaudeSessionNameForInstance(inst); err != nil {
+		return fmt.Errorf("sync session name: %w", err)
 	}
 	return nil
 }

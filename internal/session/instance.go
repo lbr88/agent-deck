@@ -4476,7 +4476,7 @@ func (i *Instance) syncCodexSessionIndexName(sessionID string) {
 	if title == "" {
 		return
 	}
-	if err := AppendCodexSessionIndexName(i.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
+	if err := SyncCodexSessionNameIn(i.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
 		sessionLog.Warn("codex_session_name_sync_failed",
 			slog.String("session_id", sessionID),
 			slog.String("title", title),
