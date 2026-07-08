@@ -12,6 +12,7 @@ package releasetests
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -49,4 +50,53 @@ func TestIssue1146LefthookPrePushIsSerial(t *testing.T) {
 	if !cfg.PrePush.Piped {
 		t.Fatal("pre-push.piped must be true so commands run in defined order and stop on first failure (see issue #1146)")
 	}
+}
+
+func TestLefthookPreCommitRunsGolangCINewIssuesGate(t *testing.T) {
+	root := repoRoot(t)
+	path := filepath.Join(root, "lefthook.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	var cfg struct {
+		PreCommit struct {
+			Piped    bool `yaml:"piped"`
+			Commands map[string]struct {
+				Run string `yaml:"run"`
+			} `yaml:"commands"`
+		} `yaml:"pre-commit"`
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	if !cfg.PreCommit.Piped {
+		t.Fatal("pre-commit.piped must be true so format checks run before lint and stop on first failure")
+	}
+	cmd, ok := cfg.PreCommit.Commands["golangci-lint-new"]
+	if !ok {
+		t.Fatal("pre-commit.commands.golangci-lint-new missing — golangci-lint must run before commits")
+	}
+	if !containsAll(cmd.Run, "make lint-new") {
+		t.Fatalf("golangci-lint pre-commit command = %q, want make lint-new", cmd.Run)
+	}
+
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	if !containsAll(string(makefile), "lint-new:", "golangci-lint run --new-from-rev=HEAD") {
+		t.Fatal("Makefile lint-new target must run golangci-lint against new issues from HEAD")
+	}
+}
+
+func containsAll(s string, needles ...string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(s, needle) {
+			return false
+		}
+	}
+	return true
 }

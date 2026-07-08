@@ -1,4 +1,4 @@
-.PHONY: build run install clean dev release-local test test-perf bench fmt lint ci css tools css-verify test-web test-web-unit test-web-e2e test-web-install
+.PHONY: build run install clean dev release-local test test-perf bench fmt lint lint-new ci css tools css-verify test-web test-web-unit test-web-e2e test-web-install
 
 BINARY_NAME=agent-deck
 BUILD_DIR=./build
@@ -166,6 +166,12 @@ fmt:
 lint:
 	@which golangci-lint > /dev/null || go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 	golangci-lint run
+
+# Lint only findings introduced since HEAD. This is the pre-commit gate: it
+# prevents new lint debt without blocking every commit on the existing backlog.
+lint-new:
+	@which golangci-lint > /dev/null || go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	golangci-lint run --new-from-rev=HEAD
 
 # Run local CI checks (same as pre-push hook: lint + test + build in parallel)
 ci:

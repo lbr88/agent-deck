@@ -38,13 +38,21 @@ pre-push:
       run: python3 -c "import yaml; yaml.safe_load(open('.claude/release-tests.yaml'))"
       tags: [quality, manifest]
 
-# Fast pre-commit checks (formatting only, keeps commits snappy)
+# Fast pre-commit checks. golangci-lint is scoped to new issues so existing
+# lint debt does not make every commit impossible, while newly introduced
+# findings are blocked before they enter history.
 pre-commit:
-  parallel: true
+  piped: true
   commands:
     fmt-check:
+      glob: "*.go"
       run: test -z "$(gofmt -l . | grep -v -E '^(\.worktrees/|\.claude/worktrees/)')" || (echo "Run 'go fmt ./...' to fix formatting" && gofmt -l . | grep -v -E '^(\.worktrees/|\.claude/worktrees/)' && exit 1)
       tags: [quality]
+    golangci-lint-new:
+      glob: "*.go"
+      run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX make lint-new
+      tags: [quality, lint]
     vet:
+      glob: "*.go"
       run: go vet ./...
       tags: [quality]

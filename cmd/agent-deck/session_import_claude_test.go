@@ -14,8 +14,21 @@ import (
 func cloneImportInstances(instances []*session.Instance) []*session.Instance {
 	out := make([]*session.Instance, 0, len(instances))
 	for _, inst := range instances {
-		cp := *inst
-		out = append(out, &cp)
+		if inst == nil {
+			out = append(out, nil)
+			continue
+		}
+		out = append(out, &session.Instance{
+			ID:              inst.ID,
+			Title:           inst.Title,
+			ProjectPath:     inst.ProjectPath,
+			GroupPath:       inst.GroupPath,
+			Tool:            inst.Tool,
+			Command:         inst.Command,
+			Status:          inst.Status,
+			ClaudeSessionID: inst.ClaudeSessionID,
+			TitleLocked:     inst.TitleLocked,
+		})
 	}
 	return out
 }
