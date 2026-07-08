@@ -51,7 +51,7 @@ import { SettingsPanel } from './SettingsPanel.js'
 import { KeyboardShortcuts } from './KeyboardShortcuts.js'
 import { apiFetch } from './api.js'
 import { refreshMenuSnapshot } from './menuRefresh.js'
-import { shortcutsOverlaySignal } from './state.js'
+import { shortcutsOverlaySignal, jumpModeSignal } from './state.js'
 
 function WorkHead() {
   const { sessions } = menuModelSignal.value
@@ -128,6 +128,74 @@ function Panes({ tab }) {
                               message="Conductor orchestration view is TUI-only. The web API does not expose child topology, bridges, or NEED escalation."/>`}
     ${tab === 'watchers'  && html`<${StubPane} title="Watchers"
                               message="Watcher framework events are routed in the backend; the web API does not surface event streams or routing config."/>`}
+  `
+}
+
+const JUMP_HINT_ALPHABET = 'asdfghjklwertyuiopzxcvbnm1234567890'
+
+function jumpHintForIndex(index, total) {
+  const base = JUMP_HINT_ALPHABET.length
+  if (total <= base) return JUMP_HINT_ALPHABET[index]
+  const first = Math.floor(index / base)
+  const second = index % base
+  return `${JUMP_HINT_ALPHABET[first % base]}${JUMP_HINT_ALPHABET[second]}`
+}
+
+function jumpSessionHints() {
+  const sessions = (menuModelSignal.value?.sessions) || []
+  const total = sessions.length
+  return sessions.map((session, index) => ({
+    session,
+    hint: jumpHintForIndex(index, total),
+  }))
+}
+
+function openJumpSession(session) {
+  if (!session) return
+  selectedIdSignal.value = session.id
+  activeTabSignal.value = 'terminal'
+  jumpModeSignal.value = false
+}
+
+function JumpOverlay() {
+  if (!jumpModeSignal.value) return null
+  const hints = jumpSessionHints()
+  return html`
+    <div class="overlay jump-overlay"
+         role="dialog"
+         aria-label="Jump to session"
+         data-testid="jump-overlay"
+         onClick=${() => (jumpModeSignal.value = false)}>
+      <div class="dialog jump-dialog" onClick=${e => e.stopPropagation()}>
+        <div class="dh">
+          <span class="kicker">JUMP</span>
+          <div class="t">Jump to session</div>
+          <button class="icon-btn" onClick=${() => (jumpModeSignal.value = false)} aria-label="Close jump mode">
+            <${Icon} d=${ICONS.x}/>
+          </button>
+        </div>
+        <div class="db">
+          ${hints.length === 0
+            ? html`<div class="muted">No sessions to jump to.</div>`
+            : html`<div class="jump-list">
+                ${hints.map(({ session, hint }) => html`
+                  <button key=${session.id}
+                          type="button"
+                          class=${`jump-row ${selectedIdSignal.value === session.id ? 'sel' : ''}`}
+                          data-testid="jump-hint"
+                          data-session-id=${session.id}
+                          data-hint=${hint}
+                          onClick=${() => openJumpSession(session)}>
+                    <span class="kbd">${hint}</span>
+                    <span class="jump-title">${session.title}</span>
+                    <span class="jump-meta">${session.isHub ? `hub:${session.hubNodeName || session.hubNodeId}` : session.group || ''}</span>
+                  </button>
+                `)}
+              </div>`}
+          <div class="kshort-foot">Type a hint to open. Esc, q, or Space cancels.</div>
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -270,6 +338,7 @@ export function AppShell() {
   // Guard: any key that isn't a modal-bound modifier combo must NOT fire
   // while the user is typing in an input/textarea/select/contenteditable.
   useEffect(() => {
+    let jumpBuffer = ''
     // Navigate selectedIdSignal by `delta` (+1 or -1) through the flat
     // session list from menuModelSignal. Stable across SSE updates because
     // we resolve by ID, not by array index in a possibly-stale snapshot.
@@ -297,6 +366,7 @@ export function AppShell() {
       paletteOpenSignal.value = false
       tweaksOpenSignal.value = false
       shortcutsOverlaySignal.value = false
+      jumpModeSignal.value = false
       createSessionDialogSignal.value = false
       confirmDialogSignal.value = null
       groupNameDialogSignal.value = null
@@ -330,6 +400,30 @@ export function AppShell() {
         closeAllModals()
         return
       }
+      if (jumpModeSignal.value) {
+        if (e.key === ' ' || e.key === 'q') {
+          e.preventDefault()
+          jumpBuffer = ''
+          jumpModeSignal.value = false
+          return
+        }
+        const key = e.key.length === 1 ? e.key.toLowerCase() : ''
+        if (key) {
+          e.preventDefault()
+          jumpBuffer += key
+          const hints = jumpSessionHints()
+          const match = hints.find(({ hint }) => hint === jumpBuffer)
+          if (match) {
+            jumpBuffer = ''
+            openJumpSession(match.session)
+            return
+          }
+          if (!hints.some(({ hint }) => hint.startsWith(jumpBuffer))) {
+            jumpBuffer = ''
+          }
+        }
+        return
+      }
       if (inField) return
 
       // Shift+Enter: open focused session in new browser tab (web equivalent
@@ -350,6 +444,10 @@ export function AppShell() {
       } else if (e.key === '/') {
         e.preventDefault()
         document.querySelector('.side-filter input')?.focus()
+      } else if (e.key === ' ') {
+        e.preventDefault()
+        jumpBuffer = ''
+        jumpModeSignal.value = true
       } else if (e.key === 'j') {
         e.preventDefault(); moveFocus(+1)
       } else if (e.key === 'k') {
@@ -503,6 +601,7 @@ export function AppShell() {
       <${CommandPalette}/>
       <${TweaksPanel}/>
       <${KeyboardShortcuts}/>
+      <${JumpOverlay}/>
       <${ToastContainer}/>
       <${ToastHistoryDrawer}/>
     </div>

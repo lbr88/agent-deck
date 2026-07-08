@@ -66,7 +66,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Open global search | `internal/ui/home.go:5691` (`G` key) | MISSING | N/A | N/A | Cross-profile session search |
 | Open help | `internal/ui/home.go:6143` (`?` key) | UI `?` shortcut | `KeyboardShortcuts.js` | `tests/web/e2e/keyboard-parity.spec.js` | Web `?` toggles the keyboard shortcuts overlay |
 | Manual refresh | `internal/ui/home.go:6590` (`ctrl+r`) | GET `/api/menu` | `refreshMenuSnapshot` | `tests/web/e2e/keyboard-parity.spec.js` | Ctrl/Cmd+R refreshes the session/hub-node snapshot without a full page reload |
-| Jump mode | `internal/ui/home.go:6406` (`space` key) | MISSING | N/A | N/A | Vimium-style hint navigation |
+| Jump mode | `internal/ui/home.go:6406` (`space` key) | UI `Space` shortcut | `jumpModeSignal` / `JumpOverlay` | `static_files_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Vimium-style hint navigation over current sessions |
 | Attach session | `internal/ui/home.go:5744` (`enter` key) | WS `/ws/session/{id}` | `TerminalBridge` / `OpenHubTerminal` | `handlers_ws_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | Enter switches to the terminal pane; TerminalPanel streams local and hub sessions through the websocket bridge |
 | **WORKTREE OPERATIONS** |
 | Finish worktree | `internal/ui/home.go:6038` (`W`/`shift+w`) | POST `/api/sessions/{id}/worktree/finish` | `FinishWorktree` | `issue1126_worktree_finish_test.go`, `tests/web/e2e/worktree-finish.spec.js` | Merge + cleanup; body accepts `into`, `noMerge`, `keepBranch`, `force` (mirrors CLI flags). Issue #1126. |
@@ -167,20 +167,20 @@ tiers:
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
 - **MISSING-stays-missing** (regression guard, 404/405 expected): 0 of the
-  7 MISSING actions have plausible URL patterns probed by
+  6 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
-  7 are TUI-UX-only (jump, global search, exec shell, …) where no plausible web
+  6 are TUI-UX-only (global search, exec shell, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
 
 ## Summary Statistics
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web/API/UI surfaces implemented:** 45
-- **MISSING web actions:** 7 (~13% gap)
+- **Web/API/UI surfaces implemented:** 46
+- **MISSING web actions:** 6 (~12% gap)
 - **Key gaps:**
   - Multi-repo path editor
-  - Content/navigation operations (send output, jump mode, global search)
+  - Content/navigation operations (send output, global search)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
 
@@ -200,7 +200,7 @@ tiers:
 
 1. **Remaining Session Metadata Gap**: Web has PATCH `/api/sessions/{id}` for EditSessionDialog settings, POST `/api/sessions/{id}/notes` for inline notes, and POST `/api/sessions/{id}/group` for group moves. Remaining gap is narrower: multi-repo path editing.
 
-2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: send output to another session, global search, jump mode, fork-with-options, exec-shell, and preview-mode cycling.
+2. **Workflow Action Gaps**: Remaining missing actions are primarily TUI-optimized flows: send output to another session, global search, fork-with-options, exec-shell, and preview-mode cycling.
 
 3. **Implemented Non-HTTP Surfaces**: Some parity rows are intentionally UI/WS rather than HTTP: `/` search focus, `?` help overlay, Enter terminal attach via `/ws/session/{id}`, and Ctrl/Cmd+R manual refresh via GET `/api/menu`.
 
@@ -224,5 +224,5 @@ tiers:
 
 1. Implement the multi-repo path editor in web and route hub sessions through hub update commands.
 2. Add web UX for remaining content workflows: send output to session and fork-with-options.
-3. Decide whether global search, jump mode, preview-mode cycling, and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
+3. Decide whether global search, preview-mode cycling, and exec-shell should be true web parity features or explicitly documented TUI-only surfaces.
 4. Add/update API documentation for the current HTTP, UI, and WS parity surfaces.

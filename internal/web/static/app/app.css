@@ -1024,6 +1024,19 @@ body[data-rail="hidden"] .rightrail { display: none; }
   font-family: var(--mono); font-size: 11px; color: var(--muted);
 }
 
+/* Vimium-style jump overlay */
+.jump-dialog { min-width: 420px; max-width: 620px; }
+.jump-list { display: flex; flex-direction: column; gap: 6px; }
+.jump-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px;
+  align-items: center; width: 100%; text-align: left;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 8px 10px; font: inherit; cursor: pointer;
+}
+.jump-row:hover, .jump-row.sel { border-color: var(--accent); background: var(--card); }
+.jump-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-hi); }
+.jump-meta { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
 /* ── Command Center (the embedded live fleet god-view) ───────────────────── */
 .cc {
   display: flex; flex-direction: column; min-height: 0; flex: 1;

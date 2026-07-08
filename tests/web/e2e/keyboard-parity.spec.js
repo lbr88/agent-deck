@@ -125,6 +125,26 @@ test.describe('keyboard parity (#780)', () => {
     await newPage.close()
   })
 
+  test('Space opens jump mode and a hint opens that session', async ({ page }) => {
+    await page.keyboard.press('Space')
+    const overlay = page.locator('[data-testid="jump-overlay"]')
+    await expect(overlay).toBeVisible()
+    const firstHint = page.locator('[data-testid="jump-hint"]').first()
+    await expect(firstHint).toBeVisible()
+    const hint = await firstHint.getAttribute('data-hint')
+    const title = (await firstHint.locator('.jump-title').textContent()) || ''
+    expect(hint).toBeTruthy()
+    expect(title).toBeTruthy()
+    await page.keyboard.press(hint)
+    await expect(overlay).toHaveCount(0)
+    await expect(page.locator('.sess.sel .tt')).toHaveText(title)
+    await expect.poll(() => page.evaluate(() => {
+      const root = document.querySelector('.work-body')
+      if (!root) return false
+      return Array.from(root.querySelectorAll('div')).some(d => d.style.display === 'flex')
+    })).toBe(true)
+  })
+
   test('n opens the New Session dialog', async ({ page }) => {
     await page.keyboard.press('n')
     // CreateSessionDialog renders as an overlay containing form fields.

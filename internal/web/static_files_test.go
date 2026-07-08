@@ -200,9 +200,14 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
 	}
-	for _, want := range []string{"Edit focused session notes", "Mark focused session unread", "Quick approve focused Claude session", "Copy focused terminal output", "Copy focused session info", "Prompt focused session", "Move focused session to group"} {
+	for _, want := range []string{"Jump to a session by hint", "Edit focused session notes", "Mark focused session unread", "Quick approve focused Claude session", "Copy focused terminal output", "Copy focused session info", "Prompt focused session", "Move focused session to group"} {
 		if !strings.Contains(string(shortcuts), want) {
 			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
+		}
+	}
+	for _, want := range []string{"jumpModeSignal", "jumpSessionHints", "jump-overlay", "data-testid=\"jump-hint\""} {
+		if !strings.Contains(appShellBody, want) {
+			t.Fatalf("AppShell.js missing %q; web must expose jump-mode parity", want)
 		}
 	}
 	for file, want := range map[string]string{

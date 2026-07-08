@@ -132,6 +132,10 @@ export const toastsSignal = signal([])
 // Keyboard shortcuts overlay open/close (BUG #14 / UX-03)
 export const shortcutsOverlaySignal = signal(false)
 
+// Vimium-style jump mode. Web parity for the TUI Space jump mode: the shell
+// overlays short labels for visible sessions, then opens the hinted session.
+export const jumpModeSignal = signal(false)
+
 // Toast history (WEB-P0-4 + POL-7): capped at 50 dismissed toasts.
 // Persisted to localStorage key `agentdeck_toast_history`.
 // Schema is localStorage-only per milestone rule: NO SQLite schema changes.

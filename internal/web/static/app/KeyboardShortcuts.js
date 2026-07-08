@@ -14,6 +14,7 @@ const BINDINGS = [
   { keys: ['k'],               label: 'Move focus up (previous session)' },
   { keys: ['Enter'],           label: 'Open focused session' },
   { keys: ['Shift', 'Enter'],  label: 'Open focused session in new browser tab' },
+  { keys: ['Space'],           label: 'Jump to a session by hint' },
   { keys: ['n'],               label: 'New session dialog' },
   { keys: ['r'],               label: 'Rename focused session' },
   { keys: ['e'],               label: 'Edit focused session notes' },
