@@ -657,5 +657,6 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  archive <node> <session>    Archive a hub session")
 	fmt.Fprintln(w, "  unarchive <node> <session>  Unarchive a hub session")
 	fmt.Fprintln(w, "  remove <node> <session>     Remove stopped/error hub session metadata")
+	fmt.Fprintln(w, "  toggle-yolo <node> <session> Toggle YOLO/auto-approve on a hub session")
 	fmt.Fprintln(w, "  preview <node> <session>    Print remote pane preview")
 }

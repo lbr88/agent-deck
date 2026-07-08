@@ -32,6 +32,26 @@ func TestBuildAgentContextPlainOmitsSecrets(t *testing.T) {
 		!strings.Contains(text, "agent-deck hub shell <node-name-or-id>") {
 		t.Fatalf("context missing expected hub guidance:\n%s", text)
 	}
+	for _, action := range []string{
+		"attach",
+		"send",
+		"close",
+		"restart",
+		"restart-fresh",
+		"fork",
+		"rename",
+		"move",
+		"delete",
+		"archive",
+		"unarchive",
+		"remove",
+		"toggle-yolo",
+		"preview",
+	} {
+		if !strings.Contains(text, action) {
+			t.Fatalf("context missing hub sessions action %q:\n%s", action, text)
+		}
+	}
 	for _, forbidden := range []string{"secret-token", "invite_", "deadbeef", "token file", "PinnedCertSHA256"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("context exposed %q:\n%s", forbidden, text)

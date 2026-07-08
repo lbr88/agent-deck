@@ -50,10 +50,16 @@ agent-deck hub sessions attach <node> <session-id-or-title>
 agent-deck hub sessions send <node> <session> "message"
 agent-deck hub sessions close <node> <session>
 agent-deck hub sessions restart <node> <session>
+agent-deck hub sessions restart-fresh <node> <session>
+agent-deck hub sessions fork <node> <session>
 agent-deck hub sessions rename <node> <session> "new title"
 agent-deck hub sessions move <node> <session> group/path
 agent-deck hub sessions archive <node> <session>
+agent-deck hub sessions unarchive <node> <session>
 agent-deck hub sessions delete <node> <session>
+agent-deck hub sessions remove <node> <session>
+agent-deck hub sessions toggle-yolo <node> <session>
+agent-deck hub sessions preview <node> <session>
 ```
 
 Prefer node names from `agent-deck hub nodes`; use node ids when names are ambiguous. Prefer session ids when titles are ambiguous.

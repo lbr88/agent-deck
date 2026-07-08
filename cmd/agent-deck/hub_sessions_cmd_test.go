@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -47,6 +48,34 @@ func TestHubCommandRoutesSessions(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `case "sessions":`) || !strings.Contains(string(data), "handleHubSessions(") {
 		t.Fatalf("hub_cmd.go must route agent-deck hub sessions")
+	}
+}
+
+func TestHubSessionsUsageDocumentsAllNativeActions(t *testing.T) {
+	var buf bytes.Buffer
+	printHubSessionsUsage(&buf)
+	text := buf.String()
+	for _, action := range []string{
+		"list",
+		"create",
+		"attach",
+		"send",
+		"close",
+		"restart",
+		"restart-fresh",
+		"fork",
+		"rename",
+		"move",
+		"delete",
+		"archive",
+		"unarchive",
+		"remove",
+		"toggle-yolo",
+		"preview",
+	} {
+		if !strings.Contains(text, action) {
+			t.Fatalf("hub sessions usage missing %q:\n%s", action, text)
+		}
 	}
 }
 

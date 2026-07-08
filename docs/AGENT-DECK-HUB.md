@@ -118,6 +118,18 @@ agent-deck hub sessions [node-name-or-id]
 agent-deck hub sessions create <node-name-or-id> --cwd <path> --title <title> --tool <tool>
 agent-deck hub sessions attach <node-name-or-id> <session-id-or-title>
 agent-deck hub sessions send <node-name-or-id> <session-id-or-title> "message"
+agent-deck hub sessions close <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions restart <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions restart-fresh <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions fork <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions rename <node-name-or-id> <session-id-or-title> "new title"
+agent-deck hub sessions move <node-name-or-id> <session-id-or-title> group/path
+agent-deck hub sessions delete <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions archive <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions unarchive <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions remove <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions toggle-yolo <node-name-or-id> <session-id-or-title>
+agent-deck hub sessions preview <node-name-or-id> <session-id-or-title>
 agent-deck hub shell <node-name-or-id> --cwd <path> --title <title>
 ```
 
