@@ -18,9 +18,16 @@ type ActionBackend interface {
 	Start(ctx context.Context, sessionID string) error
 	Stop(ctx context.Context, sessionID string) error
 	Restart(ctx context.Context, sessionID string) error
+	RestartFresh(ctx context.Context, sessionID string) error
 	Rename(ctx context.Context, sessionID, title string) error
 	Create(ctx context.Context, req CreateSessionRequest) (string, error)
 	Delete(ctx context.Context, sessionID string) error
+	Archive(ctx context.Context, sessionID string) error
+	Unarchive(ctx context.Context, sessionID string) error
+	Remove(ctx context.Context, sessionID string) error
+	Move(ctx context.Context, sessionID, groupPath string) error
+	Update(ctx context.Context, req UpdateSessionRequest) (UpdateSessionResponse, error)
+	ToggleYolo(ctx context.Context, sessionID string) error
 	Preview(ctx context.Context, sessionID string) (string, error)
 	ImportTmux(ctx context.Context) (int, error)
 }
@@ -35,6 +42,20 @@ type CreateSessionRequest struct {
 
 type PreviewSessionResponse struct {
 	Content string `json:"content"`
+}
+
+type SessionFieldChange struct {
+	Field string `json:"field"`
+	Value string `json:"value"`
+}
+
+type UpdateSessionRequest struct {
+	SessionID string               `json:"session_id"`
+	Changes   []SessionFieldChange `json:"changes"`
+}
+
+type UpdateSessionResponse struct {
+	Restarted bool `json:"restarted,omitempty"`
 }
 
 type ImportTmuxSessionsResponse struct {
@@ -61,6 +82,11 @@ type sendActionPayload struct {
 type renameActionPayload struct {
 	SessionID string `json:"session_id"`
 	Title     string `json:"title"`
+}
+
+type moveActionPayload struct {
+	SessionID string `json:"session_id"`
+	GroupPath string `json:"group_path"`
 }
 
 func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (json.RawMessage, error) {
@@ -114,6 +140,15 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "restart_fresh":
+		payload, err := decodeSessionAction(cmd.Payload, "restart_fresh")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.RestartFresh(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
 	case "rename":
 		var payload renameActionPayload
 		if err := decodeCommandPayload(cmd.Payload, &payload); err != nil {
@@ -148,6 +183,77 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		if err := d.Backend.Delete(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "archive":
+		payload, err := decodeSessionAction(cmd.Payload, "archive")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.Archive(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "unarchive":
+		payload, err := decodeSessionAction(cmd.Payload, "unarchive")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.Unarchive(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "remove":
+		payload, err := decodeSessionAction(cmd.Payload, "remove")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.Remove(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "move":
+		var payload moveActionPayload
+		if err := decodeCommandPayload(cmd.Payload, &payload); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(payload.SessionID) == "" {
+			return nil, fmt.Errorf("move action session_id is required")
+		}
+		if strings.TrimSpace(payload.GroupPath) == "" {
+			return nil, fmt.Errorf("move action group_path is required")
+		}
+		if err := d.Backend.Move(ctx, payload.SessionID, payload.GroupPath); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "update":
+		var payload UpdateSessionRequest
+		if err := decodeCommandPayload(cmd.Payload, &payload); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(payload.SessionID) == "" {
+			return nil, fmt.Errorf("update action session_id is required")
+		}
+		if len(payload.Changes) == 0 {
+			return nil, fmt.Errorf("update action changes are required")
+		}
+		result, err := d.Backend.Update(ctx, payload)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
+	case "toggle_yolo":
+		payload, err := decodeSessionAction(cmd.Payload, "toggle_yolo")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.ToggleYolo(ctx, payload.SessionID); err != nil {
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: payload.SessionID})
@@ -283,6 +389,23 @@ func (b LocalActionBackend) Restart(ctx context.Context, sessionID string) error
 	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
 }
 
+func (b LocalActionBackend) RestartFresh(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if err := inst.RestartFresh(); err != nil {
+		return err
+	}
+	inst.LastStartedAt = time.Now()
+	inst.PostStartSync(3 * time.Second)
+	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+}
+
 func (b LocalActionBackend) Rename(ctx context.Context, sessionID, title string) error {
 	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
 	if err != nil {
@@ -397,6 +520,212 @@ func (b LocalActionBackend) Delete(ctx context.Context, sessionID string) error 
 	return storage.SaveWithGroups(filtered, session.NewGroupTreeWithGroups(filtered, groups))
 }
 
+func (b LocalActionBackend) Archive(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if err := inst.Kill(); err != nil {
+		return err
+	}
+	inst.ArchivedAt = time.Now().UTC()
+	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+}
+
+func (b LocalActionBackend) Unarchive(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	inst.ArchivedAt = time.Time{}
+	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+}
+
+func (b LocalActionBackend) Remove(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	status := inst.GetStatusThreadSafe()
+	if status != session.StatusStopped && status != session.StatusError {
+		return fmt.Errorf("session must be stopped or errored to remove; got %s", status)
+	}
+	filtered := instances[:0]
+	for _, candidate := range instances {
+		if candidate == nil || candidate.ID == sessionID {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return storage.SaveWithGroups(filtered, session.NewGroupTreeWithGroups(filtered, groups))
+}
+
+func (b LocalActionBackend) Move(ctx context.Context, sessionID, groupPath string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	groupTree := session.NewGroupTreeWithGroups(instances, groups)
+	groupTree.MoveSessionToGroup(inst, groupPath)
+	return storage.SaveWithGroups(groupTree.GetAllInstances(), groupTree)
+}
+
+func (b LocalActionBackend) Update(ctx context.Context, req UpdateSessionRequest) (UpdateSessionResponse, error) {
+	storage, instances, groups, inst, err := b.loadSessionData(req.SessionID)
+	if err != nil {
+		return UpdateSessionResponse{}, err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return UpdateSessionResponse{}, err
+	}
+
+	ordered := orderFieldChangesForUpdate(req.Changes)
+	restartRequired := false
+	titleChanged := false
+	var postCommits []func() error
+	for _, change := range ordered {
+		field := strings.TrimSpace(change.Field)
+		if field == "" {
+			return UpdateSessionResponse{}, fmt.Errorf("update action field is required")
+		}
+		_, postCommit, err := session.SetField(inst, field, change.Value, nil)
+		if err != nil {
+			return UpdateSessionResponse{}, err
+		}
+		if postCommit != nil {
+			postCommits = append(postCommits, postCommit)
+		}
+		if field == session.FieldTitle {
+			titleChanged = true
+		}
+		if session.RestartPolicyFor(field) == session.FieldRestartRequired {
+			restartRequired = true
+		}
+	}
+	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+		return UpdateSessionResponse{}, err
+	}
+	for _, postCommit := range postCommits {
+		if err := postCommit(); err != nil {
+			return UpdateSessionResponse{}, err
+		}
+	}
+	if titleChanged {
+		if err := session.SyncClaudeSessionNameForInstance(inst); err != nil {
+			return UpdateSessionResponse{}, fmt.Errorf("sync session name: %w", err)
+		}
+	}
+
+	result := UpdateSessionResponse{}
+	if restartRequired && inst.CanRestart() {
+		if err := ctxErr(ctx); err != nil {
+			return result, err
+		}
+		if err := inst.Restart(); err != nil {
+			return result, err
+		}
+		inst.LastStartedAt = time.Now()
+		inst.PostStartSync(3 * time.Second)
+		result.Restarted = true
+		if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+func (b LocalActionBackend) ToggleYolo(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+
+	toggled := false
+	switch inst.Tool {
+	case "gemini":
+		currentYolo := false
+		if inst.GeminiYoloMode != nil {
+			currentYolo = *inst.GeminiYoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Gemini.YoloMode
+		}
+		newYolo := !currentYolo
+		inst.GeminiYoloMode = &newYolo
+		toggled = true
+	case "codex":
+		currentYolo := false
+		opts := inst.GetCodexOptions()
+		if opts != nil && opts.YoloMode != nil {
+			currentYolo = *opts.YoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Codex.YoloMode
+		}
+		newYolo := !currentYolo
+		if opts == nil {
+			opts = &session.CodexOptions{}
+		}
+		opts.YoloMode = &newYolo
+		_ = inst.SetCodexOptions(opts)
+		toggled = true
+	case "hermes":
+		currentYolo := false
+		opts := inst.GetHermesOptions()
+		if opts != nil && opts.YoloMode != nil {
+			currentYolo = *opts.YoloMode
+		} else if userConfig, _ := session.LoadUserConfig(); userConfig != nil {
+			currentYolo = userConfig.Hermes.YoloMode
+		}
+		newYolo := !currentYolo
+		if opts == nil {
+			opts = &session.HermesOptions{}
+		}
+		opts.YoloMode = &newYolo
+		_ = inst.SetHermesOptions(opts)
+		toggled = true
+	}
+	if !toggled {
+		return fmt.Errorf("session tool %q does not support yolo toggle", inst.Tool)
+	}
+	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+		return err
+	}
+	status := inst.GetStatusThreadSafe()
+	if status == session.StatusRunning || status == session.StatusWaiting {
+		if err := inst.Restart(); err != nil {
+			return err
+		}
+		inst.LastStartedAt = time.Now()
+		inst.PostStartSync(3 * time.Second)
+		return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+	}
+	return nil
+}
+
 func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (string, error) {
 	if err := ctxErr(ctx); err != nil {
 		return "", err
@@ -479,6 +808,21 @@ func (b LocalActionBackend) loadSessionData(sessionID string) (*session.Storage,
 	}
 	_ = storage.Close()
 	return nil, nil, nil, nil, fmt.Errorf("session %q not found", sessionID)
+}
+
+func orderFieldChangesForUpdate(changes []SessionFieldChange) []SessionFieldChange {
+	ordered := make([]SessionFieldChange, 0, len(changes))
+	for _, change := range changes {
+		if change.Field != session.FieldTool {
+			ordered = append(ordered, change)
+		}
+	}
+	for _, change := range changes {
+		if change.Field == session.FieldTool {
+			ordered = append(ordered, change)
+		}
+	}
+	return ordered
 }
 
 func waitForLocalActionReady(ctx context.Context, tmuxSess *tmux.Session, tool string) error {

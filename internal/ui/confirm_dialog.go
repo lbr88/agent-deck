@@ -23,6 +23,9 @@ const (
 	ConfirmCloseRemoteSession
 	ConfirmDeleteHubSession
 	ConfirmCloseHubSession
+	ConfirmArchiveHubSession
+	ConfirmUnarchiveHubSession
+	ConfirmRemoveHubSession
 	ConfirmRemoveSession     // status-gated registry-only remove (TUI 'X')
 	ConfirmBulkRemoveErrored // bulk remove of all errored sessions (TUI Ctrl+X)
 	ConfirmArchiveSession
@@ -154,6 +157,39 @@ func (c *ConfirmDialog) ShowDeleteHubSession(nodeID, nodeName, sessionID, sessio
 func (c *ConfirmDialog) ShowCloseHubSession(nodeID, nodeName, sessionID, sessionName string) {
 	c.visible = true
 	c.confirmType = ConfirmCloseHubSession
+	c.targetID = sessionID
+	c.targetName = sessionName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowArchiveHubSession(nodeID, nodeName, sessionID, sessionName string) {
+	c.visible = true
+	c.confirmType = ConfirmArchiveHubSession
+	c.targetID = sessionID
+	c.targetName = sessionName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowUnarchiveHubSession(nodeID, nodeName, sessionID, sessionName string) {
+	c.visible = true
+	c.confirmType = ConfirmUnarchiveHubSession
+	c.targetID = sessionID
+	c.targetName = sessionName
+	c.remoteName = nodeName
+	c.hubNodeID = nodeID
+	c.buttonCount = 2
+	c.focusedButton = 1
+}
+
+func (c *ConfirmDialog) ShowRemoveHubSession(nodeID, nodeName, sessionID, sessionName string) {
+	c.visible = true
+	c.confirmType = ConfirmRemoveHubSession
 	c.targetID = sessionID
 	c.targetName = sessionName
 	c.remoteName = nodeName
@@ -474,6 +510,39 @@ func (c *ConfirmDialog) View() string {
 			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
 		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
 			hintStyle.Render("y close · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmArchiveHubSession:
+		title = "Archive Hub Session?"
+		warning = fmt.Sprintf("Archive this hub session:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
+		details = "• The remote tmux process will be stopped\n• The session will move to the archived list on that hub node\n• You can unarchive later (^ view, Shift+U restore)"
+		borderColor = ColorYellow
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Archive", ColorYellow, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y archive · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmUnarchiveHubSession:
+		title = "Unarchive Hub Session?"
+		warning = fmt.Sprintf("Restore this hub session to the active list:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
+		details = "• Metadata returns to the hub node's main session list\n• The process is not started automatically"
+		borderColor = ColorGreen
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Unarchive", ColorGreen, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y unarchive · n cancel · ←/→ navigate · Enter select · Esc"))
+
+	case ConfirmRemoveHubSession:
+		title = "Remove Hub Session?"
+		warning = fmt.Sprintf("Remove this hub session from the registry:\n\n  \"%s\" on %s", c.targetName, c.remoteName)
+		details = "• The session record will be deleted on that hub node\n• Transcripts and worktrees are preserved\n• Use 'd' to destructively delete it"
+		borderColor = ColorYellow
+		buttonRow := lipgloss.JoinHorizontal(lipgloss.Center,
+			renderButton("Remove", ColorYellow, c.focusedButton == 0), "  ",
+			renderButton("Cancel", ColorAccent, c.focusedButton == 1))
+		buttons = lipgloss.JoinVertical(lipgloss.Left, buttonRow,
+			hintStyle.Render("y remove · n cancel · ←/→ navigate · Enter select · Esc"))
 
 	case ConfirmRemoveSession:
 		title = "Remove Session?"

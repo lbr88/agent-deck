@@ -1909,6 +1909,30 @@ func (h *Home) scopedGroupPaths() []string {
 	return scoped
 }
 
+func (h *Home) scopedHubGroupPaths(nodeID string) []string {
+	nodeID = strings.TrimSpace(nodeID)
+	paths := map[string]bool{session.DefaultGroupPath: true}
+	h.hubSessionsMu.RLock()
+	if snapshot, ok := h.hubSessions[nodeID]; ok {
+		for _, info := range snapshot.Sessions {
+			groupPath := strings.Trim(strings.TrimSpace(info.GroupPath), "/")
+			if groupPath == "" {
+				groupPath = session.DefaultGroupPath
+			}
+			if h.groupScope == "" || h.isInGroupScope(groupPath) {
+				paths[groupPath] = true
+			}
+		}
+	}
+	h.hubSessionsMu.RUnlock()
+	out := make([]string, 0, len(paths))
+	for path := range paths {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // groupScopeDisplayName returns the human-readable name for the active group scope.
 // Falls back to the raw scope path if the group is not found in the tree.
 func (h *Home) groupScopeDisplayName() string {
@@ -2375,8 +2399,8 @@ func (h *Home) rebuildFlatItems() {
 		h.flatItems = scoped
 	}
 
+	h.flatItems = append(h.flatItems, h.projectHubItems()...)
 	if h.statusFilter != FilterModeArchived {
-		h.flatItems = append(h.flatItems, h.projectHubItems()...)
 		h.flatItems = append(h.flatItems, h.projectRemoteItems()...)
 	}
 
@@ -2558,8 +2582,12 @@ func hubSessionStatus(info session.HubSessionInfo) session.Status {
 	return session.Status(strings.TrimSpace(info.Status))
 }
 
+func hubSessionArchived(info session.HubSessionInfo) bool {
+	return info.ArchivedAt != nil && !info.ArchivedAt.IsZero()
+}
+
 func (h *Home) hasHubSessionMatchingStatusFilter(filter session.Status) bool {
-	if !h.hubConfigured || filter == "" || filter == FilterModeArchived {
+	if !h.hubConfigured || filter == "" {
 		return false
 	}
 	for _, node := range h.hubSessionSnapshots() {
@@ -2567,6 +2595,16 @@ func (h *Home) hasHubSessionMatchingStatusFilter(filter session.Status) bool {
 			continue
 		}
 		for _, info := range node.Sessions {
+			archived := info.ArchivedAt != nil && !info.ArchivedAt.IsZero()
+			if filter == FilterModeArchived {
+				if archived {
+					return true
+				}
+				continue
+			}
+			if archived {
+				continue
+			}
 			if h.matchesStatusFilter(filter, session.Status(strings.TrimSpace(info.Status))) {
 				return true
 			}
@@ -2654,6 +2692,7 @@ func (h *Home) projectHubItems() []session.Item {
 				GroupPath:        info.GroupPath,
 				ProjectPath:      info.ProjectPath,
 				DisplaySessionID: info.DisplaySessionID,
+				ArchivedAt:       info.ArchivedAt,
 			}
 			groupPath := strings.Trim(strings.TrimSpace(hubInfo.GroupPath), "/")
 			if groupPath == "" {
@@ -2663,6 +2702,14 @@ func (h *Home) projectHubItems() []session.Item {
 				continue
 			}
 			hubInfo.GroupPath = groupPath
+			archived := hubSessionArchived(hubInfo)
+			if h.statusFilter == FilterModeArchived {
+				if !archived {
+					continue
+				}
+			} else if archived {
+				continue
+			}
 			if h.statusFilter != "" && h.statusFilter != FilterModeArchived && !h.matchesStatusFilter(h.statusFilter, hubSessionStatus(hubInfo)) {
 				continue
 			}
@@ -3986,6 +4033,17 @@ func (h *Home) selectedHubPreviewTarget() (string, string, string, bool) {
 	}
 	key := hubPreviewCacheKey(nodeID, sessionID)
 	return nodeID, sessionID, key, true
+}
+
+func (h *Home) getSelectedHubSessionItem() *session.Item {
+	if h == nil || h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return nil
+	}
+	item := h.flatItems[h.cursor]
+	if item.Type != session.ItemTypeHubSession || item.HubSession == nil {
+		return nil
+	}
+	return &item
 }
 
 func (h *Home) selectedPreviewCacheExpired(key string, now time.Time) bool {
@@ -8220,6 +8278,15 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			h.handleUpdateNudgeDismiss(msg)
 			return h, nil
 		}
+		if h.statusFilter == FilterModeArchived && h.cursor < len(h.flatItems) {
+			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.IsArchived() {
+				h.confirmDialog.ShowUnarchiveSession(item.Session.ID, item.Session.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && hubSessionArchived(*item.HubSession) {
+				h.confirmDialog.ShowUnarchiveHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
+			}
+		}
+		return h, nil
 
 	case "esc":
 		// Dismiss maintenance banner if visible
@@ -8688,7 +8755,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "P", "shift+p":
-		if h.getSelectedSession() != nil {
+		if h.getSelectedSession() != nil || h.getSelectedHubSessionItem() != nil {
 			h.sessionActionPrefix = true
 			h.maintenanceMsg = "P: h handover, e edit, P edit"
 		}
@@ -8780,6 +8847,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession {
 				h.groupDialog.ShowMove(h.scopedGroupPaths())
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.groupDialog.ShowMove(h.scopedHubGroupPaths(item.HubNodeID))
 			}
 		}
 		return h, nil
@@ -9150,6 +9219,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil && !item.Session.IsArchived() {
 				h.confirmDialog.ShowArchiveSession(item.Session.ID, item.Session.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && !hubSessionArchived(*item.HubSession) {
+				h.confirmDialog.ShowArchiveHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
 			}
 		}
 		return h, nil
@@ -9162,6 +9233,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.IsArchived() {
 				h.confirmDialog.ShowUnarchiveSession(item.Session.ID, item.Session.Title)
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil && hubSessionArchived(*item.HubSession) {
+				h.confirmDialog.ShowUnarchiveHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
 			}
 		}
 		return h, nil
@@ -9177,6 +9250,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					h.confirmDialog.ShowRemoveSession(item.Session.ID, item.Session.Title)
 				} else {
 					h.setError(fmt.Errorf("session must be stopped or errored to remove; use 'd' to destructively delete a %s session", status))
+				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				status := session.Status(strings.TrimSpace(item.HubSession.Status))
+				if status == session.StatusStopped || status == session.StatusError {
+					h.confirmDialog.ShowRemoveHubSession(item.HubNodeID, item.HubNodeName, item.HubSession.ID, item.HubSession.Title)
+				} else {
+					h.setError(fmt.Errorf("hub session must be stopped or errored to remove; use 'd' to destructively delete a %s session", status))
 				}
 			}
 		}
@@ -9268,6 +9348,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			case session.ItemTypeSession:
 				if item.Session != nil && session.IsClaudeCompatible(item.Session.Tool) {
 					h.quickApprove(item.Session, -1)
+				}
+			case session.ItemTypeHubSession:
+				if item.HubSession != nil && session.IsClaudeCompatible(item.HubSession.Tool) {
+					return h, h.hubSessionCommand(item, "send", map[string]string{"message": "1"})
 				}
 			}
 		}
@@ -9393,6 +9477,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						return h, h.restartSession(inst)
 					}
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				switch item.HubSession.Tool {
+				case "gemini", "codex", "hermes":
+					return h, h.hubSessionCommand(item, "toggle_yolo", nil)
+				}
 			}
 		}
 		return h, nil
@@ -9433,6 +9522,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					h.resumingSessions[item.Session.ID] = time.Now()
 					return h, h.restartSessionFresh(item.Session)
 				}
+			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				return h, h.hubSessionCommand(item, "restart_fresh", nil)
 			}
 		}
 		return h, nil
@@ -9698,6 +9789,24 @@ func (h *Home) openEditSessionDialogForSelected() {
 	if item.Type == session.ItemTypeSession && item.Session != nil {
 		h.editSessionDialog.SetSize(h.width, h.height)
 		h.editSessionDialog.Show(item.Session)
+	} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+		h.editSessionDialog.SetSize(h.width, h.height)
+		h.editSessionDialog.Show(hubSessionEditProxy(item))
+	}
+}
+
+func hubSessionEditProxy(item session.Item) *session.Instance {
+	hs := item.HubSession
+	if hs == nil {
+		return &session.Instance{}
+	}
+	return &session.Instance{
+		ID:          hubPromptTarget(item.HubNodeID, hs.ID),
+		Title:       hs.Title,
+		Tool:        hs.Tool,
+		GroupPath:   hs.GroupPath,
+		ProjectPath: hs.ProjectPath,
+		Status:      session.Status(strings.TrimSpace(hs.Status)),
 	}
 }
 
@@ -9882,6 +9991,30 @@ func (h *Home) confirmAction() tea.Cmd {
 		nodeName := h.confirmDialog.GetRemoteName()
 		h.confirmDialog.Hide()
 		return h.hubCommand(nodeID, nodeName, "stop", map[string]string{"session_id": sessionID})
+	case ConfirmArchiveHubSession:
+		sessionID := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		h.updateHubSessionArchived(nodeID, sessionID, time.Now().UTC())
+		h.rebuildFlatItems()
+		return h.hubCommand(nodeID, nodeName, "archive", map[string]string{"session_id": sessionID})
+	case ConfirmUnarchiveHubSession:
+		sessionID := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		h.updateHubSessionArchived(nodeID, sessionID, time.Time{})
+		h.rebuildFlatItems()
+		return h.hubCommand(nodeID, nodeName, "unarchive", map[string]string{"session_id": sessionID})
+	case ConfirmRemoveHubSession:
+		sessionID := h.confirmDialog.GetTargetID()
+		nodeID := h.confirmDialog.GetHubNodeID()
+		nodeName := h.confirmDialog.GetRemoteName()
+		h.confirmDialog.Hide()
+		h.removeHubSessionFromCache(nodeID, sessionID)
+		h.rebuildFlatItems()
+		return h.hubCommand(nodeID, nodeName, "remove", map[string]string{"session_id": sessionID})
 	case ConfirmRemoveSession:
 		sessionID := h.confirmDialog.GetTargetID()
 		if inst := h.getInstanceByID(sessionID); inst != nil {
@@ -10534,6 +10667,9 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		sessionID := h.editSessionDialog.SessionID()
+		if nodeID, hubSessionID, ok := parseHubPromptTarget(sessionID); ok {
+			return h.handleHubEditSessionDialogSubmit(nodeID, hubSessionID)
+		}
 		inst := h.getInstanceByID(sessionID)
 		if inst == nil {
 			h.editSessionDialog.Hide()
@@ -10653,6 +10789,38 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.editSessionDialog, cmd = h.editSessionDialog.Update(msg)
 		return h, cmd
 	}
+}
+
+func (h *Home) handleHubEditSessionDialogSubmit(nodeID, hubSessionID string) (tea.Model, tea.Cmd) {
+	info, ok := h.findHubSessionInfo(nodeID, hubSessionID)
+	if !ok {
+		h.editSessionDialog.Hide()
+		return h, nil
+	}
+	proxy := &session.Instance{
+		ID:          hubPromptTarget(nodeID, hubSessionID),
+		Title:       info.Title,
+		Tool:        info.Tool,
+		GroupPath:   info.GroupPath,
+		ProjectPath: info.ProjectPath,
+		Status:      session.Status(strings.TrimSpace(info.Status)),
+	}
+	changes := h.editSessionDialog.GetChanges(proxy)
+	if len(changes) == 0 {
+		h.editSessionDialog.Hide()
+		return h, nil
+	}
+	payloadChanges := make([]hub.SessionFieldChange, 0, len(changes))
+	for _, change := range changes {
+		payloadChanges = append(payloadChanges, hub.SessionFieldChange{Field: change.Field, Value: change.Value})
+	}
+	h.applyHubSessionFieldChanges(nodeID, hubSessionID, payloadChanges)
+	h.rebuildFlatItems()
+	h.editSessionDialog.Hide()
+	return h, h.hubCommand(nodeID, "", "update", hub.UpdateSessionRequest{
+		SessionID: hubSessionID,
+		Changes:   payloadChanges,
+	})
 }
 
 // applyMultiRepoPathChanges updates the symlink directory and restarts the session.
@@ -10813,6 +10981,16 @@ func (h *Home) handleGroupDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					h.instancesMu.Unlock()
 					h.rebuildFlatItems()
 					h.saveInstances()
+				} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+					cmd := h.hubCommand(item.HubNodeID, item.HubNodeName, "move", map[string]string{
+						"session_id": item.HubSession.ID,
+						"group_path": targetGroupPath,
+					})
+					h.updateHubSessionGroup(item.HubNodeID, item.HubSession.ID, targetGroupPath)
+					h.rebuildFlatItems()
+					h.groupDialog.Hide()
+					h.lastGTime = time.Time{}
+					return h, cmd
 				}
 			}
 		case GroupDialogRenameSession:
@@ -13313,6 +13491,131 @@ func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
 			return
 		}
 	}
+}
+
+func (h *Home) findHubSessionInfo(nodeID, sessionID string) (hub.SessionInfo, bool) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return hub.SessionInfo{}, false
+	}
+	h.hubSessionsMu.RLock()
+	defer h.hubSessionsMu.RUnlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return hub.SessionInfo{}, false
+	}
+	for _, info := range snapshot.Sessions {
+		if info.ID == sessionID {
+			return info, true
+		}
+	}
+	return hub.SessionInfo{}, false
+}
+
+func (h *Home) applyHubSessionFieldChanges(nodeID, sessionID string, changes []hub.SessionFieldChange) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" || len(changes) == 0 {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID != sessionID {
+			continue
+		}
+		for _, change := range changes {
+			switch strings.TrimSpace(change.Field) {
+			case session.FieldTitle:
+				snapshot.Sessions[i].Title = change.Value
+			case session.FieldTool:
+				snapshot.Sessions[i].Tool = change.Value
+			case session.FieldPath:
+				snapshot.Sessions[i].ProjectPath = change.Value
+			}
+		}
+		h.hubSessions[nodeID] = snapshot
+		return
+	}
+}
+
+func (h *Home) updateHubSessionArchived(nodeID, sessionID string, archivedAt time.Time) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			if archivedAt.IsZero() {
+				snapshot.Sessions[i].ArchivedAt = nil
+			} else {
+				t := archivedAt
+				snapshot.Sessions[i].ArchivedAt = &t
+			}
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func (h *Home) updateHubSessionGroup(nodeID, sessionID, groupPath string) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	groupPath = strings.Trim(strings.TrimSpace(groupPath), "/")
+	if groupPath == "" {
+		groupPath = session.DefaultGroupPath
+	}
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			snapshot.Sessions[i].GroupPath = groupPath
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func (h *Home) removeHubSessionFromCache(nodeID, sessionID string) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	filtered := snapshot.Sessions[:0]
+	for _, info := range snapshot.Sessions {
+		if info.ID == sessionID {
+			continue
+		}
+		filtered = append(filtered, info)
+	}
+	snapshot.Sessions = filtered
+	h.hubSessions[nodeID] = snapshot
 }
 
 func hubPromptTarget(nodeID, sessionID string) string {
@@ -17435,19 +17738,24 @@ func (h *Home) renderHubSessionItem(b *strings.Builder, item session.Item, selec
 
 	statusIcon := "○"
 	statusColor := lipgloss.Color("8")
-	switch session.Status(strings.TrimSpace(hs.Status)) {
-	case session.StatusRunning, session.StatusStarting:
-		statusIcon = "●"
-		statusColor = lipgloss.Color("2")
-	case session.StatusWaiting:
-		statusIcon = "◉"
-		statusColor = lipgloss.Color("3")
-	case session.StatusError:
-		statusIcon = "✗"
-		statusColor = lipgloss.Color("1")
-	case session.StatusStopped:
+	if hubSessionArchived(*hs) {
 		statusIcon = "■"
 		statusColor = lipgloss.Color("8")
+	} else {
+		switch session.Status(strings.TrimSpace(hs.Status)) {
+		case session.StatusRunning, session.StatusStarting:
+			statusIcon = "●"
+			statusColor = lipgloss.Color("2")
+		case session.StatusWaiting:
+			statusIcon = "◉"
+			statusColor = lipgloss.Color("3")
+		case session.StatusError:
+			statusIcon = "✗"
+			statusColor = lipgloss.Color("1")
+		case session.StatusStopped:
+			statusIcon = "■"
+			statusColor = lipgloss.Color("8")
+		}
 	}
 
 	sStyle := lipgloss.NewStyle().Foreground(statusColor)
@@ -20067,6 +20375,9 @@ func (h *Home) hasArchivedSessions() bool {
 				return true
 			}
 		}
+	}
+	if h.hasHubSessionMatchingStatusFilter(FilterModeArchived) {
+		return true
 	}
 	return false
 }

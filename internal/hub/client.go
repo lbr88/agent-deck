@@ -1025,6 +1025,10 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		DisplaySessionID: displaySessionIDFromRow(row),
 		UpdatedAt:        rowUpdatedAt(row),
 	}
+	if !row.ArchivedAt.IsZero() {
+		archivedAt := row.ArchivedAt
+		info.ArchivedAt = &archivedAt
+	}
 	return info
 }
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -553,6 +554,222 @@ func TestHubSessionRenameUsesHubCommand(t *testing.T) {
 	}
 	if h.groupDialog.IsVisible() {
 		t.Fatal("rename dialog should hide after submit")
+	}
+}
+
+func TestHubSessionParityActionsUseHubCommands(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("T on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("restart fresh hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "restart_fresh", map[string]string{"session_id": "r1"})
+
+	key := defaultHotkeyBindings[hotkeyQuickApprove]
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("quick approve on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("quick approve hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[1], "node_server", "send", map[string]string{
+		"session_id": "r1",
+		"message":    "1",
+	})
+}
+
+func TestHubSessionArchiveUnarchiveAndRemoveUseConfirmations(t *testing.T) {
+	h, client := newHubActionHome(t)
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("A on hub session should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmArchiveHubSession {
+		t.Fatalf("archive confirm type = %v, want ConfirmArchiveHubSession", h.confirmDialog.GetConfirmType())
+	}
+	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("confirm hub archive returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("archive hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "archive", map[string]string{"session_id": "r1"})
+	if h.hubSessions["node_server"].Sessions[0].ArchivedAt == nil {
+		t.Fatal("hub session was not marked archived optimistically")
+	}
+
+	h.statusFilter = FilterModeArchived
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'U'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("Shift+U on archived hub session should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmUnarchiveHubSession {
+		t.Fatalf("unarchive confirm type = %v, want ConfirmUnarchiveHubSession", h.confirmDialog.GetConfirmType())
+	}
+	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("confirm hub unarchive returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("unarchive hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[1], "node_server", "unarchive", map[string]string{"session_id": "r1"})
+
+	h.statusFilter = ""
+	h.hubSessions["node_server"] = hub.NodeSessions{
+		Node: hub.Node{ID: "node_server", Name: "server1"},
+		Sessions: []hub.SessionInfo{{
+			ID: "r1", Title: "deploy", Tool: "claude", Status: "stopped", GroupPath: "ops",
+		}},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("X on stopped hub session should open confirmation without command")
+	}
+	if h.confirmDialog.GetConfirmType() != ConfirmRemoveHubSession {
+		t.Fatalf("remove confirm type = %v, want ConfirmRemoveHubSession", h.confirmDialog.GetConfirmType())
+	}
+	model, cmd = h.handleConfirmDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("confirm hub remove returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("remove hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[2], "node_server", "remove", map[string]string{"session_id": "r1"})
+	if len(h.hubSessions["node_server"].Sessions) != 0 {
+		t.Fatalf("hub sessions after remove = %d, want 0", len(h.hubSessions["node_server"].Sessions))
+	}
+}
+
+func TestArchivedHubSessionsOnlyRenderInArchiveView(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	archivedAt := time.Unix(123, 0).UTC()
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{
+				{ID: "active", Title: "active remote", Tool: "claude", Status: "waiting", GroupPath: "ops"},
+				{ID: "archived", Title: "archived remote", Tool: "claude", Status: "stopped", GroupPath: "ops", ArchivedAt: &archivedAt},
+			},
+		},
+	}
+
+	h.rebuildFlatItems()
+	got := h.View()
+	if strings.Contains(got, "archived remote") {
+		t.Fatalf("active view included archived hub session:\n%s", got)
+	}
+	if !strings.Contains(got, "active remote") {
+		t.Fatalf("active view missing active hub session:\n%s", got)
+	}
+
+	h.statusFilter = FilterModeArchived
+	h.rebuildFlatItems()
+	got = h.View()
+	if !strings.Contains(got, "archived remote") {
+		t.Fatalf("archive view missing archived hub session:\n%s", got)
+	}
+	if strings.Contains(got, "active remote") {
+		t.Fatalf("archive view included active hub session:\n%s", got)
+	}
+}
+
+func TestHubSessionMoveAndEditUseHubCommands(t *testing.T) {
+	h, client := newHubActionHome(t)
+	h.hubSessions["node_server"] = hub.NodeSessions{
+		Node: hub.Node{ID: "node_server", Name: "server1"},
+		Sessions: []hub.SessionInfo{
+			{ID: "r1", Title: "deploy", Tool: "claude", Status: "waiting", GroupPath: "ops", ProjectPath: "/srv/app"},
+			{ID: "r2", Title: "peer", Tool: "claude", Status: "idle", GroupPath: "infra", ProjectPath: "/srv/app"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubSession(t, h, "r1")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'M'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("M on hub session should open move dialog without command")
+	}
+	for i, path := range h.groupDialog.groupPaths {
+		if path == "infra" {
+			h.groupDialog.selected = i
+			break
+		}
+	}
+	model, cmd = h.handleGroupDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub move submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("move hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[0], "node_server", "move", map[string]string{
+		"session_id": "r1",
+		"group_path": "infra",
+	})
+	if got := h.hubSessions["node_server"].Sessions[0].GroupPath; got != "infra" {
+		t.Fatalf("cached hub group = %q, want infra", got)
+	}
+
+	h.cursor = indexHubSession(t, h, "r1")
+	model, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("P should enter prefix mode without command")
+	}
+	model, cmd = h.handleSessionActionPrefixKey("e")
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("P e should open edit dialog without command")
+	}
+	if !h.editSessionDialog.IsVisible() {
+		t.Fatal("hub edit dialog not visible")
+	}
+	h.editSessionDialog.fields[0].input.SetValue("deploy edited")
+	model, cmd = h.handleEditSessionDialogKey(tea.KeyMsg{Type: tea.KeyEnter})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("hub edit submit returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("edit hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if got := client.commands[1]; got.nodeID != "node_server" || got.action != "update" {
+		t.Fatalf("edit hub command = %+v", got)
+	}
+	req, ok := client.commands[1].payload.(hub.UpdateSessionRequest)
+	if !ok {
+		t.Fatalf("edit payload type = %T, want hub.UpdateSessionRequest", client.commands[1].payload)
+	}
+	if req.SessionID != "r1" || len(req.Changes) != 1 || req.Changes[0].Field != session.FieldTitle || req.Changes[0].Value != "deploy edited" {
+		t.Fatalf("edit request = %+v", req)
+	}
+	if got := h.hubSessions["node_server"].Sessions[0].Title; got != "deploy edited" {
+		t.Fatalf("cached hub title = %q, want deploy edited", got)
 	}
 }
 

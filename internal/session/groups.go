@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"github.com/asheshgoplani/agent-deck/internal/git"
@@ -74,6 +75,7 @@ type HubSessionInfo struct {
 	GroupPath        string
 	ProjectPath      string
 	DisplaySessionID string
+	ArchivedAt       *time.Time
 }
 
 // Group represents a group of sessions

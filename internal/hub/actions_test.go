@@ -88,6 +88,68 @@ func TestCommandDispatcherDeleteUsesSessionID(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherParityActionsUseBackend(t *testing.T) {
+	tests := []struct {
+		action string
+		want   string
+	}{
+		{"restart_fresh", "restart_fresh:s1"},
+		{"archive", "archive:s1"},
+		{"unarchive", "unarchive:s1"},
+		{"remove", "remove:s1"},
+		{"toggle_yolo", "toggle_yolo:s1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.action, func(t *testing.T) {
+			fake := &fakeActionBackend{}
+			dispatcher := CommandDispatcher{Backend: fake}
+			payload, _ := json.Marshal(map[string]string{"session_id": "s1"})
+			_, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+				CommandID: "cmd_1",
+				Action:    tc.action,
+				Payload:   payload,
+			})
+			if err != nil {
+				t.Fatalf("Dispatch %s: %v", tc.action, err)
+			}
+			if fake.lastAction != tc.want {
+				t.Fatalf("lastAction = %q, want %q", fake.lastAction, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommandDispatcherMoveAndUpdateUseBackend(t *testing.T) {
+	fake := &fakeActionBackend{}
+	dispatcher := CommandDispatcher{Backend: fake}
+	movePayload, _ := json.Marshal(map[string]string{"session_id": "s1", "group_path": "ops"})
+	if _, err := dispatcher.Dispatch(context.Background(), CommandPayload{CommandID: "cmd_1", Action: "move", Payload: movePayload}); err != nil {
+		t.Fatalf("Dispatch move: %v", err)
+	}
+	if fake.movedSessionID != "s1" || fake.movedGroupPath != "ops" {
+		t.Fatalf("move = session %q group %q", fake.movedSessionID, fake.movedGroupPath)
+	}
+
+	updatePayload, _ := json.Marshal(UpdateSessionRequest{
+		SessionID: "s1",
+		Changes:   []SessionFieldChange{{Field: "title", Value: "renamed"}},
+	})
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{CommandID: "cmd_2", Action: "update", Payload: updatePayload})
+	if err != nil {
+		t.Fatalf("Dispatch update: %v", err)
+	}
+	if fake.updateReq.SessionID != "s1" || len(fake.updateReq.Changes) != 1 || fake.updateReq.Changes[0].Value != "renamed" {
+		t.Fatalf("update req = %+v", fake.updateReq)
+	}
+	var result UpdateSessionResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode update result: %v", err)
+	}
+	if !result.Restarted {
+		t.Fatal("update result Restarted = false, want true")
+	}
+}
+
 func TestCommandDispatcherPreviewReturnsContent(t *testing.T) {
 	fake := &fakeActionBackend{previewContent: "remote pane content"}
 	dispatcher := CommandDispatcher{Backend: fake}
@@ -146,6 +208,10 @@ type fakeActionBackend struct {
 	previewContent   string
 	importTmuxCalled bool
 	importTmuxCount  int
+	lastAction       string
+	movedSessionID   string
+	movedGroupPath   string
+	updateReq        UpdateSessionRequest
 }
 
 func (b *fakeActionBackend) Send(_ context.Context, sessionID, message string) error {
@@ -166,6 +232,11 @@ func (b *fakeActionBackend) Restart(context.Context, string) error {
 	return nil
 }
 
+func (b *fakeActionBackend) RestartFresh(_ context.Context, sessionID string) error {
+	b.lastAction = "restart_fresh:" + sessionID
+	return nil
+}
+
 func (b *fakeActionBackend) Rename(context.Context, string, string) error {
 	return nil
 }
@@ -177,6 +248,37 @@ func (b *fakeActionBackend) Create(_ context.Context, req CreateSessionRequest) 
 
 func (b *fakeActionBackend) Delete(_ context.Context, sessionID string) error {
 	b.deletedSessionID = sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) Archive(_ context.Context, sessionID string) error {
+	b.lastAction = "archive:" + sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) Unarchive(_ context.Context, sessionID string) error {
+	b.lastAction = "unarchive:" + sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) Remove(_ context.Context, sessionID string) error {
+	b.lastAction = "remove:" + sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) Move(_ context.Context, sessionID, groupPath string) error {
+	b.movedSessionID = sessionID
+	b.movedGroupPath = groupPath
+	return nil
+}
+
+func (b *fakeActionBackend) Update(_ context.Context, req UpdateSessionRequest) (UpdateSessionResponse, error) {
+	b.updateReq = req
+	return UpdateSessionResponse{Restarted: true}, nil
+}
+
+func (b *fakeActionBackend) ToggleYolo(_ context.Context, sessionID string) error {
+	b.lastAction = "toggle_yolo:" + sessionID
 	return nil
 }
 

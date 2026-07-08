@@ -65,6 +65,7 @@ type SessionInfo struct {
 	ProjectPath      string     `json:"project_path,omitempty"`
 	DisplaySessionID string     `json:"display_session_id,omitempty"`
 	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
+	ArchivedAt       *time.Time `json:"archived_at,omitempty"`
 }
 
 type SnapshotPayload struct {
