@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // TestTmuxAttachCommand_NoIgnoreSize: the web's tmux attach must NOT pass
@@ -127,12 +129,13 @@ func TestResize_AcceptsReasonableDimensions(t *testing.T) {
 	}
 }
 
-// TestEnsureTERM exercises the launchd/systemd failure mode directly: a web
-// daemon spawned by a supervisor inherits an environment with no TERM, and a
-// tmux attach client with an unset/empty TERM aborts with "open terminal
-// failed: terminal does not support clear". ensureTERM must guarantee a usable
-// TERM without clobbering one the daemon legitimately inherited.
-func TestEnsureTERM(t *testing.T) {
+// TestEnsureSaneAttachTERMEnv exercises the launchd/systemd failure mode
+// directly: a web daemon spawned by a supervisor inherits an environment with
+// no usable TERM, and a tmux attach client with an unset/empty/dumb TERM aborts
+// with "open terminal failed: terminal does not support clear". The shared
+// tmux helper must guarantee a usable TERM without clobbering one the daemon
+// legitimately inherited.
+func TestEnsureSaneAttachTERMEnv(t *testing.T) {
 	const fallback = "TERM=xterm-256color"
 
 	countTERM := func(env []string) (n int, last string) {
@@ -147,7 +150,7 @@ func TestEnsureTERM(t *testing.T) {
 
 	t.Run("unset TERM gets the fallback appended", func(t *testing.T) {
 		env := []string{"PATH=/usr/bin", "HOME=/home/x"}
-		got := ensureTERM(env)
+		got := tmux.EnsureSaneAttachTERMEnv(env)
 		n, last := countTERM(got)
 		if n != 1 || last != fallback {
 			t.Fatalf("want exactly one %q, got n=%d last=%q (env=%v)", fallback, n, last, got)
@@ -156,7 +159,7 @@ func TestEnsureTERM(t *testing.T) {
 
 	t.Run("empty TERM is replaced in place, not duplicated", func(t *testing.T) {
 		env := []string{"TERM=", "PATH=/usr/bin"}
-		got := ensureTERM(env)
+		got := tmux.EnsureSaneAttachTERMEnv(env)
 		n, last := countTERM(got)
 		if n != 1 {
 			t.Fatalf("empty TERM must be replaced, not shadowed: got %d TERM entries (env=%v)", n, got)
@@ -168,16 +171,34 @@ func TestEnsureTERM(t *testing.T) {
 
 	t.Run("whitespace-only TERM is treated as empty and replaced", func(t *testing.T) {
 		env := []string{"TERM=   ", "PATH=/usr/bin"}
-		got := ensureTERM(env)
+		got := tmux.EnsureSaneAttachTERMEnv(env)
 		n, last := countTERM(got)
 		if n != 1 || last != fallback {
 			t.Fatalf("whitespace TERM must be replaced: got n=%d last=%q (env=%v)", n, last, got)
 		}
 	})
 
+	t.Run("dumb TERM is replaced", func(t *testing.T) {
+		env := []string{"TERM=dumb", "PATH=/usr/bin"}
+		got := tmux.EnsureSaneAttachTERMEnv(env)
+		n, last := countTERM(got)
+		if n != 1 || last != fallback {
+			t.Fatalf("dumb TERM must be replaced: got n=%d last=%q (env=%v)", n, last, got)
+		}
+	})
+
+	t.Run("unknown TERM is replaced", func(t *testing.T) {
+		env := []string{"TERM=unknown", "PATH=/usr/bin"}
+		got := tmux.EnsureSaneAttachTERMEnv(env)
+		n, last := countTERM(got)
+		if n != 1 || last != fallback {
+			t.Fatalf("unknown TERM must be replaced: got n=%d last=%q (env=%v)", n, last, got)
+		}
+	})
+
 	t.Run("inherited non-empty TERM is preserved untouched", func(t *testing.T) {
 		env := []string{"TERM=screen-256color", "PATH=/usr/bin"}
-		got := ensureTERM(env)
+		got := tmux.EnsureSaneAttachTERMEnv(env)
 		n, last := countTERM(got)
 		if n != 1 || last != "TERM=screen-256color" {
 			t.Fatalf("inherited TERM must be preserved: got n=%d last=%q", n, last)
@@ -185,7 +206,7 @@ func TestEnsureTERM(t *testing.T) {
 	})
 
 	t.Run("nil env is materialized and gets a TERM", func(t *testing.T) {
-		got := ensureTERM(nil)
+		got := tmux.EnsureSaneAttachTERMEnv(nil)
 		if got == nil {
 			t.Fatal("nil env must be materialized, got nil")
 		}

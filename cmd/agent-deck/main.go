@@ -954,7 +954,8 @@ func main() {
 	})
 
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		uiLog := logging.ForComponent(logging.CompUI)
+		uiLog.Error("tui_run_failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 }

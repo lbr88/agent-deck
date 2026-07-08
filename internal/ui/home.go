@@ -6613,6 +6613,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hubAttachResultMsg:
 		if msg.err != nil {
+			uiLog.Warn("hub_attach_failed", slog.String("error", msg.err.Error()))
 			h.setHubStatus("hub attach failed")
 			h.setError(fmt.Errorf("hub attach: %w", msg.err))
 		}

@@ -58,6 +58,20 @@ func TestAttachRouterForwardsInputToOwnerAndOutputToRequester(t *testing.T) {
 	assertAttachDataBytes(t, output, "world")
 }
 
+func TestHubTmuxAttachCommandForcesSaneTERM(t *testing.T) {
+	t.Setenv("TERM", "dumb")
+
+	cmd := hubTmuxAttachCommand(context.Background(), "agentdeck", "agentdeck_session")
+	wantArgs := []string{"tmux", "-L", "agentdeck", "attach-session", "-t", "agentdeck_session"}
+	if strings.Join(cmd.Args, "\x00") != strings.Join(wantArgs, "\x00") {
+		t.Fatalf("attach argv = %v, want %v", cmd.Args, wantArgs)
+	}
+	n, term := countTERMEntries(cmd.Env)
+	if n != 1 || term != "TERM=xterm-256color" {
+		t.Fatalf("TERM entries = %d last=%q env=%v", n, term, cmd.Env)
+	}
+}
+
 func TestAttachRouterRoutesResizeAndCloseFrames(t *testing.T) {
 	router := NewAttachRouter()
 	requester := newFakePeer("laptop")
@@ -380,4 +394,14 @@ func assertAttachDataBytes(t *testing.T, env Envelope, want string) {
 	if string(got) != want {
 		t.Fatalf("attach data bytes = %q, want %q", got, want)
 	}
+}
+
+func countTERMEntries(env []string) (n int, last string) {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TERM=") {
+			n++
+			last = kv
+		}
+	}
+	return n, last
 }

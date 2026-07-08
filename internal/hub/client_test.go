@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -502,6 +503,34 @@ func TestClientOwnerAttachOpenRejectsDuplicateStreamID(t *testing.T) {
 	cancel()
 	if err := waitErr(t, errCh); err != nil {
 		t.Fatalf("Connect returned error after context cancellation: %v", err)
+	}
+}
+
+func TestOwnerAttachCloseReasonSanitizesPTYErrors(t *testing.T) {
+	raw := fmt.Errorf("read /dev/ptmx: input/output error")
+	reason := ownerAttachCloseReason(raw)
+	if reason != "remote terminal attach failed" {
+		t.Fatalf("ownerAttachCloseReason = %q, want sanitized remote attach failure", reason)
+	}
+	if strings.Contains(reason, "/dev/ptmx") || strings.Contains(reason, "input/output") {
+		t.Fatalf("reason leaked raw PTY error: %q", reason)
+	}
+
+	err := attachClosedError(AttachClosePayload{StreamID: "stream_1", Reason: reason})
+	if err == nil || !strings.Contains(err.Error(), "remote terminal attach failed") {
+		t.Fatalf("attachClosedError = %v, want sanitized attach failure", err)
+	}
+	if strings.Contains(err.Error(), "/dev/ptmx") || strings.Contains(err.Error(), "input/output") {
+		t.Fatalf("requester error leaked raw PTY error: %v", err)
+	}
+
+	if eofReason := ownerAttachCloseReason(io.EOF); eofReason != "" {
+		t.Fatalf("EOF close reason = %q, want empty normal close reason", eofReason)
+	}
+
+	err = attachClosedError(AttachClosePayload{StreamID: "stream_1", Reason: "read /dev/ptmx: input/output error"})
+	if err == nil || err.Error() != "hub attach closed: remote terminal attach failed" {
+		t.Fatalf("raw close reason was not sanitized: %v", err)
 	}
 }
 

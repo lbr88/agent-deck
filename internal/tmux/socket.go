@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
 // tmuxSubprocessWaitDelay is the deadline cmd.Wait() waits for stdio I/O
@@ -28,6 +30,60 @@ import (
 // (non-empty, parses cleanly), treat it as success. The bytes were
 // written to the buffer before the I/O goroutine was abandoned.
 const tmuxSubprocessWaitDelay = 2 * time.Second
+
+const saneAttachTERM = "xterm-256color"
+
+// EnsureSaneAttachTERM returns cmd with an environment safe for a tmux
+// attach-session client. Supervisor-launched agent-deck processes often inherit
+// no TERM (or TERM=dumb/unknown); tmux attach then aborts with
+// "open terminal failed: terminal does not support clear" before the PTY bridge
+// can render anything. A real inherited terminal type is preserved.
+func EnsureSaneAttachTERM(cmd *exec.Cmd) *exec.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	cmd.Env = EnsureSaneAttachTERMEnv(cmd.Env)
+	return cmd
+}
+
+// EnsureSaneAttachTERMEnv returns env with exactly one usable TERM entry for
+// tmux attach clients. nil materializes the repo-standard sanitized child
+// launch environment because a nil exec.Cmd.Env otherwise means "inherit
+// parent" and an appended fallback would be ignored.
+func EnsureSaneAttachTERMEnv(env []string) []string {
+	if env == nil {
+		env = childenv.ForLaunch("")
+	}
+	out := make([]string, 0, len(env)+1)
+	foundTERM := false
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "TERM=") {
+			out = append(out, kv)
+			continue
+		}
+		if foundTERM {
+			continue
+		}
+		foundTERM = true
+		if attachTERMNeedsFallback(kv[len("TERM="):]) {
+			kv = "TERM=" + saneAttachTERM
+		}
+		out = append(out, kv)
+	}
+	if !foundTERM {
+		out = append(out, "TERM="+saneAttachTERM)
+	}
+	return out
+}
+
+func attachTERMNeedsFallback(term string) bool {
+	switch strings.ToLower(strings.TrimSpace(term)) {
+	case "", "dumb", "unknown":
+		return true
+	default:
+		return false
+	}
+}
 
 // defaultSocketName is the process-wide socket used by package-level tmux
 // probes (version checks, list-all-sessions, duplicate-session reaping)

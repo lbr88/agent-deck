@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/logging"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
@@ -26,6 +28,8 @@ import (
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
+
+var hubClientLog = logging.ForComponent("hub")
 
 type SessionSource interface {
 	Snapshot(context.Context) (SnapshotPayload, error)
@@ -551,7 +555,8 @@ func (c *Client) handleAttachOpen(ctx context.Context, conn *clientConn, env Env
 	if err != nil {
 		cancel()
 		c.unregisterOwnerStream(streamID)
-		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: err.Error()})
+		c.logOwnerAttachError("hub_owner_attach_open_failed", streamID, sessionID, err)
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: ownerAttachCloseReason(err)})
 		return
 	}
 	ownerStream := &ownerAttachStream{streamID: streamID, stream: stream, cancel: cancel}
@@ -585,8 +590,9 @@ func (c *Client) pumpOwnerAttachOutput(ctx context.Context, conn *clientConn, ow
 		}
 		if err != nil {
 			reason := ""
-			if ctx.Err() == nil && err != io.EOF {
-				reason = err.Error()
+			if ctx.Err() == nil {
+				c.logOwnerAttachError("hub_owner_attach_read_failed", ownerStream.streamID, "", err)
+				reason = ownerAttachCloseReason(err)
 			}
 			if c.unregisterOwnerStream(ownerStream.streamID) == ownerStream {
 				_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: ownerStream.streamID, Reason: reason})
@@ -622,7 +628,7 @@ func (c *Client) handleAttachData(conn *clientConn, env Envelope) {
 	}
 	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
 		if _, err := ownerStream.stream.Write(data); err != nil {
-			c.closeOwnerAttachWithReason(conn, payload.StreamID, err.Error())
+			c.closeOwnerAttachWithError(conn, payload.StreamID, "hub_owner_attach_write_failed", err)
 		}
 		return
 	}
@@ -638,7 +644,7 @@ func (c *Client) handleAttachResize(conn *clientConn, env Envelope) {
 	}
 	if ownerStream := c.ownerStream(payload.StreamID); ownerStream != nil {
 		if err := ownerStream.stream.Resize(TerminalSize{Cols: payload.Cols, Rows: payload.Rows}); err != nil {
-			c.closeOwnerAttachWithReason(conn, payload.StreamID, err.Error())
+			c.closeOwnerAttachWithError(conn, payload.StreamID, "hub_owner_attach_resize_failed", err)
 		}
 	}
 }
@@ -673,14 +679,15 @@ func (c *Client) handleAttachClosed(env Envelope) {
 	}
 }
 
-func (c *Client) closeOwnerAttachWithReason(conn *clientConn, streamID, reason string) {
+func (c *Client) closeOwnerAttachWithError(conn *clientConn, streamID, event string, err error) {
 	ownerStream := c.unregisterOwnerStream(streamID)
 	if ownerStream == nil {
 		return
 	}
 	ownerStream.close()
+	c.logOwnerAttachError(event, streamID, "", err)
 	if conn != nil {
-		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: reason})
+		_ = conn.writeEnvelope(MsgAttachClosed, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: ownerAttachCloseReason(err)})
 	}
 }
 
@@ -1110,13 +1117,59 @@ func pollFDFromInt(fd int) (int32, error) {
 }
 
 func attachClosedError(payload AttachClosePayload) error {
-	if strings.TrimSpace(payload.Reason) == "" {
+	reason := sanitizeAttachCloseReason(payload.Reason)
+	if reason == "" {
 		return errAttachClosedByOwner
 	}
-	return fmt.Errorf("hub attach closed: %s", payload.Reason)
+	return fmt.Errorf("hub attach closed: %s", reason)
 }
 
 var errAttachClosedByOwner = errors.New("hub attach closed by owner")
+
+func ownerAttachCloseReason(err error) string {
+	if err == nil || errors.Is(err, io.EOF) {
+		return ""
+	}
+	return "remote terminal attach failed"
+}
+
+func sanitizeAttachCloseReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	lower := strings.ToLower(reason)
+	for _, marker := range []string{
+		"/dev/ptmx",
+		"input/output error",
+		"open terminal failed",
+		"terminal does not support clear",
+		"bubble tea",
+		"tmux",
+		"pty",
+	} {
+		if strings.Contains(lower, marker) {
+			return "remote terminal attach failed"
+		}
+	}
+	return reason
+}
+
+func (c *Client) logOwnerAttachError(event, streamID, sessionID string, err error) {
+	if err == nil || errors.Is(err, io.EOF) {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("node_id", c.cfg.NodeID),
+		slog.String("stream_id", streamID),
+		slog.String("error", err.Error()),
+		slog.String("client_reason", ownerAttachCloseReason(err)),
+	}
+	if strings.TrimSpace(sessionID) != "" {
+		attrs = append(attrs, slog.String("session_id", sessionID))
+	}
+	hubClientLog.LogAttrs(context.Background(), slog.LevelWarn, event, attrs...)
+}
 
 func currentTerminalSize() TerminalSize {
 	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))

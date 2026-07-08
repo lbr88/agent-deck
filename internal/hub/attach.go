@@ -56,7 +56,7 @@ func (b TmuxAttachBackend) Open(ctx context.Context, sessionID string, size Term
 	}
 
 	attachCtx, cancel := context.WithCancel(ctx)
-	cmd := tmux.ExecContext(attachCtx, row.TmuxSocketName, "attach-session", "-t", row.TmuxSession)
+	cmd := hubTmuxAttachCommand(attachCtx, row.TmuxSocketName, row.TmuxSession)
 	ptmx, err := startPTYWithSize(cmd, size)
 	if err != nil {
 		cancel()
@@ -78,6 +78,10 @@ func (b TmuxAttachBackend) Open(ctx context.Context, sessionID string, size Term
 		close(stream.waitDone)
 	}()
 	return stream, nil
+}
+
+func hubTmuxAttachCommand(ctx context.Context, socketName, sessionName string) *exec.Cmd {
+	return tmux.EnsureSaneAttachTERM(tmux.ExecContext(ctx, socketName, "attach-session", "-t", sessionName))
 }
 
 func (b TmuxAttachBackend) findSession(sessionID string) (*statedb.InstanceRow, error) {
