@@ -34,6 +34,7 @@ type ActionBackend interface {
 	Move(ctx context.Context, sessionID, groupPath string) error
 	Update(ctx context.Context, req UpdateSessionRequest) (UpdateSessionResponse, error)
 	ToggleYolo(ctx context.Context, sessionID string) error
+	MarkUnread(ctx context.Context, sessionID string) error
 	Preview(ctx context.Context, sessionID string) (string, error)
 	ImportTmux(ctx context.Context) (int, error)
 }
@@ -289,6 +290,15 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		if err := d.Backend.ToggleYolo(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "mark_unread":
+		payload, err := decodeSessionAction(cmd.Payload, "mark_unread")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.MarkUnread(ctx, payload.SessionID); err != nil {
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: payload.SessionID})
@@ -949,6 +959,25 @@ func (b LocalActionBackend) ToggleYolo(ctx context.Context, sessionID string) er
 		return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
 	}
 	return nil
+}
+
+func (b LocalActionBackend) MarkUnread(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	tmuxSess := inst.GetTmuxSession()
+	if tmuxSess == nil || strings.TrimSpace(tmuxSess.Name) == "" {
+		return fmt.Errorf("session %q has no tmux session", inst.Title)
+	}
+	tmuxSess.ResetAcknowledged()
+	inst.ForceNextStatusCheck()
+	_ = inst.UpdateStatus()
+	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
 }
 
 func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (string, error) {

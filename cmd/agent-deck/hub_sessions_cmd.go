@@ -89,6 +89,8 @@ func handleHubSessions(profile string, args []string) error {
 		return handleHubSessionsSimple(profile, "remove", args[1:])
 	case "toggle-yolo":
 		return handleHubSessionsSimple(profile, "toggle_yolo", args[1:])
+	case "unread", "mark-unread":
+		return handleHubSessionsSimple(profile, "mark_unread", args[1:])
 	case "rename":
 		return handleHubSessionsRename(profile, args[1:])
 	case "move":
@@ -427,7 +429,7 @@ func runHubSessionWithClient(ctx context.Context, client hubShellClient, snapsho
 			return hubSessionCommandResult{}, fmt.Errorf("hub sessions move group path is required")
 		}
 		_, err = client.Command(ctx, resolved.NodeID, "move", map[string]string{"session_id": resolved.SessionID, "group_path": group})
-	case "stop", "restart", "restart_fresh", "fork", "delete", "archive", "unarchive", "remove", "toggle_yolo":
+	case "stop", "restart", "restart_fresh", "fork", "delete", "archive", "unarchive", "remove", "toggle_yolo", "mark_unread":
 		raw, commandErr := client.Command(ctx, resolved.NodeID, action, map[string]string{"session_id": resolved.SessionID})
 		err = commandErr
 		if err == nil && action == "fork" {
@@ -658,5 +660,6 @@ func printHubSessionsUsage(w io.Writer) {
 	fmt.Fprintln(w, "  unarchive <node> <session>  Unarchive a hub session")
 	fmt.Fprintln(w, "  remove <node> <session>     Remove stopped/error hub session metadata")
 	fmt.Fprintln(w, "  toggle-yolo <node> <session> Toggle YOLO/auto-approve on a hub session")
+	fmt.Fprintln(w, "  unread <node> <session>     Mark a hub session as needing attention")
 	fmt.Fprintln(w, "  preview <node> <session>    Print remote pane preview")
 }

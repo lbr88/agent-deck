@@ -38,6 +38,9 @@ func (noopMutator) MoveSessionToGroup(string, string) error {
 func (noopMutator) SendSessionPrompt(string, string) error {
 	return nil
 }
+func (noopMutator) MarkSessionUnread(string) error {
+	return nil
+}
 func (noopMutator) CreateGroup(string, string) (string, error) {
 	return "", nil
 }

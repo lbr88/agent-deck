@@ -880,6 +880,39 @@ func (m *WebMutator) SendSessionPrompt(id, message string) error {
 	return nil
 }
 
+// MarkSessionUnread marks an idle/acknowledged session as needing attention.
+// Hub session IDs route to the owner node so the authoritative acknowledged
+// state changes where the session lives.
+func (m *WebMutator) MarkSessionUnread(id string) error {
+	if nodeID, sessionID, ok := web.ParseHubSessionWebID(id); ok {
+		if _, err := m.hubCommand(nodeID, "mark_unread", map[string]string{"session_id": sessionID}); err != nil {
+			return err
+		}
+		m.h.updateHubSessionStatus(nodeID, sessionID, session.StatusWaiting)
+		m.publishHubWebSnapshot()
+		return nil
+	}
+	unlock, err := m.beginHeadlessTx()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	m.h.instancesMu.RLock()
+	inst := m.h.instanceByID[id]
+	m.h.instancesMu.RUnlock()
+	if inst == nil {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	ts := inst.GetTmuxSession()
+	if ts == nil || strings.TrimSpace(ts.Name) == "" {
+		return fmt.Errorf("session %q has no tmux session", inst.Title)
+	}
+	ts.ResetAcknowledged()
+	inst.ForceNextStatusCheck()
+	_ = inst.UpdateStatus()
+	return m.persistAllInstances()
+}
+
 func (m *WebMutator) hubSessionAction(nodeID, sessionID, action string) error {
 	_, err := m.hubCommand(nodeID, action, map[string]string{"session_id": sessionID})
 	if err == nil {

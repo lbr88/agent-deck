@@ -703,6 +703,20 @@ func TestHubSessionParityActionsUseHubCommands(t *testing.T) {
 		"session_id": "r1",
 		"message":    "1",
 	})
+
+	_, cmd = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if cmd == nil {
+		t.Fatal("u on hub session returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("mark unread hub command error = %v", msg.(hubActionResultMsg).err)
+	}
+	assertHubCommand(t, client.commands[2], "node_server", "mark_unread", map[string]string{
+		"session_id": "r1",
+	})
+	if got := h.hubSessions["node_server"].Sessions[0].Status; got != string(session.StatusWaiting) {
+		t.Fatalf("cached hub status after u = %q, want waiting", got)
+	}
 }
 
 func TestHubSessionArchiveUnarchiveAndRemoveUseConfirmations(t *testing.T) {
@@ -947,10 +961,18 @@ func TestWebMutatorRoutesHubSessionActionsThroughHubClient(t *testing.T) {
 	}
 	assertHubCommand(t, client.commands[5], "node_server", "send", map[string]string{"session_id": "r1", "message": "run tests"})
 
+	if err := mutator.MarkSessionUnread(webID); err != nil {
+		t.Fatalf("MarkSessionUnread: %v", err)
+	}
+	assertHubCommand(t, client.commands[6], "node_server", "mark_unread", map[string]string{"session_id": "r1"})
+	if got := h.hubSessions["node_server"].Sessions[0].Status; got != string(session.StatusWaiting) {
+		t.Fatalf("hub status after MarkSessionUnread = %q, want waiting", got)
+	}
+
 	if err := mutator.DeleteSession(webID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	assertHubCommand(t, client.commands[6], "node_server", "delete", map[string]string{"session_id": "r1"})
+	assertHubCommand(t, client.commands[7], "node_server", "delete", map[string]string{"session_id": "r1"})
 	if _, ok := h.findHubSessionInfo("node_server", "r1"); ok {
 		t.Fatal("DeleteSession did not remove hub session from cache")
 	}

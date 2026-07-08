@@ -9505,6 +9505,11 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Mark session as unread (idle → waiting)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
+			if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
+				h.updateHubSessionStatus(item.HubNodeID, item.HubSession.ID, session.StatusWaiting)
+				h.rebuildFlatItems()
+				return h, h.hubSessionCommand(item, "mark_unread", nil)
+			}
 			if item.Type == session.ItemTypeSession && item.Session != nil {
 				tmuxSess := item.Session.GetTmuxSession()
 				if tmuxSess != nil {
@@ -13702,6 +13707,27 @@ func (h *Home) updateHubSessionTitle(nodeID, sessionID, title string) {
 	for i := range snapshot.Sessions {
 		if snapshot.Sessions[i].ID == sessionID {
 			snapshot.Sessions[i].Title = title
+			h.hubSessions[nodeID] = snapshot
+			return
+		}
+	}
+}
+
+func (h *Home) updateHubSessionStatus(nodeID, sessionID string, status session.Status) {
+	nodeID = strings.TrimSpace(nodeID)
+	sessionID = strings.TrimSpace(sessionID)
+	if nodeID == "" || sessionID == "" {
+		return
+	}
+	h.hubSessionsMu.Lock()
+	defer h.hubSessionsMu.Unlock()
+	snapshot, ok := h.hubSessions[nodeID]
+	if !ok {
+		return
+	}
+	for i := range snapshot.Sessions {
+		if snapshot.Sessions[i].ID == sessionID {
+			snapshot.Sessions[i].Status = string(status)
 			h.hubSessions[nodeID] = snapshot
 			return
 		}

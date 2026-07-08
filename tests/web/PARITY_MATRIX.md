@@ -55,7 +55,7 @@ Every keyboard action in the TUI that mutates state or navigates must have a web
 | Open settings panel | `internal/ui/home.go:6148` (`S` key) | GET `/api/settings` | N/A | `handlers_settings_test.go` | Read-only; displays profile, version |
 | **WORKFLOW & NAVIGATION** |
 | Prompt session | `internal/ui/home.go` (`o` key) | POST `/api/sessions/{id}/send` | `SendSessionPrompt` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | One-line prompt without attaching; web `o` opens PromptSessionDialog and supports hub sessions |
-| Mark session unread | `internal/ui/home.go:6366` (`u` key) | MISSING | N/A | N/A | idle → waiting transition |
+| Mark session unread | `internal/ui/home.go:6366` (`u` key) | POST `/api/sessions/{id}/unread` | `MarkSessionUnread` | `handlers_sessions_test.go`, `internal/web/parity_test.go`, `tests/web/e2e/keyboard-parity.spec.js` | idle → waiting transition; routes hub sessions through hub command `mark_unread` |
 | Quick approve | `internal/ui/home.go:6387` (default hotkey) | MISSING | N/A | N/A | Send "1"+Enter without attach |
 | Copy output | `internal/ui/home.go:6511` (`c` key) | MISSING | N/A | N/A | Last AI response → clipboard |
 | Copy session info | `internal/ui/home.go:6521` (`C`/`shift+c`) | MISSING | N/A | N/A | Repo/path/branch → clipboard |
@@ -166,8 +166,8 @@ tiers:
   (`/api/push/{subscribe,unsubscribe,presence}`). The fixture binary
   intentionally omits the SQLite cost store and the push service; happy-path
   coverage requires fixture wiring deferred to PR-B.
-- **MISSING-stays-missing** (regression guard, 404/405 expected): 2 of the
-  16 MISSING actions have plausible URL patterns probed by
+- **MISSING-stays-missing** (regression guard, 404/405 expected): 1 of the
+  15 MISSING actions have plausible URL patterns probed by
   `inferMissingProbe()` in `tests/web/helpers/parity-matrix.js`. The other
   14 are TUI-UX-only (search, copy, jump, help, …) where no plausible web
   endpoint exists — those rows are matrix-tracked but not URL-probed.
@@ -176,11 +176,11 @@ tiers:
 
 ### Action Parity
 - **Total TUI actions:** 52 (session/group/MCP/skills/settings/workflow/costs/push)
-- **Web endpoints implemented:** 36
-- **MISSING web actions:** 16 (~31% gap)
+- **Web endpoints implemented:** 37
+- **MISSING web actions:** 15 (~29% gap)
 - **Key gaps:**
   - Multi-repo path editor
-  - Inline notes editor and unread marking
+  - Inline notes editor
   - Content operations (copy/search/jump/navigation-only flows)
   - Fork-with-options dialog
   - Exec shell and TUI-only preview toggles
@@ -199,7 +199,7 @@ tiers:
 
 ### Sync Gaps (Actions)
 
-1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path and POST `/api/sessions/{id}/group` for group moves. Remaining gaps are narrower: inline notes (`e` textarea), multi-repo path editing, and unread marking.
+1. **Remaining Session Metadata Gaps**: Web has PATCH `/api/sessions/{id}` for the full EditSessionDialog settings path and POST `/api/sessions/{id}/group` for group moves. Remaining gaps are narrower: inline notes (`e` textarea) and multi-repo path editing.
 
 2. **MCP & Skill Management** (6 actions): MCPDialog and SkillDialog are TUI-only. They:
    - Write `.mcp.json` and project config

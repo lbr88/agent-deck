@@ -168,6 +168,25 @@ func TestParity_WebActionMatchesDirectMutator(t *testing.T) {
 			},
 		},
 		{
+			name: "mark_session_unread",
+			fire: func(t *testing.T, webFx, directFx *parityFixture) string {
+				_, _ = webFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				_, _ = directFx.store.CreateSession("seed", "claude", "/srv/seed", "work", "")
+				const id = "sess-005"
+
+				req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/unread", nil)
+				w := httptest.NewRecorder()
+				webFx.server.handleSessionByAction(w, req)
+				if w.Code != http.StatusOK {
+					t.Fatalf("web unread: status=%d body=%s", w.Code, w.Body.String())
+				}
+				if err := directFx.store.MarkSessionUnread(id); err != nil {
+					t.Fatalf("direct MarkSessionUnread: %v", err)
+				}
+				return id
+			},
+		},
+		{
 			// Web POST /api/groups vs direct CreateGroup mutator. Asserts both
 			// paths produce a snapshot containing the new group.
 			name: "create_group",
@@ -661,6 +680,17 @@ func (s *parityStore) SendSessionPrompt(id, message string) error {
 		return parityErr("message is required")
 	}
 	sess.LatestPrompt = message
+	return nil
+}
+
+func (s *parityStore) MarkSessionUnread(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		return errNotFound(id)
+	}
+	sess.Status = session.StatusWaiting
 	return nil
 }
 

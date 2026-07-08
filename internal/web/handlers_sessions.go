@@ -337,6 +337,21 @@ func (s *Server) handleSessionByAction(w http.ResponseWriter, r *http.Request) {
 				s.notifyMenuChanged()
 			}
 			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID})
+		case "unread":
+			if err := s.mutator.MarkSessionUnread(sessionID); err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					writeAPIError(w, http.StatusNotFound, ErrCodeNotFound, err.Error())
+					return
+				}
+				writeAPIError(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error())
+				return
+			}
+			if isHubSession {
+				s.notifyMenuChangedWithoutInvalidation()
+			} else {
+				s.notifyMenuChanged()
+			}
+			writeJSON(w, http.StatusOK, SessionActionResponse{SessionID: sessionID, Status: session.StatusWaiting})
 		case "fork":
 			newID, err := s.mutator.ForkSession(sessionID)
 			if err != nil {

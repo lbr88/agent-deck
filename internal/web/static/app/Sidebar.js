@@ -46,6 +46,7 @@ function doAction(action, s) {
   if (action === 'restart') return apiFetch('POST', `/api/sessions/${id}/restart`).catch(() => {})
   if (action === 'restartFresh') return apiFetch('POST', `/api/sessions/${id}/restart-fresh`).catch(() => {})
   if (action === 'toggleYolo') return apiFetch('POST', `/api/sessions/${id}/toggle-yolo`).catch(() => {})
+  if (action === 'unread') return apiFetch('POST', `/api/sessions/${id}/unread`).catch(() => {})
   if (action === 'fork')    return apiFetch('POST', `/api/sessions/${id}/fork`, { title: s.title + '-fork' }).catch(() => {})
   if (action === 'remove') {
     confirmDialogSignal.value = {
@@ -156,6 +157,7 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           <button class="mini" title="Toggle YOLO / auto-approve" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>YOLO</button>
         `}
         <button class="mini" title="Close process; keep metadata" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>D</button>
+        <button class="mini" title="Mark unread / needs attention" data-testid="session-unread-btn" onClick=${() => doAction('unread', s)}>u</button>
         <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
         <button class="mini" title="Move to group" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>M</button>
         <button class="mini" title="Edit" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}><${Icon} d=${ICONS.edit} size=${12}/></button>

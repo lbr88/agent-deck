@@ -146,6 +146,16 @@ test.describe('keyboard parity (#780)', () => {
     await expect(dialog).toContainText(/prompt session/i)
   })
 
+  test('u marks the focused session unread', async ({ page, request }) => {
+    await page.keyboard.press('u')
+    await expect.poll(async () => {
+      const res = await request.get('/api/sessions')
+      expect(res.status()).toBe(200)
+      const body = await res.json()
+      return body.sessions.find(s => s.id === 'sess-001')?.status
+    }).toBe('waiting')
+  })
+
   test('Shift+M opens the move session dialog', async ({ page }) => {
     await page.keyboard.down('Shift')
     await page.keyboard.press('M')

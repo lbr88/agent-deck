@@ -123,6 +123,7 @@ func TestCommandDispatcherParityActionsUseBackend(t *testing.T) {
 		{"unarchive", "unarchive:s1"},
 		{"remove", "remove:s1"},
 		{"toggle_yolo", "toggle_yolo:s1"},
+		{"mark_unread", "mark_unread:s1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.action, func(t *testing.T) {
@@ -357,6 +358,11 @@ func (b *fakeActionBackend) Update(_ context.Context, req UpdateSessionRequest) 
 
 func (b *fakeActionBackend) ToggleYolo(_ context.Context, sessionID string) error {
 	b.lastAction = "toggle_yolo:" + sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) MarkUnread(_ context.Context, sessionID string) error {
+	b.lastAction = "mark_unread:" + sessionID
 	return nil
 }
 

@@ -71,11 +71,45 @@ func TestHubSessionsUsageDocumentsAllNativeActions(t *testing.T) {
 		"unarchive",
 		"remove",
 		"toggle-yolo",
+		"unread",
 		"preview",
 	} {
 		if !strings.Contains(text, action) {
 			t.Fatalf("hub sessions usage missing %q:\n%s", action, text)
 		}
+	}
+}
+
+func TestRunHubSessionUnreadUsesHubMarkUnreadAction(t *testing.T) {
+	client := &fakeHubSessionsClient{}
+	snapshots := []hub.NodeSessions{{
+		Node: hub.Node{ID: "node_work", Name: "work"},
+		Sessions: []hub.SessionInfo{{
+			ID:    "sess_api",
+			Title: "api",
+		}},
+	}}
+
+	result, err := runHubSessionWithClient(context.Background(), client, snapshots, hubSessionOptions{
+		Action:    "mark_unread",
+		NodeID:    "work",
+		SessionID: "api",
+	})
+	if err != nil {
+		t.Fatalf("runHubSessionWithClient mark_unread: %v", err)
+	}
+	if result.SessionID != "sess_api" || result.Action != "mark_unread" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(client.commands) != 1 || client.commands[0].nodeID != "node_work" || client.commands[0].action != "mark_unread" {
+		t.Fatalf("commands = %+v", client.commands)
+	}
+	payload, ok := client.commands[0].payload.(map[string]string)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]string", client.commands[0].payload)
+	}
+	if payload["session_id"] != "sess_api" {
+		t.Fatalf("mark_unread payload = %+v", payload)
 	}
 }
 

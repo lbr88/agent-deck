@@ -91,6 +91,7 @@ function WorkHead() {
           <button class="btn ghost" onClick=${() => action('restart')}><${Icon} d=${ICONS.restart} size=${12}/>Restart</button>
           <button class="btn ghost" onClick=${() => action('restart-fresh')}>Fresh</button>
           ${supportsYolo && html`<button class="btn ghost" onClick=${() => action('toggle-yolo')}>YOLO</button>`}
+          <button class="btn ghost" onClick=${() => action('unread')}>Unread</button>
           <button class="btn ghost" onClick=${() => (promptSessionDialogSignal.value = { sessionId: session.id })}>Prompt</button>
           <button class="btn ghost" onClick=${() => (moveSessionDialogSignal.value = { sessionId: session.id })}>Move</button>
           ${session.canFork && html`<button class="btn" onClick=${() => action('fork')}><${Icon} d=${ICONS.fork} size=${12}/>Fork</button>`}
@@ -305,6 +306,13 @@ export function AppShell() {
         if (s) {
           e.preventDefault()
           promptSessionDialogSignal.value = { sessionId: s.id }
+        }
+      } else if (e.key === 'u') {
+        if (!mutationsEnabledSignal.value) return
+        const s = focusedSession()
+        if (s) {
+          e.preventDefault()
+          apiFetch('POST', `/api/sessions/${s.id}/unread`).catch(() => {})
         }
       } else if (e.key === 'M') {
         if (!mutationsEnabledSignal.value) return

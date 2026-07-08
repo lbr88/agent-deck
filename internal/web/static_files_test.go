@@ -147,11 +147,13 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 	for _, want := range []string{
 		"/restart-fresh",
 		"/toggle-yolo",
+		"/unread",
 		"/remove",
 		"session-restart-fresh-btn",
 		"session-toggle-yolo-btn",
 		"session-remove-btn",
 		"session-close-btn",
+		"session-unread-btn",
 		"session-move-btn",
 		"session-prompt-btn",
 	} {
@@ -177,7 +179,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 		t.Fatalf("ReadFile(AppShell.js): %v", err)
 	}
 	appShellBody := string(appShell)
-	for _, want := range []string{"restart-fresh", "toggle-yolo", "MoveSessionDialog", "PromptSessionDialog"} {
+	for _, want := range []string{"restart-fresh", "toggle-yolo", "unread", "MoveSessionDialog", "PromptSessionDialog"} {
 		if !strings.Contains(appShellBody, want) {
 			t.Fatalf("AppShell.js missing %q; focused session header must expose native action parity", want)
 		}
@@ -187,7 +189,7 @@ func TestWebUIExposesNativeSessionActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(KeyboardShortcuts.js): %v", err)
 	}
-	for _, want := range []string{"Prompt focused session", "Move focused session to group"} {
+	for _, want := range []string{"Mark focused session unread", "Prompt focused session", "Move focused session to group"} {
 		if !strings.Contains(string(shortcuts), want) {
 			t.Fatalf("KeyboardShortcuts.js missing %q; shortcut overlay must expose native action parity", want)
 		}

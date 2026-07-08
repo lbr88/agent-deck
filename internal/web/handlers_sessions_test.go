@@ -35,6 +35,7 @@ type fakeMutator struct {
 	updateSessionFn    func(id string, updates map[string]string) ([]string, bool, []string, error)
 	moveSessionFn      func(id, groupPath string) error
 	sendSessionFn      func(id, message string) error
+	markUnreadFn       func(id string) error
 	createGroupFn      func(name, parentPath string) (string, error)
 	renameGroupFn      func(groupPath, newName string) error
 	deleteGroupFn      func(groupPath string) error
@@ -163,6 +164,13 @@ func (f *fakeMutator) SendSessionPrompt(id, message string) error {
 		return fmt.Errorf("sendSessionPrompt not configured")
 	}
 	return f.sendSessionFn(id, message)
+}
+
+func (f *fakeMutator) MarkSessionUnread(id string) error {
+	if f.markUnreadFn == nil {
+		return fmt.Errorf("markSessionUnread not configured")
+	}
+	return f.markUnreadFn(id)
 }
 
 func (f *fakeMutator) CreateGroup(name, parentPath string) (string, error) {
@@ -565,6 +573,13 @@ func TestSessionAdditionalNativeActionsOK(t *testing.T) {
 			path: "/api/sessions/test-id/toggle-yolo",
 			wireFn: func(m *fakeMutator, got *string) {
 				m.toggleYoloFn = func(id string) error { *got = id; return nil }
+			},
+		},
+		{
+			name: "mark unread",
+			path: "/api/sessions/test-id/unread",
+			wireFn: func(m *fakeMutator, got *string) {
+				m.markUnreadFn = func(id string) error { *got = id; return nil }
 			},
 		},
 	}
