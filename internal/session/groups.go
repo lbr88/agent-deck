@@ -26,6 +26,7 @@ const (
 	ItemTypeSession
 	ItemTypeRemoteGroup
 	ItemTypeRemoteSession
+	ItemTypeHubNode
 	ItemTypeHubGroup
 	ItemTypeHubSession
 	ItemTypeWindow
@@ -39,7 +40,7 @@ type Item struct {
 	Session             *Instance
 	RemoteSession       *RemoteSessionInfo // Set for ItemTypeRemoteSession/ItemTypeRemoteGroup
 	RemoteName          string             // Remote name for remote items
-	HubNodeID           string             // Hub node owner for hub items
+	HubNodeID           string             // Hub node owner for hub items; set for ItemTypeHubNode too
 	HubNodeName         string             // Display name for hub node items
 	HubGroupPath        string             // Original group path within the hub node
 	HubSession          *HubSessionInfo    // Set for ItemTypeHubSession

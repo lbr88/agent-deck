@@ -686,6 +686,7 @@ type selectedItemIdentity struct {
 	remoteGroupPath       string
 	remoteGroupOccurrence int
 	hubNodeID             string
+	hubNodeOnly           bool
 	hubSessionID          string
 	hubGroupPath          string
 	hubGroupOccurrence    int
@@ -2194,6 +2195,9 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 			identity.remoteName = item.RemoteName
 			identity.remoteSessionID = item.RemoteSession.ID
 		}
+	case session.ItemTypeHubNode:
+		identity.hubNodeID = item.HubNodeID
+		identity.hubNodeOnly = true
 	case session.ItemTypeHubGroup:
 		identity.hubNodeID = item.HubNodeID
 		identity.hubGroupPath = item.HubGroupPath
@@ -2238,6 +2242,9 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 				remoteGroupOccurrence--
 				continue
 			}
+			h.cursor = i
+			return true
+		case identity.hubNodeOnly && item.Type == session.ItemTypeHubNode && item.HubNodeID == identity.hubNodeID:
 			h.cursor = i
 			return true
 		case identity.hubSessionID != "" && item.Type == session.ItemTypeHubSession && item.HubSession != nil && item.HubNodeID == identity.hubNodeID && item.HubSession.ID == identity.hubSessionID:
@@ -2542,6 +2549,11 @@ func hubItemPath(nodeID, groupPath string) string {
 	return "hub/" + nodeID + "/" + groupPath
 }
 
+func hubNodeItemPath(nodeID string) string {
+	nodeID = strings.Trim(strings.TrimSpace(nodeID), "/")
+	return "hub/" + nodeID
+}
+
 func hubSessionStatus(info session.HubSessionInfo) session.Status {
 	return session.Status(strings.TrimSpace(info.Status))
 }
@@ -2628,6 +2640,9 @@ func (h *Home) projectHubItems() []session.Item {
 			continue
 		}
 		nodeID := strings.TrimSpace(node.Node.ID)
+		if nodeID == "" {
+			continue
+		}
 		nodeName := hubNodeDisplayName(node)
 		byGroup := make(map[string][]session.HubSessionInfo)
 		for _, info := range node.Sessions {
@@ -2658,6 +2673,21 @@ func (h *Home) projectHubItems() []session.Item {
 			groupPaths = append(groupPaths, groupPath)
 		}
 		sort.Strings(groupPaths)
+		if len(groupPaths) == 0 {
+			groupPath := session.DefaultGroupPath
+			if h.groupScope != "" {
+				groupPath = h.groupScope
+			}
+			items = append(items, session.Item{
+				Type:         session.ItemTypeHubNode,
+				HubNodeID:    nodeID,
+				HubNodeName:  nodeName,
+				HubGroupPath: groupPath,
+				Path:         hubNodeItemPath(nodeID),
+				Level:        0,
+			})
+			continue
+		}
 		for _, groupPath := range groupPaths {
 			sessions := byGroup[groupPath]
 			path := hubItemPath(nodeID, groupPath)
@@ -7481,6 +7511,7 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if h.pendingRemoteName != "" {
 			remoteName := h.pendingRemoteName
 			name, path, command := h.newDialog.GetRemoteValues()
+			command = remoteDialogTool(command)
 			groupPath := h.newDialog.GetSelectedGroup()
 			// Remember the submitted tool for the next dialog open (UX top-3 #2).
 			rememberTool(h.stateDB(), command)
@@ -7493,6 +7524,7 @@ func (h *Home) handleNewDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			nodeID := h.pendingHubNodeID
 			nodeName := h.pendingHubNodeName
 			name, path, command := h.newDialog.GetRemoteValues()
+			command = remoteDialogTool(command)
 			groupPath := h.newDialog.GetSelectedGroup()
 			rememberTool(h.stateDB(), command)
 			h.newDialog.Hide()
@@ -7708,6 +7740,14 @@ func (h *Home) showRemoteNewSessionDialog(item session.Item) {
 	h.newDialog.rebuildFocusTargets()
 }
 
+func remoteDialogTool(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "shell"
+	}
+	return command
+}
+
 func (h *Home) showHubNewSessionDialog(item session.Item) {
 	nodeID := strings.TrimSpace(item.HubNodeID)
 	if nodeID == "" {
@@ -7721,7 +7761,12 @@ func (h *Home) showHubNewSessionDialog(item session.Item) {
 	groupName := groupPath
 	defaultPath := "."
 	tool := ""
-	if item.HubSession != nil {
+	if item.Type == session.ItemTypeHubNode {
+		if groupPath == "" {
+			groupPath = session.DefaultGroupPath
+		}
+		groupName = hubDisplayGroupPath(h.pendingHubNodeName, groupPath)
+	} else if item.HubSession != nil {
 		if groupPath == "" {
 			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
 			groupName = groupPath
@@ -7890,6 +7935,8 @@ func jumpItemName(item session.Item) string {
 		if item.RemoteSession != nil {
 			return item.RemoteSession.Title
 		}
+	case session.ItemTypeHubNode:
+		return strings.TrimSpace(item.HubNodeName)
 	case session.ItemTypeHubGroup:
 		return hubDisplayGroupPath(item.HubNodeName, item.HubGroupPath)
 	case session.ItemTypeHubSession:
@@ -7935,7 +7982,7 @@ func (h *Home) handleJumpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// For sessions/windows/remotes: attach directly.
 			// For groups: just move cursor (user can press Enter to toggle).
 			item := h.flatItems[h.cursor]
-			if item.Type != session.ItemTypeGroup && item.Type != session.ItemTypeRemoteGroup && item.Type != session.ItemTypeHubGroup {
+			if item.Type != session.ItemTypeGroup && item.Type != session.ItemTypeRemoteGroup && item.Type != session.ItemTypeHubNode && item.Type != session.ItemTypeHubGroup {
 				return h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
 			}
 			return h, nil
@@ -8934,7 +8981,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				h.showRemoteNewSessionDialog(item)
 				return h, nil
 			}
-			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+			if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
 				h.showHubNewSessionDialog(item)
 				return h, nil
 			}
@@ -9043,7 +9090,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if item.Type == session.ItemTypeRemoteGroup || item.Type == session.ItemTypeRemoteSession {
 				return h, h.createRemoteSession(item.RemoteName)
 			}
-			if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+			if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
 				return h, h.createHubSession(item)
 			}
 		}
@@ -13209,7 +13256,7 @@ func (h *Home) hubSessionCommand(item session.Item, action string, extra map[str
 }
 
 func (h *Home) createHubSession(item session.Item) tea.Cmd {
-	if item.Type != session.ItemTypeHubGroup && item.Type != session.ItemTypeHubSession {
+	if item.Type != session.ItemTypeHubNode && item.Type != session.ItemTypeHubGroup && item.Type != session.ItemTypeHubSession {
 		return nil
 	}
 	nodeID := strings.TrimSpace(item.HubNodeID)
@@ -13217,6 +13264,10 @@ func (h *Home) createHubSession(item session.Item) tea.Cmd {
 	groupPath := strings.TrimSpace(item.HubGroupPath)
 	projectPath := ""
 	tool := ""
+	if item.Type == session.ItemTypeHubNode {
+		projectPath = "."
+		tool = resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB()))
+	}
 	if item.HubSession != nil {
 		if groupPath == "" {
 			groupPath = strings.TrimSpace(item.HubSession.GroupPath)
@@ -13227,6 +13278,13 @@ func (h *Home) createHubSession(item session.Item) tea.Cmd {
 	if groupPath == "" {
 		groupPath = session.DefaultGroupPath
 	}
+	if projectPath == "" {
+		projectPath = "."
+	}
+	if tool == "" {
+		tool = resolveInitialTool(session.GetDefaultTool(), rememberedTool(h.stateDB()))
+	}
+	tool = remoteDialogTool(tool)
 	req := hub.CreateSessionRequest{
 		Title:       session.GenerateSessionName(),
 		Tool:        tool,
@@ -15966,6 +16024,9 @@ func (h *Home) curatedContextHints(item session.Item) []footerHint {
 		// remote rows (PR #1289 review nit 1).
 		add("⏎", "attach")
 
+	case session.ItemTypeHubNode:
+		add(newQuick, "new")
+
 	case session.ItemTypeHubSession:
 		add("⏎", "attach")
 		add(newQuick, "new")
@@ -16337,6 +16398,8 @@ func (h *Home) renderItem(
 		h.renderRemoteGroupItem(b, item, selected)
 	case session.ItemTypeRemoteSession:
 		h.renderRemoteSessionItem(b, item, selected)
+	case session.ItemTypeHubNode:
+		h.renderHubNodeItem(b, item, selected)
 	case session.ItemTypeHubGroup:
 		h.renderHubGroupItem(b, item, selected)
 	case session.ItemTypeHubSession:
@@ -17034,6 +17097,21 @@ func (h *Home) renderRemotePreview(item session.Item, width, height int) string 
 }
 
 func (h *Home) renderHubPreview(item session.Item, width, height int) string {
+	if item.Type == session.ItemTypeHubNode {
+		nodeName := strings.TrimSpace(item.HubNodeName)
+		if nodeName == "" {
+			nodeName = strings.TrimSpace(item.HubNodeID)
+		}
+		if nodeName == "" {
+			nodeName = "hub"
+		}
+		return renderEmptyStateResponsive(EmptyStateConfig{
+			Icon:     "⬡",
+			Title:    nodeName,
+			Subtitle: "Hub node — no visible sessions",
+			Hints:    []string{"Press n to create a session on this node", "Press N to quick-create on this node"},
+		}, width, height)
+	}
 	if item.Type == session.ItemTypeHubGroup {
 		stats := h.hubGroupStats(item.HubNodeID, item.HubGroupPath)
 		return renderEmptyStateResponsive(EmptyStateConfig{
@@ -17279,6 +17357,33 @@ func (h *Home) renderHubGroupItem(b *strings.Builder, item session.Item, selecte
 		nameStyle.Render(label),
 		countStyle.Render(fmt.Sprintf(" (%d)", stats.sessionCount)),
 		statusStr,
+	))
+}
+
+func (h *Home) renderHubNodeItem(b *strings.Builder, item session.Item, selected bool) {
+	label := strings.TrimSpace(item.HubNodeName)
+	if label == "" {
+		label = strings.TrimSpace(item.HubNodeID)
+	}
+	if label == "" {
+		label = "hub"
+	}
+
+	nameStyle := GroupNameStyle
+	countStyle := GroupCountStyle
+	nodeIcon := GroupExpandStyle.Render("⬡")
+	if selected {
+		nameStyle = GroupNameSelStyle
+		countStyle = GroupCountSelStyle
+		nodeIcon = GroupExpandSelStyle.Render("⬡")
+	}
+
+	b.WriteString(fmt.Sprintf(
+		"%s%s %s%s\n",
+		strings.Repeat(" ", leftGutterWidth),
+		nodeIcon,
+		nameStyle.Render(label),
+		countStyle.Render(" (0)"),
 	))
 }
 
@@ -17791,7 +17896,7 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		return h.renderGroupPreview(item.Group, width, height)
 	}
 
-	if item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
+	if item.Type == session.ItemTypeHubNode || item.Type == session.ItemTypeHubGroup || item.Type == session.ItemTypeHubSession {
 		return h.renderHubPreview(item, width, height)
 	}
 

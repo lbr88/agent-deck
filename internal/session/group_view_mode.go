@@ -153,7 +153,7 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 		return it.Type == ItemTypeSession || it.Type == ItemTypeRemoteSession || it.Type == ItemTypeHubSession
 	}
 	isGroupRow := func(it Item) bool {
-		return it.Type == ItemTypeGroup || it.Type == ItemTypeRemoteGroup || it.Type == ItemTypeHubGroup
+		return it.Type == ItemTypeGroup || it.Type == ItemTypeRemoteGroup || it.Type == ItemTypeHubNode || it.Type == ItemTypeHubGroup
 	}
 	itemStatus := func(it Item) Status {
 		switch it.Type {
@@ -246,7 +246,7 @@ func PartitionByViewMode(items []Item, mode GroupViewMode, activity map[string]G
 	bottom := make([]Item, 0, len(items))
 	for _, it := range items {
 		switch it.Type {
-		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubGroup:
+		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubNode, ItemTypeHubGroup:
 			inTop := hasTopRow[it.Path]
 			inBottom := hasBottomRow[it.Path]
 			if !inTop && !inBottom {
@@ -357,7 +357,7 @@ func partitionActiveTopInactiveSections(top, bottom []Item) []Item {
 	done := make([]Item, 0, len(bottom))
 	for _, it := range bottom {
 		switch it.Type {
-		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubGroup:
+		case ItemTypeGroup, ItemTypeRemoteGroup, ItemTypeHubNode, ItemTypeHubGroup:
 			inIdle := hasIdleRow[it.Path]
 			inDone := hasDoneRow[it.Path]
 			if !inIdle && !inDone {

@@ -312,6 +312,103 @@ func TestHubSessionNOpensNewSessionDialog(t *testing.T) {
 	}
 }
 
+func TestHubEmptyNodeNOpensNewSessionDialog(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node:     hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: nil,
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	view := h.View()
+	if !strings.Contains(view, "server1") {
+		t.Fatalf("view missing empty hub node short name:\n%s", view)
+	}
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	h = model.(*Home)
+	if cmd != nil {
+		t.Fatal("n on empty hub node should open dialog without command")
+	}
+	if !h.newDialog.IsVisible() {
+		t.Fatal("n on empty hub node should open the new-session dialog")
+	}
+	if h.pendingHubNodeID != "node_server" || h.pendingHubNodeName != "server1" {
+		t.Fatalf("pending hub target = %q/%q, want node_server/server1", h.pendingHubNodeID, h.pendingHubNodeName)
+	}
+	if got := h.newDialog.GetSelectedGroup(); got != session.DefaultGroupPath {
+		t.Fatalf("selected group = %q, want %q", got, session.DefaultGroupPath)
+	}
+
+	h.newDialog.nameInput.SetValue("worker")
+	model, cmd = h.handleNewDialogKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("submitting hub node dialog returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("hub node create command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands after submit = %d, want 1", len(client.commands))
+	}
+	if got := client.commands[0]; got.nodeID != "node_server" || got.action != "create" {
+		t.Fatalf("hub node create command = %+v", got)
+	}
+	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	}
+	if req.Title != "worker" || req.GroupPath != session.DefaultGroupPath || req.ProjectPath != "." || strings.TrimSpace(req.Tool) == "" {
+		t.Fatalf("hub node create request = %+v", req)
+	}
+}
+
+func TestHubEmptyNodeShiftNQuickCreatesThroughHubCommand(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	client := &fakeHubAttachClient{}
+	h.hubClient = client
+	h.hubSessions = map[string]hub.NodeSessions{
+		"node_server": {
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+		},
+	}
+	h.rebuildFlatItems()
+	h.cursor = indexHubNode(t, h, "node_server")
+
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("N on empty hub node returned no command")
+	}
+	if msg := cmd(); msg.(hubActionResultMsg).err != nil {
+		t.Fatalf("N hub node command error = %v", msg.(hubActionResultMsg).err)
+	}
+	if h.newDialog.IsVisible() {
+		t.Fatal("N on empty hub node should not open dialog")
+	}
+	if len(client.commands) != 1 {
+		t.Fatalf("hub commands after N = %d, want 1", len(client.commands))
+	}
+	req, ok := client.commands[0].payload.(hub.CreateSessionRequest)
+	if !ok {
+		t.Fatalf("payload type = %T, want hub.CreateSessionRequest", client.commands[0].payload)
+	}
+	if client.commands[0].nodeID != "node_server" || client.commands[0].action != "create" ||
+		req.GroupPath != session.DefaultGroupPath || req.ProjectPath != "." || strings.TrimSpace(req.Title) == "" {
+		t.Fatalf("quick hub node create = command=%+v req=%+v", client.commands[0], req)
+	}
+}
+
 func TestHubSessionShiftNQuickCreatesThroughHubCommand(t *testing.T) {
 	h, client := newHubActionHome(t)
 
@@ -864,5 +961,16 @@ func indexHubSession(t *testing.T, h *Home, id string) int {
 		}
 	}
 	t.Fatalf("hub session %q not found in flatItems: %+v", id, h.flatItems)
+	return -1
+}
+
+func indexHubNode(t *testing.T, h *Home, nodeID string) int {
+	t.Helper()
+	for i, item := range h.flatItems {
+		if item.Type == session.ItemTypeHubNode && item.HubNodeID == nodeID {
+			return i
+		}
+	}
+	t.Fatalf("hub node %q not found in flatItems: %+v", nodeID, h.flatItems)
 	return -1
 }
