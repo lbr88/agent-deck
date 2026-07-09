@@ -276,12 +276,9 @@ body[data-rail="hidden"] .rightrail { display: none; }
   z-index: 2;
   display: none; gap: 1px; background: var(--panel-2); border-radius: 4px;
   padding: 2px; border: 1px solid var(--border);
-  /* The hover overlay is absolutely positioned over the row. As more action
-     buttons are added (Edit landed alongside Start/Restart/Fork/Delete) the bar
-     grows leftward and can cover the row's hit-test centre, swallowing the
-     click that should select the session. Make the container transparent to
-     pointer events so clicks between/around buttons fall through to the row;
-     each .mini re-enables pointer events for its own click. */
+  /* Keep the row-level affordance intentionally narrow. Full action parity
+     lives in the More menu; inline hover buttons grow leftward and cover the
+     title/meta hit target, making sessions hard to see and select. */
   pointer-events: none;
 }
 .sess:hover .actions { display: flex; }

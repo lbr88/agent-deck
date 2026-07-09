@@ -145,6 +145,10 @@ func TestWebSidebarSessionActionsUseMoreMenu(t *testing.T) {
 	for _, want := range []string{
 		`data-testid="session-more-btn"`,
 		`data-testid="session-more-menu"`,
+		`data-testid="session-start-btn"`,
+		`data-testid="session-stop-btn"`,
+		`data-testid="session-restart-btn"`,
+		`data-testid="session-prompt-btn"`,
 		`Prompt without attaching`,
 		`Sandbox shell`,
 		`Restart fresh`,
@@ -153,6 +157,25 @@ func TestWebSidebarSessionActionsUseMoreMenu(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Sidebar.js missing %q; session rows must keep uncommon actions behind More", want)
+		}
+	}
+	actionStart := strings.Index(body, `<div class="actions"`)
+	if actionStart < 0 {
+		t.Fatal("Sidebar.js missing session row action/menu structure")
+	}
+	menuStart := strings.Index(body[actionStart:], `data-testid="session-more-menu"`)
+	if menuStart < 0 {
+		t.Fatal("Sidebar.js missing session row More menu")
+	}
+	actionBody := body[actionStart : actionStart+menuStart]
+	for _, forbiddenInline := range []string{
+		`data-testid="session-start-btn"`,
+		`data-testid="session-stop-btn"`,
+		`data-testid="session-restart-btn"`,
+		`data-testid="session-prompt-btn"`,
+	} {
+		if strings.Contains(actionBody, forbiddenInline) {
+			t.Fatalf("Sidebar.js renders %q before the More menu; row hover actions must stay compact so session titles remain clickable", forbiddenInline)
 		}
 	}
 	css, err := embeddedStaticFiles.ReadFile("static/app/app.css")

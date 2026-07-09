@@ -261,13 +261,13 @@ function SessionItem({ s, sel, onSelect, showCols }) {
         </div>
       `}
       <div class="actions" onClick=${e => e.stopPropagation()}>
-        ${(s.status === 'running' || s.status === 'waiting')
-          ? html`<button class="mini" title="Stop" data-testid="session-stop-btn" onClick=${() => doAction('stop', s)}><${Icon} d=${ICONS.stop} size=${12}/></button>`
-          : html`<button class="mini good" title="Start" data-testid="session-start-btn" onClick=${() => doAction('start', s)}><${Icon} d=${ICONS.play} size=${12}/></button>`}
-        <button class="mini good" title="Restart" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}><${Icon} d=${ICONS.restart} size=${12}/></button>
-        <button class="mini" title="Prompt without attaching" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>o</button>
         <button class="mini" title="More actions" data-testid="session-more-btn" aria-haspopup="menu">⋯</button>
         <div class="more-menu" role="menu" data-testid="session-more-menu">
+          ${(s.status === 'running' || s.status === 'waiting')
+            ? html`<button role="menuitem" data-testid="session-stop-btn" onClick=${() => doAction('stop', s)}>Stop</button>`
+            : html`<button role="menuitem" data-testid="session-start-btn" onClick=${() => doAction('start', s)}>Start</button>`}
+          <button role="menuitem" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}>Restart</button>
+          <button role="menuitem" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>Prompt without attaching</button>
           <button role="menuitem" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}>Edit</button>
           <button role="menuitem" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>Notes</button>
           <button role="menuitem" data-testid="session-send-output-btn" onClick=${() => doAction('sendOutput', s)}>Send output</button>

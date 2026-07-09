@@ -13,8 +13,8 @@
 //   sess-004 "scratch"       status=idle
 //
 // Source audit notes (assertions pinned to these):
-//   - Action buttons live in `.sess .actions` which is `display:none` until
-//     `.sess:hover` (app.css), so every test hovers the row first.
+//   - Row actions are intentionally collapsed behind the More button so the
+//     hover affordance never covers the clickable title area.
 //   - Status renders as `<span class="dot <status>">` (icons.js Dot); the
 //     fixture transitions are start/restart→running, stop→stopped.
 //   - Fork button only renders when `s.canFork` (Sidebar.js). The fixture
@@ -68,8 +68,7 @@ test.describe('sidebar session action buttons', () => {
     const row = rowFor(page, 'scratch') // sess-004, seeded idle
     await expect(row.locator('.dot.idle')).toHaveCount(1)
 
-    await row.hover() // actions bar is display:none until row hover
-    await row.locator('[data-testid="session-start-btn"]').click()
+    await clickMoreAction(row, 'session-start-btn')
 
     // Fixture StartSession → status=running; notifyMenuChanged pushes the
     // new snapshot over SSE and the Dot re-renders.
@@ -84,8 +83,7 @@ test.describe('sidebar session action buttons', () => {
     const row = rowFor(page, 'frontend') // sess-002, the only seeded running session
     await expect(row.locator('.dot.running')).toHaveCount(1)
 
-    await row.hover()
-    await row.locator('[data-testid="session-stop-btn"]').click()
+    await clickMoreAction(row, 'session-stop-btn')
 
     // Fixture StopSession → status=stopped (parity-actions pins the API).
     await expect(row.locator('.dot.stopped')).toHaveCount(1, { timeout: 4000 })
@@ -103,9 +101,20 @@ test.describe('sidebar session action buttons', () => {
     await expect(page.locator('[data-testid="session-restart-btn"]')).toHaveCount(SEEDED_COUNT)
 
     const row = rowFor(page, 'innotrade-api') // sess-003, seeded idle
-    await row.hover()
-    await row.locator('[data-testid="session-restart-btn"]').click()
+    await clickMoreAction(row, 'session-restart-btn')
     await expect(row.locator('.dot.running')).toHaveCount(1, { timeout: 4000 })
+  })
+
+  test('hover action affordance does not block clicking the session title', async ({ page }) => {
+    await gotoSidebar(page)
+    const row = rowFor(page, 'scratch')
+
+    await row.hover()
+    await expect(row.locator('[data-testid="session-more-btn"]')).toBeVisible()
+
+    await row.locator('.titleline').click()
+    await expect(row).toHaveClass(/\bsel\b/)
+    await expect(page.locator('.work-head .cur')).toHaveText('scratch')
   })
 
   test('Fork button is hidden for non-forkable seeded sessions (canFork=false)', async ({ page }) => {
