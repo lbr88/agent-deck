@@ -42,7 +42,7 @@ function rowFor(page, title) {
 async function openMore(row) {
   await row.hover()
   const more = row.locator('[data-testid="session-more-btn"]')
-  await more.focus()
+  await more.click()
   await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
 }
 
@@ -105,16 +105,43 @@ test.describe('sidebar session action buttons', () => {
     await expect(row.locator('.dot.running')).toHaveCount(1, { timeout: 4000 })
   })
 
-  test('hover action affordance does not block clicking the session title', async ({ page }) => {
+  test('hover shows only the compact affordance and never opens the action list', async ({ page }) => {
     await gotoSidebar(page)
     const row = rowFor(page, 'scratch')
+    const more = row.locator('[data-testid="session-more-btn"]')
+    const menu = row.locator('[data-testid="session-more-menu"]')
 
     await row.hover()
-    await expect(row.locator('[data-testid="session-more-btn"]')).toBeVisible()
+    await expect(more).toBeVisible()
+    await expect(menu).toBeHidden()
+
+    await more.hover()
+    await expect(menu).toBeHidden()
 
     await row.locator('.titleline').click()
     await expect(row).toHaveClass(/\bsel\b/)
     await expect(page.locator('.work-head .cur')).toHaveText('scratch')
+  })
+
+  test('clicking More opens a viewport-bounded compact action palette', async ({ page }) => {
+    await gotoSidebar(page)
+    const row = rowFor(page, 'scratch')
+    const menu = row.locator('[data-testid="session-more-menu"]')
+
+    await openMore(row)
+    const box = await menu.boundingBox()
+    const viewport = page.viewportSize()
+    expect(box).not.toBeNull()
+    expect(box.x).toBeGreaterThanOrEqual(0)
+    expect(box.y).toBeGreaterThanOrEqual(0)
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width)
+    expect(box.y + box.height).toBeLessThanOrEqual(viewport.height)
+    expect(box.width).toBeLessThanOrEqual(320)
+    expect(box.height).toBeLessThanOrEqual(360)
+    expect(await menu.evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length)).toBe(2)
+
+    await page.locator('.work-head').click()
+    await expect(menu).toBeHidden()
   })
 
   test('Fork button is hidden for non-forkable seeded sessions (canFork=false)', async ({ page }) => {

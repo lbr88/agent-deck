@@ -155,11 +155,11 @@ test.describe('read-only mode (webMutations=false)', () => {
     await gotoHydratedReadOnlyApp(page)
     // Per Sidebar.js the per-row action surface is NOT gated at render time;
     // doAction() rejects with addToast('mutations disabled') before any
-    // apiFetch. Hover/focus to reveal the action bar and More menu.
+    // apiFetch. Hover to reveal the compact affordance, then click More.
     const row = page.locator('.sess').first()
     await row.hover()
     const more = row.locator('[data-testid="session-more-btn"]')
-    await more.focus()
+    await more.click()
     await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
     const delBtn = row.locator('[data-testid="session-delete-btn"]')
     await expect(delBtn).toBeVisible()

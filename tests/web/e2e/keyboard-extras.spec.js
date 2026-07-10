@@ -37,7 +37,7 @@ async function waitForAppMount(page) {
 async function openMore(row) {
   await row.hover()
   const more = row.locator('[data-testid="session-more-btn"]')
-  await more.focus()
+  await more.click()
   await expect(row.locator('[data-testid="session-more-menu"]')).toBeVisible()
 }
 

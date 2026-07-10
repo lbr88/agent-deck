@@ -6,7 +6,7 @@
 //
 // Action handlers route through apiFetch; mutations gated by mutationsEnabledSignal.
 import { html } from 'htm/preact'
-import { useState, useMemo } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { Icon, ICONS, Dot, kindSigil } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
 import {
@@ -220,6 +220,9 @@ function doGroupAction(action, g) {
 
 function SessionItem({ s, sel, onSelect, showCols }) {
   const [exp, setExp] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuPosition, setMenuPosition] = useState({ top: 8, left: 8 })
+  const actionsRef = useRef(null)
   const mcpCount = (s.mcps || []).length
   const skillCount = (s.skills || []).length
   const hasSubline =
@@ -227,6 +230,52 @@ function SessionItem({ s, sel, onSelect, showCols }) {
     (showCols.attach && (mcpCount > 0 || skillCount > 0)) ||
     (showCols.sandbox && (s.sandbox || s.worktree)) ||
     showCols.lastSeen
+
+  useEffect(() => {
+    if (!menuOpen) return undefined
+    const closeOutside = (event) => {
+      if (!actionsRef.current?.contains(event.target)) setMenuOpen(false)
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setMenuOpen(false)
+    }
+    const closeOnResize = () => setMenuOpen(false)
+    const closeOnScroll = (event) => {
+      if (!actionsRef.current?.contains(event.target)) setMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    document.addEventListener('scroll', closeOnScroll, true)
+    window.addEventListener('resize', closeOnResize)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+      document.removeEventListener('scroll', closeOnScroll, true)
+      window.removeEventListener('resize', closeOnResize)
+    }
+  }, [menuOpen])
+
+  const toggleMenu = (event) => {
+    if (menuOpen) {
+      setMenuOpen(false)
+      return
+    }
+    const rect = event.currentTarget.getBoundingClientRect()
+    const gutter = 8
+    const menuWidth = Math.min(320, window.innerWidth - gutter * 2)
+    const menuHeight = Math.min(360, window.innerHeight - gutter * 2)
+    setMenuPosition({
+      top: Math.max(gutter, Math.min(rect.top - 8, window.innerHeight - menuHeight - gutter)),
+      left: Math.max(gutter, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - gutter)),
+    })
+    setMenuOpen(true)
+  }
+
+  const runAction = (action) => {
+    setMenuOpen(false)
+    return doAction(action, s)
+  }
+
   return html`
     <div class=${`sess ${sel ? 'sel' : ''} ${s.kind} ${exp ? 'exp' : ''}`} onClick=${() => onSelect(s.id)}>
       <span class="sig">${kindSigil(s.kind)}</span>
@@ -260,32 +309,35 @@ function SessionItem({ s, sel, onSelect, showCols }) {
           ${s.cost > 0 && html`<div class="rd-row"><span class="rd-k">cost</span><span class="rd-v ok">$${s.cost.toFixed(2)}</span></div>`}
         </div>
       `}
-      <div class="actions" onClick=${e => e.stopPropagation()}>
-        <button class="mini" title="More actions" data-testid="session-more-btn" aria-haspopup="menu">⋯</button>
-        <div class="more-menu" role="menu" data-testid="session-more-menu">
+      <div ref=${actionsRef} class=${`actions ${menuOpen ? 'open' : ''}`} onClick=${e => e.stopPropagation()}>
+        <button class="mini" title="More actions" data-testid="session-more-btn"
+                aria-haspopup="menu" aria-expanded=${menuOpen ? 'true' : 'false'}
+                onClick=${toggleMenu}>⋯</button>
+        <div class="more-menu" role="menu" data-testid="session-more-menu"
+             style=${`top:${menuPosition.top}px;left:${menuPosition.left}px`}>
           ${(s.status === 'running' || s.status === 'waiting')
-            ? html`<button role="menuitem" data-testid="session-stop-btn" onClick=${() => doAction('stop', s)}>Stop</button>`
-            : html`<button role="menuitem" data-testid="session-start-btn" onClick=${() => doAction('start', s)}>Start</button>`}
-          <button role="menuitem" data-testid="session-restart-btn" onClick=${() => doAction('restart', s)}>Restart</button>
-          <button role="menuitem" data-testid="session-prompt-btn" onClick=${() => doAction('prompt', s)}>Prompt without attaching</button>
-          <button role="menuitem" data-testid="edit-session-btn" onClick=${() => doAction('edit', s)}>Edit</button>
-          <button role="menuitem" data-testid="session-notes-btn" onClick=${() => doAction('notes', s)}>Notes</button>
-          <button role="menuitem" data-testid="session-send-output-btn" onClick=${() => doAction('sendOutput', s)}>Send output</button>
-          <button role="menuitem" data-testid="session-move-btn" onClick=${() => doAction('move', s)}>Move group</button>
-          <button role="menuitem" data-testid="session-unread-btn" onClick=${() => doAction('unread', s)}>Mark unread</button>
-          <button role="menuitem" data-testid="session-approve-btn" onClick=${() => doAction('approve', s)}>Quick approve</button>
-          <button role="menuitem" data-testid="session-close-btn" onClick=${() => doAction('close', s)}>Close process</button>
-          ${s.sandbox && html`<button role="menuitem" data-testid="session-sandbox-shell-btn" onClick=${() => doAction('sandboxShell', s)}>Sandbox shell</button>`}
-          <button role="menuitem" data-testid="session-restart-fresh-btn" onClick=${() => doAction('restartFresh', s)}>Restart fresh</button>
+            ? html`<button role="menuitem" data-testid="session-stop-btn" onClick=${() => runAction('stop')}>Stop</button>`
+            : html`<button role="menuitem" data-testid="session-start-btn" onClick=${() => runAction('start')}>Start</button>`}
+          <button role="menuitem" data-testid="session-restart-btn" onClick=${() => runAction('restart')}>Restart</button>
+          <button role="menuitem" data-testid="session-prompt-btn" onClick=${() => runAction('prompt')}>Prompt without attaching</button>
+          <button role="menuitem" data-testid="edit-session-btn" onClick=${() => runAction('edit')}>Edit</button>
+          <button role="menuitem" data-testid="session-notes-btn" onClick=${() => runAction('notes')}>Notes</button>
+          <button role="menuitem" data-testid="session-send-output-btn" onClick=${() => runAction('sendOutput')}>Send output</button>
+          <button role="menuitem" data-testid="session-move-btn" onClick=${() => runAction('move')}>Move group</button>
+          <button role="menuitem" data-testid="session-unread-btn" onClick=${() => runAction('unread')}>Mark unread</button>
+          <button role="menuitem" data-testid="session-approve-btn" onClick=${() => runAction('approve')}>Quick approve</button>
+          <button role="menuitem" data-testid="session-close-btn" onClick=${() => runAction('close')}>Close process</button>
+          ${s.sandbox && html`<button role="menuitem" data-testid="session-sandbox-shell-btn" onClick=${() => runAction('sandboxShell')}>Sandbox shell</button>`}
+          <button role="menuitem" data-testid="session-restart-fresh-btn" onClick=${() => runAction('restartFresh')}>Restart fresh</button>
           ${(s.tool === 'gemini' || s.tool === 'codex' || s.tool === 'hermes') && html`
-            <button role="menuitem" data-testid="session-toggle-yolo-btn" onClick=${() => doAction('toggleYolo', s)}>Toggle YOLO</button>
+            <button role="menuitem" data-testid="session-toggle-yolo-btn" onClick=${() => runAction('toggleYolo')}>Toggle YOLO</button>
           `}
-          ${s.multiRepoEnabled && html`<button role="menuitem" data-testid="session-paths-btn" onClick=${() => doAction('paths', s)}>Edit paths</button>`}
-          ${s.canFork && html`<button role="menuitem" class="fork" data-testid="session-fork-btn" onClick=${() => doAction('fork', s)}>Fork</button>`}
-          ${!s.isHub && s.worktree && html`<button role="menuitem" onClick=${() => doAction('worktreeFinish', s)} data-action="worktree-finish" data-testid="session-worktree-finish-btn">Finish worktree</button>`}
-          <button role="menuitem" data-testid="session-archive-btn" onClick=${() => doAction('archive', s)}>Archive</button>
-          <button role="menuitem" class="danger" data-testid="session-remove-btn" onClick=${() => doAction('remove', s)}>Remove metadata</button>
-          <button role="menuitem" class="danger" data-testid="session-delete-btn" onClick=${() => doAction('delete', s)}>Delete</button>
+          ${s.multiRepoEnabled && html`<button role="menuitem" data-testid="session-paths-btn" onClick=${() => runAction('paths')}>Edit paths</button>`}
+          ${s.canFork && html`<button role="menuitem" class="fork" data-testid="session-fork-btn" onClick=${() => runAction('fork')}>Fork</button>`}
+          ${!s.isHub && s.worktree && html`<button role="menuitem" onClick=${() => runAction('worktreeFinish')} data-action="worktree-finish" data-testid="session-worktree-finish-btn">Finish worktree</button>`}
+          <button role="menuitem" data-testid="session-archive-btn" onClick=${() => runAction('archive')}>Archive</button>
+          <button role="menuitem" class="danger" data-testid="session-remove-btn" onClick=${() => runAction('remove')}>Remove metadata</button>
+          <button role="menuitem" class="danger" data-testid="session-delete-btn" onClick=${() => runAction('delete')}>Delete</button>
         </div>
       </div>
     </div>

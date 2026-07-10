@@ -159,7 +159,7 @@ func TestWebSidebarSessionActionsUseMoreMenu(t *testing.T) {
 			t.Fatalf("Sidebar.js missing %q; session rows must keep uncommon actions behind More", want)
 		}
 	}
-	actionStart := strings.Index(body, `<div class="actions"`)
+	actionStart := strings.Index(body, `<div ref=${actionsRef} class=${`)
 	if actionStart < 0 {
 		t.Fatal("Sidebar.js missing session row action/menu structure")
 	}
@@ -186,10 +186,22 @@ func TestWebSidebarSessionActionsUseMoreMenu(t *testing.T) {
 	for _, want := range []string{
 		".sess .actions .more-menu",
 		`aria-haspopup="menu"`,
-		".sess .actions .more-menu:hover",
+		`aria-expanded=${menuOpen ? 'true' : 'false'}`,
+		".sess .actions.open .more-menu",
+		"position: fixed",
+		"grid-template-columns: repeat(2, minmax(0, 1fr))",
 	} {
 		if !strings.Contains(style+body, want) {
 			t.Fatalf("sidebar action menu CSS/markup missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`.mini[aria-haspopup="menu"]:hover + .more-menu`,
+		".sess .actions .more-menu:hover",
+		".sess .actions:focus-within .more-menu",
+	} {
+		if strings.Contains(style, forbidden) {
+			t.Fatalf("sidebar action menu still opens from hover/focus selector %q; it must be click-only", forbidden)
 		}
 	}
 }
