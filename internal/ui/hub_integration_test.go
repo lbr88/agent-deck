@@ -350,6 +350,39 @@ func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
 	}
 }
 
+func TestHubWelcomeMetadataUpdateRenamesLocalPrefixAndRole(t *testing.T) {
+	h := newHubProjectionHome(t, []*session.Instance{{
+		ID:        "local-session",
+		Title:     "local worker",
+		Tool:      "codex",
+		Status:    session.StatusWaiting,
+		GroupPath: session.DefaultGroupPath,
+	}})
+	h.hubConfigured = true
+	h.hubLocalNodeID = "node_local"
+	h.hubLocalNodeName = "old-laptop"
+	h.hubLocalNodeAdmin = false
+
+	h.applyHubWelcome(hub.WelcomePayload{
+		NodeID:   "node_local",
+		NodeName: "private-laptop",
+		Admin:    true,
+	})
+	h.rebuildFlatItems()
+
+	if h.hubLocalNodeName != "private-laptop" || !h.hubLocalNodeAdmin {
+		t.Fatalf("local hub metadata = name:%q admin:%v, want private-laptop/admin", h.hubLocalNodeName, h.hubLocalNodeAdmin)
+	}
+	view := h.View()
+	wantPrefix := hubDisplayGroupPath("private-laptop", session.DefaultGroupPath)
+	if !strings.Contains(view, wantPrefix) {
+		t.Fatalf("renamed local hub prefix missing from session list:\n%s", view)
+	}
+	if strings.Contains(view, hubDisplayGroupPath("old-laptop", session.DefaultGroupPath)) {
+		t.Fatalf("stale local hub prefix remained in session list:\n%s", view)
+	}
+}
+
 func TestHubSessionRenderUsesRemoteSubstateGlyph(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	item := session.Item{
@@ -528,21 +561,62 @@ func TestHubAdminDialogLoadsInvitesAndTrustForAdmin(t *testing.T) {
 	}
 }
 
-func TestHubAdminDialogRequiresAdmin(t *testing.T) {
+func TestHubManagementDialogAllowsUserTrustControlsWithoutAdminInvites(t *testing.T) {
 	h := newHubProjectionHome(t, nil)
 	h.hubConfigured = true
 	h.hubLocalNodeAdmin = false
-	h.hubClient = &fakeHubAttachClient{}
+	client := &fakeHubAttachClient{
+		invites: []hub.AdminInvite{{ID: "invite_hidden", NodeName: "hidden"}},
+		trustRequests: []hub.TrustRequestPayload{{
+			NodeID:   "node_pending",
+			NodeName: "pending laptop",
+		}},
+	}
+	h.hubClient = client
 
 	cmd := h.openHubAdminDialog()
-	if cmd != nil {
-		t.Fatal("non-admin hub admin dialog returned a command")
+	if cmd == nil {
+		t.Fatal("non-admin hub management dialog returned no load command")
 	}
-	if h.hubAdminDialog.IsVisible() {
-		t.Fatal("non-admin hub admin dialog should not be visible")
+	msg, ok := cmd().(hubAdminDialogLoadedMsg)
+	if !ok {
+		t.Fatalf("load command returned %T, want hubAdminDialogLoadedMsg", msg)
 	}
-	if h.err == nil || !strings.Contains(h.err.Error(), "admin") {
-		t.Fatalf("non-admin hub admin error = %v, want admin guidance", h.err)
+	model, _ := h.Update(msg)
+	h = model.(*Home)
+
+	if !h.hubAdminDialog.IsVisible() {
+		t.Fatal("non-admin hub management dialog is not visible after load")
+	}
+	view := h.hubAdminDialog.View()
+	for _, want := range []string{"Hub Management", "role: user", "Trust pending laptop"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("user hub management dialog missing %q:\n%s", want, view)
+		}
+	}
+	for _, forbidden := range []string{"create invite", "Invite hidden"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("user hub management dialog exposed admin-only %q:\n%s", forbidden, view)
+		}
+	}
+	if client.listInvitesCalls != 0 {
+		t.Fatalf("ListInvites calls = %d, want 0 for non-admin", client.listInvitesCalls)
+	}
+	if client.listTrustRequestsCalls != 1 {
+		t.Fatalf("ListTrustRequests calls = %d, want 1", client.listTrustRequestsCalls)
+	}
+
+	_, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("user allow trust key returned no command")
+	}
+	if result := cmd().(hubAdminActionResultMsg); result.err != nil || result.action != "trust_allow" || result.id != "node_pending" {
+		t.Fatalf("user allow trust result = %+v", result)
+	}
+
+	_, cmd = h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if cmd != nil || h.hubAdminDialog.IsCreatingInvite() {
+		t.Fatal("non-admin c key exposed invite creation")
 	}
 }
 
@@ -611,7 +685,7 @@ func TestHubAdminDialogCreatesUserAndAdminInvites(t *testing.T) {
 	client := &fakeHubAttachClient{}
 	h.hubClient = client
 	h.hubAdminDialog.SetSize(100, 40)
-	h.hubAdminDialog.Show(nil, nil)
+	h.hubAdminDialog.Show(true, nil, nil)
 
 	model, cmd := h.handleHubAdminDialogKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	h = model.(*Home)
@@ -665,6 +739,29 @@ func TestHubAdminDialogCreatesUserAndAdminInvites(t *testing.T) {
 	}
 	if got := client.createdInvites[1]; got.NodeName != "admin-gpu" || got.TTLSeconds != 5400 || !got.Admin {
 		t.Fatalf("created admin invite = %+v", got)
+	}
+}
+
+func TestHubManagementDialogClearsInviteTokenAfterDemotion(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeID = "node_local"
+	h.hubLocalNodeAdmin = true
+	h.hubAdminDialog.Show(true, nil, nil)
+	h.hubAdminDialog.FinishCreateInvite(hub.CreateAdminInviteResponse{
+		URL:         "wss://hub.example",
+		InviteToken: "one-time-secret",
+	})
+	if !strings.Contains(h.hubAdminDialog.View(), "one-time-secret") {
+		t.Fatal("admin dialog setup did not retain the newly created invite command")
+	}
+
+	h.applyHubWelcome(hub.WelcomePayload{NodeID: "node_local", NodeName: "local", Admin: false})
+	if h.hubAdminDialog.IsAdmin() {
+		t.Fatal("live demotion left hub management dialog in admin mode")
+	}
+	if strings.Contains(h.hubAdminDialog.View(), "one-time-secret") {
+		t.Fatalf("demoted user dialog retained an admin invite token:\n%s", h.hubAdminDialog.View())
 	}
 }
 
@@ -3449,23 +3546,25 @@ func newHubActionHome(t *testing.T) (*Home, *fakeHubAttachClient) {
 }
 
 type fakeHubAttachClient struct {
-	nodeID             string
-	sessionID          string
-	windowIndex        int
-	attachWindowCalled bool
-	size               hub.TerminalSize
-	commands           []hubCommandCall
-	renamedNodes       []hubNodeRenameCall
-	promotedNodes      []string
-	demotedNodes       []string
-	revokedNodes       []string
-	trustDecisions     []hubTrustDecisionCall
-	invites            []hub.AdminInvite
-	createdInvites     []hub.CreateAdminInviteRequest
-	revokedInvites     []string
-	trustRequests      []hub.TrustRequestPayload
-	commandErr         error
-	commandResult      json.RawMessage
+	nodeID                 string
+	sessionID              string
+	windowIndex            int
+	attachWindowCalled     bool
+	size                   hub.TerminalSize
+	commands               []hubCommandCall
+	renamedNodes           []hubNodeRenameCall
+	promotedNodes          []string
+	demotedNodes           []string
+	revokedNodes           []string
+	trustDecisions         []hubTrustDecisionCall
+	invites                []hub.AdminInvite
+	createdInvites         []hub.CreateAdminInviteRequest
+	revokedInvites         []string
+	trustRequests          []hub.TrustRequestPayload
+	listInvitesCalls       int
+	listTrustRequestsCalls int
+	commandErr             error
+	commandResult          json.RawMessage
 }
 
 func (c *fakeHubAttachClient) Attach(ctx context.Context, nodeID, sessionID string, size hub.TerminalSize) error {
@@ -3534,6 +3633,7 @@ func (c *fakeHubAttachClient) TrustDecision(ctx context.Context, nodeID string, 
 }
 
 func (c *fakeHubAttachClient) ListInvites(ctx context.Context) ([]hub.AdminInvite, error) {
+	c.listInvitesCalls++
 	return append([]hub.AdminInvite(nil), c.invites...), nil
 }
 
@@ -3552,6 +3652,7 @@ func (c *fakeHubAttachClient) RevokeInvite(ctx context.Context, inviteID string)
 }
 
 func (c *fakeHubAttachClient) ListTrustRequests(ctx context.Context) ([]hub.TrustRequestPayload, error) {
+	c.listTrustRequestsCalls++
 	return append([]hub.TrustRequestPayload(nil), c.trustRequests...), nil
 }
 

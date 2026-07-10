@@ -481,39 +481,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePromoteNode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-
-	if !s.authenticateAdminNodeRequest(w, r) {
-		return
-	}
-	var req promoteNodeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid node promote request JSON", http.StatusBadRequest)
-		return
-	}
-	req.NodeID = strings.TrimSpace(req.NodeID)
-	if req.NodeID == "" {
-		http.Error(w, "node_id is required", http.StatusBadRequest)
-		return
-	}
-	if err := s.store.SetNodeAdmin(req.NodeID, true); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "hub node not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	node, err := s.store.nodeByID(req.NodeID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
+	s.handleSetNodeAdmin(w, r, true)
 }
 
 func (s *Server) handleDemoteNode(w http.ResponseWriter, r *http.Request) {
@@ -558,6 +526,7 @@ func (s *Server) handleSetNodeAdmin(w http.ResponseWriter, r *http.Request, admi
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.notifyNodeMetadataChanged(node)
 	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
 }
 
@@ -590,6 +559,7 @@ func (s *Server) handleRenameNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.notifyNodeMetadataChanged(node)
 	writeJSON(w, http.StatusOK, nodeResponseFromNode(node))
 }
 
@@ -866,8 +836,13 @@ func (s *Server) handleNodeEnvelope(ctx context.Context, node Node, peer *hubPee
 		if snapshot.SentAt.IsZero() {
 			snapshot.SentAt = time.Now().UTC()
 		}
-		snapshot.NodeID = node.ID
-		snapshot.NodeName = node.Name
+		currentNode, err := s.store.nodeByID(node.ID)
+		if err != nil {
+			return fmt.Errorf("load current snapshot node: %w", err)
+		}
+		snapshot.NodeID = currentNode.ID
+		snapshot.NodeName = currentNode.Name
+		snapshot.Admin = currentNode.Admin
 		if err := s.store.ReplaceSnapshot(node.ID, snapshot); err != nil {
 			return err
 		}
@@ -1349,6 +1324,7 @@ func (s *Server) broadcastSnapshot(originNodeID string, snapshot SnapshotPayload
 	clearEnv, err := MarshalEnvelope(MsgSnapshot, originNodeID, SnapshotPayload{
 		NodeID:   snapshot.NodeID,
 		NodeName: snapshot.NodeName,
+		Admin:    snapshot.Admin,
 		SentAt:   snapshot.SentAt,
 		Sessions: []SessionInfo{},
 	})
@@ -1383,6 +1359,7 @@ func (s *Server) snapshotEnvelope(latest NodeSessions, includeSessions bool) (En
 	payload := SnapshotPayload{
 		NodeID:       latest.Node.ID,
 		NodeName:     latest.Node.Name,
+		Admin:        latest.Node.Admin,
 		SentAt:       latest.SentAt,
 		WebAvailable: latest.WebAvailable,
 		Sessions:     []SessionInfo{},
@@ -1392,6 +1369,48 @@ func (s *Server) snapshotEnvelope(latest NodeSessions, includeSessions bool) (En
 		payload.Groups = append([]GroupInfo(nil), latest.Groups...)
 	}
 	return MarshalEnvelope(MsgSnapshot, latest.Node.ID, payload)
+}
+
+// notifyNodeMetadataChanged pushes the hub registry's authoritative short name
+// and role immediately. Connected clients keep their join-time NodeName in
+// memory, so waiting for their next self-reported snapshot would otherwise
+// reintroduce the old name after a rename.
+func (s *Server) notifyNodeMetadataChanged(node Node) {
+	node.ID = strings.TrimSpace(node.ID)
+	node.Name = strings.TrimSpace(node.Name)
+	if node.ID == "" {
+		return
+	}
+	welcome, err := MarshalEnvelope(MsgWelcome, node.ID, WelcomePayload{
+		NodeID:   node.ID,
+		NodeName: node.Name,
+		Admin:    node.Admin,
+	})
+	if err == nil {
+		for _, peer := range s.connectedPeersForNode(node.ID) {
+			_ = s.writePeerJSON(peer, welcome)
+		}
+	}
+
+	snapshots, err := s.store.LatestSessions()
+	if err != nil {
+		return
+	}
+	for _, latest := range snapshots {
+		if latest.Node.ID != node.ID {
+			continue
+		}
+		s.broadcastSnapshot(node.ID, SnapshotPayload{
+			NodeID:       node.ID,
+			NodeName:     node.Name,
+			Admin:        node.Admin,
+			SentAt:       latest.SentAt,
+			WebAvailable: latest.WebAvailable,
+			Sessions:     append([]SessionInfo(nil), latest.Sessions...),
+			Groups:       append([]GroupInfo(nil), latest.Groups...),
+		})
+		return
+	}
 }
 
 func (s *Server) writePeerJSON(peer *hubPeer, v any) error {

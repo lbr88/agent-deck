@@ -698,6 +698,137 @@ func TestHubNodeWebSocketFansOutSnapshots(t *testing.T) {
 	}
 }
 
+func TestHubNodeRenameImmediatelyPublishesAuthoritativeName(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.store.UpsertNodeWithAdmin("node_admin", "admin", hashSecret("admin_secret"), "1.0.0", "linux", "amd64", true); err != nil {
+		t.Fatalf("UpsertNode admin: %v", err)
+	}
+	if _, err := server.store.UpsertNode("node_owner", "old-laptop", hashSecret("owner_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode owner: %v", err)
+	}
+	allowTestTrust(t, server, "node_owner", "node_admin")
+	allowTestTrust(t, server, "node_admin", "node_owner")
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	adminConn := dialTestNodeWebSocket(t, httpServer.URL, "node_admin", "admin_secret")
+	defer adminConn.Close()
+	readTestWelcome(t, adminConn)
+	ownerConn := dialTestNodeWebSocket(t, httpServer.URL, "node_owner", "owner_secret")
+	defer ownerConn.Close()
+	readTestWelcome(t, ownerConn)
+
+	snapshot, err := MarshalEnvelope(MsgSnapshot, "node_owner", SnapshotPayload{
+		NodeName: "stale-client-name",
+		SentAt:   time.Unix(127, 0).UTC(),
+		Sessions: []SessionInfo{{ID: "s1", Title: "worker", Status: "waiting"}},
+	})
+	if err != nil {
+		t.Fatalf("MarshalEnvelope snapshot: %v", err)
+	}
+	if err := ownerConn.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON snapshot: %v", err)
+	}
+	_ = readTestEnvelopeMatching(t, adminConn, "initial authoritative owner snapshot", func(env Envelope) bool {
+		if env.Type != MsgSnapshot || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload SnapshotPayload
+		return json.Unmarshal(env.Payload, &payload) == nil && len(payload.Sessions) == 1 && payload.NodeName == "old-laptop"
+	})
+
+	renameReq := httptest.NewRequest(http.MethodPost, "/api/nodes/rename?node_id=node_admin", strings.NewReader(`{"node_id":"node_owner","name":"work-laptop"}`))
+	renameReq.Header.Set("Authorization", "Bearer admin_secret")
+	renameRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(renameRec, renameReq)
+	if renameRec.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, want 200; body=%q", renameRec.Code, renameRec.Body.String())
+	}
+
+	ownerWelcome := readTestEnvelopeMatching(t, ownerConn, "renamed owner welcome", func(env Envelope) bool {
+		if env.Type != MsgWelcome || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload WelcomePayload
+		return json.Unmarshal(env.Payload, &payload) == nil && payload.NodeName == "work-laptop"
+	})
+	var welcome WelcomePayload
+	if err := json.Unmarshal(ownerWelcome.Payload, &welcome); err != nil {
+		t.Fatalf("decode renamed welcome: %v", err)
+	}
+	if welcome.NodeName != "work-laptop" {
+		t.Fatalf("renamed welcome = %+v", welcome)
+	}
+
+	renamed := readTestEnvelopeMatching(t, adminConn, "renamed owner snapshot", func(env Envelope) bool {
+		if env.Type != MsgSnapshot || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload SnapshotPayload
+		return json.Unmarshal(env.Payload, &payload) == nil && payload.NodeName == "work-laptop" && len(payload.Sessions) == 1
+	})
+	var renamedPayload SnapshotPayload
+	if err := json.Unmarshal(renamed.Payload, &renamedPayload); err != nil {
+		t.Fatalf("decode renamed snapshot: %v", err)
+	}
+	if renamedPayload.NodeName != "work-laptop" || renamedPayload.Sessions[0].ID != "s1" {
+		t.Fatalf("renamed snapshot = %+v", renamedPayload)
+	}
+
+	// A connected owner still has its pre-rename ClientConfig name. Future
+	// self-reported snapshots must not overwrite the registry's short name.
+	if err := ownerConn.WriteJSON(snapshot); err != nil {
+		t.Fatalf("WriteJSON stale snapshot after rename: %v", err)
+	}
+	after := readTestEnvelopeMatching(t, adminConn, "post-rename authoritative owner snapshot", func(env Envelope) bool {
+		if env.Type != MsgSnapshot || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload SnapshotPayload
+		return json.Unmarshal(env.Payload, &payload) == nil && len(payload.Sessions) == 1
+	})
+	var afterPayload SnapshotPayload
+	if err := json.Unmarshal(after.Payload, &afterPayload); err != nil {
+		t.Fatalf("decode post-rename snapshot: %v", err)
+	}
+	if afterPayload.NodeName != "work-laptop" {
+		t.Fatalf("post-rename snapshot name = %q, want authoritative work-laptop", afterPayload.NodeName)
+	}
+
+	promoteReq := httptest.NewRequest(http.MethodPost, "/api/nodes/promote?node_id=node_admin", strings.NewReader(`{"node_id":"node_owner"}`))
+	promoteReq.Header.Set("Authorization", "Bearer admin_secret")
+	promoteRec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(promoteRec, promoteReq)
+	if promoteRec.Code != http.StatusOK {
+		t.Fatalf("promote status = %d, want 200; body=%q", promoteRec.Code, promoteRec.Body.String())
+	}
+	roleWelcome := readTestEnvelopeMatching(t, ownerConn, "promoted owner welcome", func(env Envelope) bool {
+		if env.Type != MsgWelcome || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload WelcomePayload
+		return json.Unmarshal(env.Payload, &payload) == nil && payload.NodeName == "work-laptop" && payload.Admin
+	})
+	if err := json.Unmarshal(roleWelcome.Payload, &welcome); err != nil {
+		t.Fatalf("decode promoted welcome: %v", err)
+	}
+	if !welcome.Admin {
+		t.Fatalf("promoted welcome = %+v, want admin", welcome)
+	}
+	roleSnapshot := readTestEnvelopeMatching(t, adminConn, "promoted owner snapshot", func(env Envelope) bool {
+		if env.Type != MsgSnapshot || env.NodeID != "node_owner" {
+			return false
+		}
+		var payload SnapshotPayload
+		return json.Unmarshal(env.Payload, &payload) == nil && payload.NodeName == "work-laptop" && payload.Admin
+	})
+	if err := json.Unmarshal(roleSnapshot.Payload, &afterPayload); err != nil {
+		t.Fatalf("decode promoted snapshot: %v", err)
+	}
+	if !afterPayload.Admin {
+		t.Fatalf("promoted snapshot = %+v, want admin", afterPayload)
+	}
+}
+
 func TestServerSnapshotEnvelopeIncludesGroupsAndWebAvailability(t *testing.T) {
 	server := newTestServer(t)
 	env, err := server.snapshotEnvelope(NodeSessions{

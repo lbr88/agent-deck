@@ -206,20 +206,21 @@ func TestWebSidebarSessionActionsUseMoreMenu(t *testing.T) {
 	}
 }
 
-func TestWebHubAdminManagementSurface(t *testing.T) {
+func TestWebHubRoleAwareManagementSurface(t *testing.T) {
 	topbar, err := embeddedStaticFiles.ReadFile("static/app/Topbar.js")
 	if err != nil {
 		t.Fatalf("ReadFile(Topbar.js): %v", err)
 	}
 	for _, want := range []string{
 		"hubNodesDialogSignal",
+		"hubConfiguredSignal",
 		"hubAdminSignal",
-		"hubAdmin &&",
+		"hubConfigured &&",
 		"data-testid=\"hub-nodes-btn\"",
-		"Manage hub nodes",
+		"Manage hub",
 	} {
 		if !strings.Contains(string(topbar), want) {
-			t.Fatalf("Topbar.js missing %q; hub admins need an entry point to rename nodes", want)
+			t.Fatalf("Topbar.js missing %q; configured hub users need a role-aware management entry point", want)
 		}
 	}
 
@@ -230,12 +231,13 @@ func TestWebHubAdminManagementSurface(t *testing.T) {
 	for _, want := range []string{
 		"HubNodesDialog",
 		"hubNodesDialogSignal",
-		"hubAdminSignal.value === true && hubNodesDialogSignal.value",
-		"data.hubAdmin !== true",
+		"hubConfiguredSignal.value === true && hubNodesDialogSignal.value",
+		"admin=${hubAdminSignal.value === true}",
+		"data.hubConfigured !== true",
 		"hubNodesDialogSignal.value = false",
 	} {
 		if !strings.Contains(string(appShell), want) {
-			t.Fatalf("AppShell.js missing %q; hub node dialog must be mounted only for hub admins", want)
+			t.Fatalf("AppShell.js missing %q; hub management must mount for users and pass the admin role", want)
 		}
 	}
 
@@ -244,6 +246,12 @@ func TestWebHubAdminManagementSurface(t *testing.T) {
 		t.Fatalf("ReadFile(HubNodesDialog.js): %v", err)
 	}
 	for _, want := range []string{
+		"export function HubNodesDialog({ admin = false })",
+		"if (admin)",
+		"role: ${admin ? 'admin' : 'user'}",
+		"refreshHubCapabilities",
+		"hubConfiguredSignal.value = settings.hubConfigured === true",
+		"hubAdminSignal.value = settings.hubAdmin === true",
 		"/api/hub/nodes",
 		"PATCH",
 		"DELETE",
@@ -262,7 +270,7 @@ func TestWebHubAdminManagementSurface(t *testing.T) {
 		"hub-trust-deny-btn",
 	} {
 		if !strings.Contains(string(dialog), want) {
-			t.Fatalf("HubNodesDialog.js missing %q; hub admin controls must call the web API", want)
+			t.Fatalf("HubNodesDialog.js missing %q; hub management controls must be role aware", want)
 		}
 	}
 }

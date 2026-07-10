@@ -132,6 +132,7 @@ type GroupInfo struct {
 type SnapshotPayload struct {
 	NodeID       string        `json:"node_id,omitempty"`
 	NodeName     string        `json:"node_name,omitempty"`
+	Admin        bool          `json:"admin,omitempty"`
 	SentAt       time.Time     `json:"sent_at"`
 	WebAvailable bool          `json:"web_available,omitempty"`
 	Sessions     []SessionInfo `json:"sessions"`

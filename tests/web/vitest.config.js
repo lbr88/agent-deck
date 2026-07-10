@@ -45,13 +45,16 @@ export default defineConfig({
     // straight to the installed file. Sub-imports inside those files
     // (e.g. signals.module.js → preact/hooks) re-resolve via the same
     // alias map, so transitive resolution works without breakage.
-    alias: {
-      'preact': aliasFor('preact'),
-      'preact/hooks': aliasFor('preact/hooks'),
-      'preact/jsx-runtime': aliasFor('preact/jsx-runtime'),
-      'htm/preact': aliasFor('htm/preact'),
-      '@preact/signals': aliasFor('@preact/signals'),
-      '@preact/signals-core': aliasFor('@preact/signals-core'),
-    },
+    // Exact-match regexes prevent the base `preact` alias from rewriting
+    // `preact/hooks` into the impossible `preact.js/hooks` path when tests
+    // import real components from outside tests/web.
+    alias: [
+      { find: /^preact\/hooks$/, replacement: aliasFor('preact/hooks') },
+      { find: /^preact\/jsx-runtime$/, replacement: aliasFor('preact/jsx-runtime') },
+      { find: /^htm\/preact$/, replacement: aliasFor('htm/preact') },
+      { find: /^@preact\/signals$/, replacement: aliasFor('@preact/signals') },
+      { find: /^@preact\/signals-core$/, replacement: aliasFor('@preact/signals-core') },
+      { find: /^preact$/, replacement: aliasFor('preact') },
+    ],
   },
 })

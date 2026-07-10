@@ -7,7 +7,7 @@
 import { html } from 'htm/preact'
 import { Logo, Icon, ICONS } from './icons.js'
 import { menuModelSignal } from './dataModel.js'
-import { connectionSignal, profilesSignal, commandCenterSignal, hubNodesSignal, hubNodesDialogSignal, hubAdminSignal } from './state.js'
+import { connectionSignal, profilesSignal, commandCenterSignal, hubNodesSignal, hubNodesDialogSignal, hubConfiguredSignal, hubAdminSignal } from './state.js'
 import {
   activeTabSignal, paletteOpenSignal, tweaksOpenSignal,
   railSignal, profileSignal,
@@ -35,6 +35,7 @@ export function Topbar() {
   const { sessions } = menuModelSignal.value
   const dashboardNodes = dashboardHubNodes(hubNodesSignal.value)
   const currentDashboardNode = currentHubDashboardNode()
+  const hubConfigured = hubConfiguredSignal.value === true
   const hubAdmin = hubAdminSignal.value === true
   const sessionsBadge = sessions.filter(s => s.status === 'waiting' || s.status === 'error').length
   const pendingNeeds = sessions.reduce((n, s) => n + (s.pendingNeeds || 0), 0)
@@ -84,16 +85,16 @@ export function Topbar() {
             <option key=${node.id} value=${node.id}>${node.name}</option>
           `)}
         </select>
-        ${hubAdmin && html`
+        ${hubConfigured && html`
           <button
             type="button"
             class="icon-btn hub-nodes-top-btn"
             style=${{ width: 'auto', padding: '0 8px', fontFamily: 'var(--mono)', fontSize: '11px' }}
-            title="Manage hub nodes"
-            aria-label="Manage hub nodes"
+            title=${hubAdmin ? 'Manage hub nodes, invites, and trust' : 'Manage hub trust'}
+            aria-label="Manage hub"
             data-testid="hub-nodes-btn"
             onClick=${() => (hubNodesDialogSignal.value = true)}>
-            hub nodes
+            ${hubAdmin ? 'hub admin' : 'hub trust'}
           </button>
         `}
         <div class=${`conn-pill ${connClass}`}>

@@ -15,6 +15,7 @@ import (
 
 type HubAdminDialog struct {
 	visible           bool
+	admin             bool
 	width             int
 	height            int
 	cursor            int
@@ -62,8 +63,11 @@ func (d *HubAdminDialog) SetSize(width, height int) {
 	d.height = height
 }
 
-func (d *HubAdminDialog) Show(invites []hub.AdminInvite, requests []hub.TrustRequestPayload) {
+func (d *HubAdminDialog) Show(admin bool, invites []hub.AdminInvite, requests []hub.TrustRequestPayload) {
 	d.visible = true
+	d.creatingInvite = false
+	d.validationErr = ""
+	d.SetAdmin(admin)
 	d.cursor = 0
 	d.items = d.items[:0]
 	for _, req := range requests {
@@ -78,6 +82,9 @@ func (d *HubAdminDialog) Show(invites []hub.AdminInvite, requests []hub.TrustReq
 			title:       fmt.Sprintf("Trust %s", nodeName),
 			description: meta,
 		})
+	}
+	if !admin {
+		return
 	}
 	for _, invite := range invites {
 		status := strings.TrimSpace(invite.Status)
@@ -103,6 +110,35 @@ func (d *HubAdminDialog) IsVisible() bool {
 	return d != nil && d.visible
 }
 
+func (d *HubAdminDialog) IsAdmin() bool {
+	return d != nil && d.admin
+}
+
+// SetAdmin applies a live role change without closing trust management. A
+// demotion strips invite rows and any one-time invite command immediately.
+func (d *HubAdminDialog) SetAdmin(admin bool) {
+	if d == nil {
+		return
+	}
+	d.admin = admin
+	if admin {
+		return
+	}
+	d.creatingInvite = false
+	d.validationErr = ""
+	d.lastInviteCommand = ""
+	items := make([]hubAdminDialogItem, 0, len(d.items))
+	for _, item := range d.items {
+		if item.kind == hubAdminItemTrust {
+			items = append(items, item)
+		}
+	}
+	d.items = items
+	if d.cursor >= len(d.items) {
+		d.cursor = max(0, len(d.items)-1)
+	}
+}
+
 func (d *HubAdminDialog) Selected() (kind, id string, ok bool) {
 	if d == nil || !d.visible || d.cursor < 0 || d.cursor >= len(d.items) {
 		return "", "", false
@@ -112,7 +148,7 @@ func (d *HubAdminDialog) Selected() (kind, id string, ok bool) {
 }
 
 func (d *HubAdminDialog) ShowCreateInvite(admin bool) {
-	if d == nil {
+	if d == nil || !d.admin {
 		return
 	}
 	d.creatingInvite = true
@@ -130,7 +166,7 @@ func (d *HubAdminDialog) IsCreatingInvite() bool {
 }
 
 func (d *HubAdminDialog) CreateInviteRequest() (hub.CreateAdminInviteRequest, error) {
-	if d == nil || !d.creatingInvite {
+	if d == nil || !d.admin || !d.creatingInvite {
 		return hub.CreateAdminInviteRequest{}, fmt.Errorf("hub invite creation is not active")
 	}
 	nodeName := strings.TrimSpace(d.createNameInput.Value())
@@ -191,6 +227,9 @@ func (d *HubAdminDialog) Update(msg tea.KeyMsg) (*HubAdminDialog, tea.Cmd) {
 			d.toggleCreateFocus()
 			return d, nil
 		case "ctrl+a":
+			if !d.admin {
+				return d, nil
+			}
 			d.createInviteAdmin = !d.createInviteAdmin
 			return d, nil
 		}
@@ -225,8 +264,17 @@ func (d *HubAdminDialog) View() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Hub Admin\n\n")
-	b.WriteString("c create invite · C create admin invite · Enter/a allow trust · x/d deny trust · D revoke invite · r refresh · q close\n\n")
+	b.WriteString("Hub Management\n")
+	role := "user"
+	if d.admin {
+		role = "admin"
+	}
+	b.WriteString("role: " + role + "\n\n")
+	if d.admin {
+		b.WriteString("c create invite · C create admin invite · Enter/a allow trust · x/d deny trust · D revoke invite · r refresh · q close\n\n")
+	} else {
+		b.WriteString("Enter/a allow trust · x/d deny trust · r refresh · q close\n\n")
+	}
 	if d.lastInviteCommand != "" {
 		b.WriteString("Last invite: ")
 		b.WriteString(d.lastInviteCommand)

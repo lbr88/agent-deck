@@ -275,6 +275,7 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	payload := SnapshotPayload{
 		NodeID:   "node_remote",
 		NodeName: "server1",
+		Admin:    true,
 		SentAt:   time.Unix(123, 0).UTC(),
 		Sessions: []SessionInfo{{
 			ID:        "s1",
@@ -295,7 +296,7 @@ func TestClientDispatchesSnapshotCallback(t *testing.T) {
 	client.dispatch(Envelope{Version: ProtocolVersion, Type: MsgSnapshot, NodeID: "node_remote", Payload: raw})
 
 	got := waitNodeSessions(t, snapshots)
-	if got.Node.ID != "node_remote" || got.Node.Name != "server1" {
+	if got.Node.ID != "node_remote" || got.Node.Name != "server1" || !got.Node.Admin {
 		t.Fatalf("snapshot node = %+v", got.Node)
 	}
 	if len(got.Sessions) != 1 || got.Sessions[0].Title != "worker" {

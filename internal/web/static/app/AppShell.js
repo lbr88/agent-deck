@@ -31,7 +31,7 @@ import {
   selectedIdSignal, terminalModeSignal, createSessionDialogSignal, confirmDialogSignal,
   editSessionDialogSignal, moveSessionDialogSignal, promptSessionDialogSignal,
   sendOutputDialogSignal, notesSessionDialogSignal, pathsSessionDialogSignal, forkSessionDialogSignal, groupNameDialogSignal, groupMoveDialogSignal, hubNodesDialogSignal, mutationsEnabledSignal, infoDrawerOpenSignal,
-  profilesSignal, systemStatsSignal, hubAdminSignal,
+  profilesSignal, systemStatsSignal, hubConfiguredSignal, hubAdminSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
 } from './state.js'
@@ -312,7 +312,7 @@ export function AppShell() {
   const confirmData = confirmDialogSignal.value
   const groupNameData = groupNameDialogSignal.value
   const groupMoveData = groupMoveDialogSignal.value
-  const showHubNodes = hubAdminSignal.value === true && hubNodesDialogSignal.value
+  const showHubNodes = hubConfiguredSignal.value === true && hubNodesDialogSignal.value
   const drawerOpen = infoDrawerOpenSignal.value
 
   // Hide the vanilla .app div from the legacy boot path (kept for back-compat
@@ -334,8 +334,9 @@ export function AppShell() {
         if (typeof data.webMutations === 'boolean') {
           mutationsEnabledSignal.value = data.webMutations
         }
+        hubConfiguredSignal.value = data.hubConfigured === true
         hubAdminSignal.value = data.hubAdmin === true
-        if (data.hubAdmin !== true) {
+        if (data.hubConfigured !== true) {
           hubNodesDialogSignal.value = false
         }
         if (typeof data.toolFilter === 'boolean') {
@@ -696,7 +697,7 @@ export function AppShell() {
       ${confirmData && html`<${ConfirmDialog} ...${confirmData}/>`}
       ${groupNameData && html`<${GroupNameDialog} ...${groupNameData}/>`}
       ${groupMoveData && html`<${GroupMoveDialog} ...${groupMoveData}/>`}
-      ${showHubNodes && html`<${HubNodesDialog}/>`}
+      ${showHubNodes && html`<${HubNodesDialog} admin=${hubAdminSignal.value === true}/>`}
 
       ${drawerOpen && html`
         <div class="overlay" onClick=${() => (infoDrawerOpenSignal.value = false)}>

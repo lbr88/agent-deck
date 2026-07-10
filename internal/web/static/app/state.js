@@ -14,8 +14,13 @@ export const hubNodesSignal = signal([])
 // from GET /api/settings and used to hide admin-only controls for normal users.
 export const hubAdminSignal = signal(false)
 
-// Hub node admin dialog state. The dialog uses /api/hub/nodes and requires
-// the local web server to be configured with an admin hub node token.
+// Whether this web server has a configured hub node at all. Every configured
+// node may manage its own trust requests; only admins receive node/invite
+// controls inside the same management dialog.
+export const hubConfiguredSignal = signal(false)
+
+// Hub management dialog state. Trust controls are available to every
+// configured node; node and invite controls require an admin node.
 export const hubNodesDialogSignal = signal(false)
 
 // Archived sessions from GET /api/sessions/archived

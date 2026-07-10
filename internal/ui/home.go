@@ -1025,6 +1025,7 @@ type hubActionResultMsg struct {
 }
 
 type hubAdminDialogLoadedMsg struct {
+	admin   bool
 	invites []hub.AdminInvite
 	trust   []hub.TrustRequestPayload
 	err     error
@@ -1751,6 +1752,7 @@ func (h *Home) handleHubWelcome(welcome hub.WelcomePayload) {
 }
 
 func (h *Home) applyHubWelcome(welcome hub.WelcomePayload) {
+	previousAdmin := h.hubLocalNodeAdmin
 	if nodeID := strings.TrimSpace(welcome.NodeID); nodeID != "" {
 		h.hubLocalNodeID = nodeID
 	}
@@ -1758,6 +1760,9 @@ func (h *Home) applyHubWelcome(welcome hub.WelcomePayload) {
 		h.hubLocalNodeName = nodeName
 	}
 	h.hubLocalNodeAdmin = welcome.Admin
+	if previousAdmin != welcome.Admin && h.hubAdminDialog != nil && h.hubAdminDialog.IsVisible() {
+		h.hubAdminDialog.SetAdmin(welcome.Admin)
+	}
 }
 
 func (h *Home) applyHubSnapshot(snapshot hub.NodeSessions) {
@@ -7286,8 +7291,8 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.hubAdminDialog.SetSize(h.width, h.height)
-		h.hubAdminDialog.Show(msg.invites, msg.trust)
-		h.setHubStatus("hub admin loaded")
+		h.hubAdminDialog.Show(msg.admin, msg.invites, msg.trust)
+		h.setHubStatus("hub management loaded")
 		return h, nil
 
 	case hubAdminActionResultMsg:
@@ -11903,10 +11908,14 @@ func (h *Home) handleHubAdminDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "c":
-		h.hubAdminDialog.ShowCreateInvite(false)
+		if h.hubAdminDialog.IsAdmin() {
+			h.hubAdminDialog.ShowCreateInvite(false)
+		}
 		return h, nil
 	case "C":
-		h.hubAdminDialog.ShowCreateInvite(true)
+		if h.hubAdminDialog.IsAdmin() {
+			h.hubAdminDialog.ShowCreateInvite(true)
+		}
 		return h, nil
 	case "r":
 		return h, h.loadHubAdminDialog()
@@ -11921,6 +11930,9 @@ func (h *Home) handleHubAdminDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, h.hubAdminTrustDecisionCommand(id, false)
 		}
 	case "D":
+		if !h.hubAdminDialog.IsAdmin() {
+			return h, nil
+		}
 		kind, id, ok := h.hubAdminDialog.Selected()
 		if ok && kind == hubAdminItemInvite {
 			return h, h.hubAdminRevokeInviteCommand(id)
@@ -15043,9 +15055,9 @@ func (h *Home) hubRevokeNodeCommand(nodeID, nodeName string) tea.Cmd {
 }
 
 func (h *Home) openHubAdminDialog() tea.Cmd {
-	if !h.hubLocalNodeAdmin {
-		h.setHubStatus("hub admin required")
-		h.setError(fmt.Errorf("hub admin management requires an admin hub node"))
+	if !h.hubConfigured {
+		h.setHubStatus("hub not configured")
+		h.setError(fmt.Errorf("hub management requires a configured hub node"))
 		return nil
 	}
 	return h.loadHubAdminDialog()
@@ -15058,15 +15070,19 @@ func (h *Home) loadHubAdminDialog() tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		invites, inviteErr := h.hubClient.ListInvites(h.ctx)
+		var invites []hub.AdminInvite
+		if h.hubLocalNodeAdmin {
+			var inviteErr error
+			invites, inviteErr = h.hubClient.ListInvites(h.ctx)
+			if inviteErr != nil {
+				return hubAdminDialogLoadedMsg{admin: true, err: inviteErr}
+			}
+		}
 		trust, trustErr := h.hubClient.ListTrustRequests(h.ctx)
-		if inviteErr != nil {
-			return hubAdminDialogLoadedMsg{err: inviteErr}
-		}
 		if trustErr != nil {
-			return hubAdminDialogLoadedMsg{err: trustErr}
+			return hubAdminDialogLoadedMsg{admin: h.hubLocalNodeAdmin, err: trustErr}
 		}
-		return hubAdminDialogLoadedMsg{invites: invites, trust: trust}
+		return hubAdminDialogLoadedMsg{admin: h.hubLocalNodeAdmin, invites: invites, trust: trust}
 	}
 }
 
@@ -15097,6 +15113,11 @@ func (h *Home) hubAdminCreateInviteCommand(req hub.CreateAdminInviteRequest) tea
 		h.setError(fmt.Errorf("hub client is not connected"))
 		return nil
 	}
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub invite creation requires an admin hub node"))
+		return nil
+	}
 	req.NodeName = strings.TrimSpace(req.NodeName)
 	if req.NodeName == "" {
 		h.setError(fmt.Errorf("hub invite node name is required"))
@@ -15119,6 +15140,11 @@ func (h *Home) hubAdminRevokeInviteCommand(inviteID string) tea.Cmd {
 	if h.hubClient == nil {
 		h.setHubStatus("hub offline")
 		h.setError(fmt.Errorf("hub client is not connected"))
+		return nil
+	}
+	if !h.hubLocalNodeAdmin {
+		h.setHubStatus("hub admin required")
+		h.setError(fmt.Errorf("hub invite revocation requires an admin hub node"))
 		return nil
 	}
 	inviteID = strings.TrimSpace(inviteID)
@@ -15768,6 +15794,9 @@ func (h *Home) updateHubNodeAdminInCache(nodeID string, admin bool) {
 	h.hubSessions[nodeID] = snapshot
 	if nodeID == h.hubLocalNodeID {
 		h.hubLocalNodeAdmin = admin
+		if h.hubAdminDialog != nil && h.hubAdminDialog.IsVisible() {
+			h.hubAdminDialog.SetAdmin(admin)
+		}
 	}
 }
 

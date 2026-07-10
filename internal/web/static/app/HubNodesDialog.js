@@ -1,15 +1,15 @@
-// HubNodesDialog.js -- Admin dialog for connected hub node metadata.
-// It talks to the local web server, which forwards through the configured
-// admin hub node token. No hub token is exposed to the browser.
+// HubNodesDialog.js -- Role-aware hub management. Every configured node can
+// answer its own trust requests; node and invite controls are admin-only. The
+// local web server forwards requests without exposing hub tokens to browsers.
 import { html } from 'htm/preact'
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { Icon, ICONS } from './icons.js'
 import { apiFetch } from './api.js'
 import { addToast } from './Toast.js'
-import { hubNodesDialogSignal, hubNodesSignal } from './state.js'
+import { hubNodesDialogSignal, hubNodesSignal, hubConfiguredSignal, hubAdminSignal } from './state.js'
 import { refreshMenuSnapshot } from './menuRefresh.js'
 
-export function HubNodesDialog() {
+export function HubNodesDialog({ admin = false }) {
   const [nodes, setNodes] = useState([])
   const [invites, setInvites] = useState([])
   const [trustRequests, setTrustRequests] = useState([])
@@ -25,12 +25,20 @@ export function HubNodesDialog() {
     async function load() {
       setLoading(true)
       setError(null)
+      if (!admin) setJoinCommand('')
       try {
-        const [nodesData, invitesData, trustData] = await Promise.all([
-          apiFetch('GET', '/api/hub/nodes'),
-          apiFetch('GET', '/api/hub/invites'),
-          apiFetch('GET', '/api/hub/trust/pending'),
-        ])
+        let nodesData = { nodes: [] }
+        let invitesData = { invites: [] }
+        let trustData
+        if (admin) {
+          [nodesData, invitesData, trustData] = await Promise.all([
+            apiFetch('GET', '/api/hub/nodes'),
+            apiFetch('GET', '/api/hub/invites'),
+            apiFetch('GET', '/api/hub/trust/pending'),
+          ])
+        } else {
+          trustData = await apiFetch('GET', '/api/hub/trust/pending')
+        }
         if (cancelled) return
         const next = Array.isArray(nodesData.nodes) ? nodesData.nodes : []
         setNodes(next)
@@ -38,14 +46,14 @@ export function HubNodesDialog() {
         setTrustRequests(Array.isArray(trustData.requests) ? trustData.requests : [])
         setDrafts(Object.fromEntries(next.map(node => [node.id, node.name || node.id])))
       } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to load hub nodes')
+        if (!cancelled) setError(err.message || 'Failed to load hub management')
       } finally {
         if (!cancelled) setLoading(false)
       }
     }
     load()
     return () => { cancelled = true }
-  }, [])
+  }, [admin])
 
   const sortedNodes = useMemo(() => {
     return [...nodes].sort((a, b) => (a.name || a.id || '').localeCompare(b.name || b.id || '') || (a.id || '').localeCompare(b.id || ''))
@@ -53,7 +61,20 @@ export function HubNodesDialog() {
 
   const close = () => (hubNodesDialogSignal.value = false)
 
+  async function refreshHubCapabilities() {
+    try {
+      const settings = await apiFetch('GET', '/api/settings')
+      hubConfiguredSignal.value = settings.hubConfigured === true
+      hubAdminSignal.value = settings.hubAdmin === true
+      if (settings.hubConfigured !== true) close()
+    } catch (_) {
+      // The mutation result remains authoritative; a later settings refresh
+      // will reconcile the topbar role if the capability probe is unavailable.
+    }
+  }
+
   async function renameNode(node) {
+    if (!admin) return
     if (!node?.id) return
     const name = (drafts[node.id] || '').trim()
     if (!name) {
@@ -76,24 +97,27 @@ export function HubNodesDialog() {
     }
   }
 
-  async function setNodeAdmin(node, admin) {
+  async function setNodeAdmin(node, makeAdmin) {
+    if (!admin) return
     if (!node?.id) return
-    const action = admin ? 'promote' : 'demote'
+    const action = makeAdmin ? 'promote' : 'demote'
     setBusyID(action + ':' + node.id)
     setError(null)
     try {
-      const actionPath = admin ? '/promote' : '/demote'
+      const actionPath = makeAdmin ? '/promote' : '/demote'
       const updated = await apiFetch('POST', '/api/hub/nodes/' + encodeURIComponent(node.id) + actionPath)
       setNodes(current => current.map(n => n.id === updated.id ? { ...n, ...updated } : n))
-      addToast(`${admin ? 'Promoted' : 'Demoted'} hub node ${updated.name || updated.id}`, 'success')
+      await refreshHubCapabilities()
+      addToast(`${makeAdmin ? 'Promoted' : 'Demoted'} hub node ${updated.name || updated.id}`, 'success')
     } catch (err) {
-      setError(err.message || `${admin ? 'Promote' : 'Demote'} failed`)
+      setError(err.message || `${makeAdmin ? 'Promote' : 'Demote'} failed`)
     } finally {
       setBusyID('')
     }
   }
 
   async function revokeNode(node) {
+    if (!admin) return
     if (!node?.id) return
     if (!window.confirm(`Revoke hub node ${node.name || node.id}? It will need a new invite to reconnect.`)) return
     setBusyID('revoke:' + node.id)
@@ -103,6 +127,7 @@ export function HubNodesDialog() {
       setNodes(current => current.filter(n => n.id !== node.id))
       hubNodesSignal.value = (hubNodesSignal.value || []).filter(n => n.id !== node.id)
       refreshMenuSnapshot().catch(() => {})
+      await refreshHubCapabilities()
       addToast(`Revoked hub node ${node.name || node.id}`, 'success')
     } catch (err) {
       setError(err.message || 'Revoke failed')
@@ -112,6 +137,7 @@ export function HubNodesDialog() {
   }
 
   async function createInvite() {
+    if (!admin) return
     const nodeName = (inviteDraft.nodeName || '').trim()
     if (!nodeName) {
       setError('Invite node name is required')
@@ -144,6 +170,7 @@ export function HubNodesDialog() {
   }
 
   async function revokeInvite(invite) {
+    if (!admin) return
     if (!invite?.id) return
     if (!window.confirm(`Revoke invite for ${invite.nodeName || invite.id}?`)) return
     setBusyID('invite:revoke:' + invite.id)
@@ -177,29 +204,31 @@ export function HubNodesDialog() {
 
   return html`
     <div class="overlay" onClick=${(e) => e.target === e.currentTarget && close()}>
-      <div role="dialog" aria-modal="true" aria-label="Hub nodes"
+      <div role="dialog" aria-modal="true" aria-label="Hub management"
            class="dialog" style="max-width: 720px;"
            onClick=${e => e.stopPropagation()}>
         <div class="dh">
           <span class="kicker">HUB</span>
-          <div class="t">Hub nodes</div>
-          <button type="button" class="icon-btn" onClick=${close} aria-label="Close hub nodes">
+          <div class="t">Hub management</div>
+          <button type="button" class="icon-btn" onClick=${close} aria-label="Close hub management">
             <${Icon} d=${ICONS.x}/>
           </button>
         </div>
         <div class="db">
           <div style="font-family: var(--sans); color: var(--muted); line-height: 1.45;">
-            Rename connected hub nodes using this web server's configured admin node credentials.
+            role: ${admin ? 'admin' : 'user'} · ${admin
+              ? 'Manage connected nodes, invites, and this node’s trust decisions.'
+              : 'Review and answer trust requests for this node.'}
           </div>
-          ${loading && html`<div class="empty">Loading hub nodes…</div>`}
+          ${loading && html`<div class="empty">Loading hub management…</div>`}
           ${error && html`
             <div style="font-family: var(--mono); font-size: 11.5px; color: var(--tn-red); padding: 8px 10px;
                         border: 1px solid rgba(247,118,142,0.3); border-radius: 4px; background: rgba(247,118,142,0.06);">
               ${error}
             </div>
           `}
-          ${!loading && sortedNodes.length === 0 && html`<div class="empty">No hub nodes returned by the configured hub.</div>`}
-          ${!loading && sortedNodes.length > 0 && html`
+          ${admin && !loading && sortedNodes.length === 0 && html`<div class="empty">No hub nodes returned by the configured hub.</div>`}
+          ${admin && !loading && sortedNodes.length > 0 && html`
             <div style="display: grid; gap: 8px;">
               ${sortedNodes.map(node => {
                 const draft = drafts[node.id] ?? node.name ?? node.id
@@ -256,7 +285,7 @@ export function HubNodesDialog() {
               })}
             </div>
           `}
-          ${!loading && html`
+          ${admin && !loading && html`
             <div style="border-top: 1px solid var(--border); padding-top: 12px; display: grid; gap: 10px;">
               <div>
                 <div class="kicker">INVITES</div>

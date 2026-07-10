@@ -394,17 +394,17 @@ func TestWebHubInviteRevokeUsesConfiguredAdminNode(t *testing.T) {
 	}
 }
 
-func TestWebHubTrustAdminUsesConfiguredAdminNode(t *testing.T) {
+func TestWebHubTrustManagementWorksForConfiguredNonAdminNode(t *testing.T) {
 	home := t.TempDir()
 	setWebHubConfigEnv(t, home)
 
 	seenDecision := make(chan map[string]string, 1)
 	hubServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("node_id"); got != "node_admin" {
-			t.Errorf("node_id = %q, want node_admin", got)
+		if got := r.URL.Query().Get("node_id"); got != "node_user" {
+			t.Errorf("node_id = %q, want node_user", got)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer admin_secret" {
-			t.Errorf("Authorization = %q, want bearer admin token", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer user_secret" {
+			t.Errorf("Authorization = %q, want bearer user token", got)
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/trust/pending":
@@ -428,7 +428,7 @@ func TestWebHubTrustAdminUsesConfiguredAdminNode(t *testing.T) {
 		}
 	}))
 	defer hubServer.Close()
-	writeWebHubConfig(t, home, hubServer, "node_admin", "admin_secret")
+	writeWebHubConfig(t, home, hubServer, "node_user", "user_secret")
 
 	server := NewServer(Config{ListenAddr: "127.0.0.1:0", WebMutations: true})
 	listReq := httptest.NewRequest(http.MethodGet, "/api/hub/trust/pending", nil)

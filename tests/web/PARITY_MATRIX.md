@@ -278,15 +278,15 @@ parity above.
   listing/rename/promote/revoke flows, trust requests/decisions, shell, sessions,
   groups, MCPs, skills, bundled skill install, and installing/removing/statusing
   `hub connect` as either a per-user or system-wide systemd service.
-- **Hub web admin management:** when the local web server is configured as a hub
-  admin node, the web Hub Nodes dialog lists/renames/promotes/demotes/revokes
-  nodes, creates/revokes invites without exposing stored invite tokens, and
-  lists/allows/denies pending trust requests through the local server proxy.
-- **Hub TUI admin management:** when the local TUI node is an admin hub node,
-  `H` opens a hub admin dialog for node-management-adjacent flows: listing
-  pending trust requests, allowing/denying missed trust requests, listing
-  invites, creating user/admin invites, and revoking invites. Non-admin TUI
-  nodes hide/deny these controls with explicit admin-required guidance.
+- **Role-aware hub management:** every configured node can use TUI `H` or the
+  web Hub Management dialog to list/allow/deny its own pending trust requests.
+  Admin nodes additionally get node rename/promote/demote/revoke and
+  invite create/list/revoke controls. One-time invite commands are never shown
+  after a node is demoted, and stored invite tokens are never returned.
+- **Authoritative node metadata:** hub registry short names and admin roles are
+  included in snapshots. Rename/promote/demote changes are pushed immediately
+  to connected target and observer nodes, and stale join-time client names can
+  no longer overwrite the session-list prefix on later snapshots.
 
 ### Still missing for full hub/native parity
 
@@ -301,6 +301,7 @@ parity above.
    and rejects nodes whose latest snapshot reports no remote web server, but
    still needs broader route coverage, error UX, and security/permission review
    before it should be considered complete parity.
-3. **Hub CLI breadth:** CLI now covers hub sessions, groups, MCP
-    attach/detach/list/catalog/move, skills attach/detach/list/catalog, and remote
-    plugins, but richer admin workflows remain incomplete.
+3. **Hub management breadth:** CLI, TUI, and web cover node metadata/roles,
+   invites, and trust decisions with role-aware controls. Host lifecycle flows
+   such as serving/joining a hub and installing the connect systemd service are
+   still CLI-only; richer operational/status UX remains incomplete.

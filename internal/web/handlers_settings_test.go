@@ -193,6 +193,51 @@ func TestSettingsReportsHubAdminCapability(t *testing.T) {
 	}
 }
 
+func TestSettingsReportsConfiguredNonAdminHubCapability(t *testing.T) {
+	home := t.TempDir()
+	setWebHubConfigEnv(t, home)
+
+	hubServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("node_id"); got != "node_user" {
+			t.Errorf("node_id = %q, want node_user", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer user_secret" {
+			t.Errorf("Authorization = %q, want bearer user token", got)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"node": map[string]any{
+				"id":     "node_user",
+				"name":   "user",
+				"status": "online",
+				"admin":  false,
+			},
+		})
+	}))
+	defer hubServer.Close()
+	writeWebHubConfig(t, home, hubServer, "node_user", "user_secret")
+
+	srv := NewServer(Config{ListenAddr: "127.0.0.1:0", WebMutations: true})
+	srv.menuData = &fakeMenuDataLoader{snapshot: &MenuSnapshot{}}
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	var got SettingsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if !got.HubConfigured || got.HubAdmin {
+		t.Fatalf("hub capability = configured:%v admin:%v, want true/false", got.HubConfigured, got.HubAdmin)
+	}
+}
+
 func TestProfilesGET(t *testing.T) {
 	srv := NewServer(Config{
 		ListenAddr: "127.0.0.1:0",

@@ -315,6 +315,7 @@ func (h *HelpOverlay) View() string {
 		{
 			title: "OTHER",
 			items: [][2]string{
+				{"H", "Hub management (trust; admin: nodes/invites)"},
 				{settingsKey, "Settings"},
 				{reloadKey, "Reload from disk"},
 				{importKey, "Import sessions"},

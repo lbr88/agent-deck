@@ -445,7 +445,7 @@ func (c *Client) dispatchWithConn(ctx context.Context, conn *clientConn, env Env
 			nodeName = nodeID
 		}
 		c.cfg.OnSnapshot(NodeSessions{
-			Node:         Node{ID: nodeID, Name: nodeName},
+			Node:         Node{ID: nodeID, Name: nodeName, Admin: snapshot.Admin},
 			SentAt:       snapshot.SentAt,
 			WebAvailable: snapshot.WebAvailable,
 			Sessions:     append([]SessionInfo(nil), snapshot.Sessions...),

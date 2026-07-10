@@ -61,6 +61,9 @@ describe('module signals export', () => {
       'focusedIdSignal',
       'createSessionDialogSignal',
       'confirmDialogSignal',
+      'hubConfiguredSignal',
+      'hubAdminSignal',
+      'hubNodesDialogSignal',
       'hiddenToolsSignal',
       'pickerToolsSignal',
     ]

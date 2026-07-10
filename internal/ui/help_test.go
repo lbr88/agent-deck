@@ -70,6 +70,19 @@ func TestHelpOverlayShowsArchiveKeys(t *testing.T) {
 	}
 }
 
+func TestHelpOverlayDocumentsHubManagement(t *testing.T) {
+	overlay := NewHelpOverlay()
+	overlay.SetSize(100, 140)
+	overlay.Show()
+
+	view := overlay.View()
+	for _, want := range []string{"Hub management", "trust", "nodes/invites"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("help overlay should document role-aware hub management %q, got %q", want, view)
+		}
+	}
+}
+
 func TestWrapWithHangingIndent_ShortText_NoWrap(t *testing.T) {
 	got := wrapWithHangingIndent("Short text", 40, "    ")
 	want := "Short text"
