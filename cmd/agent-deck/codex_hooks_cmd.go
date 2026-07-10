@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
 const codexNotifyMarkerBegin = "# BEGIN AGENTDECK CODEX NOTIFY"
@@ -186,6 +188,28 @@ func handleCodexNotify() {
 
 	if sessionID == "" {
 		sessionID = strings.TrimSpace(os.Getenv("CODEX_SESSION_ID"))
+	}
+	if rootID, isSubagent := session.CodexTopLevelSessionID(session.GetCodexHomeDir(), sessionID); isSubagent {
+		// Codex invokes the global notify command for internal workers and
+		// approval-review guardians as well as the owning interactive thread.
+		// They inherit AGENTDECK_INSTANCE_ID, but their thread IDs are not
+		// user-facing/resumable in Codex Desktop. Keep the parent's sticky root
+		// mapping and discard the child's lifecycle event entirely.
+		// A late child from an older root can finish after the interactive
+		// thread has rotated. Never replace an established anchor with a
+		// child's ancestry; only use it to bootstrap an otherwise empty one.
+		if rootID != "" && session.ReadHookSessionAnchor(instanceID) == "" {
+			session.WriteHookSessionAnchor(instanceID, rootID)
+		}
+		return
+	}
+	if anchorID := session.ReadHookSessionAnchor(instanceID); sessionID != "" && anchorID != "" && sessionID != anchorID &&
+		session.CodexSessionRolloutExists(session.GetCodexHomeDir(), sessionID) &&
+		!session.IsCodexTopLevelSession(session.GetCodexHomeDir(), sessionID) {
+		// Do not let an unclassified foreign candidate win the short window
+		// before Codex flushes session_meta. A later hook or the process probe
+		// will bind it once ownership is positively known.
+		return
 	}
 
 	writeHookStatus(instanceID, status, sessionID, event)

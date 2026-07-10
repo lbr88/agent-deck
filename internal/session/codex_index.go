@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,12 +26,25 @@ type CodexIndexEntry struct {
 	UpdatedAt  time.Time
 }
 
+type codexThreadKind uint8
+
+const (
+	codexThreadUnknown codexThreadKind = iota
+	codexThreadTopLevel
+	codexThreadSubagent
+)
+
 var (
 	ErrCodexSessionNotFound  = errors.New("codex session not found")
 	ErrCodexSessionAmbiguous = errors.New("codex session name is ambiguous")
 	ErrCodexRolloutMissing   = errors.New("codex rollout file missing")
 
 	codexIndexUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+	// session_meta is immutable once Codex creates a rollout. Cache only
+	// successfully classified records; an unknown result may simply mean the
+	// first line has not flushed yet and must remain retryable.
+	codexRolloutThreadMetadataCache sync.Map // map[string]codexRolloutThreadMetadata
 )
 
 // CodexSessionAmbiguousError includes the candidate sessions for an ambiguous
@@ -85,6 +99,14 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 	}
 	for _, entry := range stateEntries {
 		mergeCodexIndexEntry(latest, entry)
+	}
+	// Codex's SQLite/index files also contain internal workers and approval
+	// guardians. They are not user-facing resumable threads and must never be
+	// offered by Agent Deck's import picker.
+	for id := range latest {
+		if IsCodexSubagentSession(codexHome, id) {
+			delete(latest, id)
+		}
 	}
 
 	entries := make([]CodexIndexEntry, 0, len(latest))
@@ -367,6 +389,139 @@ func CodexRolloutCWD(codexHome, sessionID string) string {
 		}
 	}
 	return ""
+}
+
+// IsCodexSubagentSession reports whether sessionID belongs to an internal
+// Codex subagent (including approval-review guardians) rather than a
+// user-facing top-level thread. Agent Deck must never persist or resume these
+// IDs as the owning interactive session: Codex Desktop intentionally omits
+// subagent threads from its normal thread list.
+func IsCodexSubagentSession(codexHome, sessionID string) bool {
+	path := codexRolloutPathInHome(sessionID, codexHome)
+	return path != "" && codexRolloutThreadKind(path) == codexThreadSubagent
+}
+
+// IsCodexTopLevelSession reports whether rollout metadata positively identifies
+// sessionID as a user-facing thread. Unknown/missing metadata is deliberately
+// false so a new foreign hook candidate cannot win a binding race before its
+// immutable session_meta record is available.
+func IsCodexTopLevelSession(codexHome, sessionID string) bool {
+	path := codexRolloutPathInHome(sessionID, codexHome)
+	return path != "" && codexRolloutThreadKind(path) == codexThreadTopLevel
+}
+
+// CodexSessionRolloutExists reports whether the session has flushed a rollout
+// into codexHome. Hook compatibility paths use this to distinguish legacy
+// opaque IDs from a present-but-unclassifiable modern rollout.
+func CodexSessionRolloutExists(codexHome, sessionID string) bool {
+	return codexRolloutPathInHome(sessionID, codexHome) != ""
+}
+
+// CodexTopLevelSessionID resolves sessionID to the user-facing root thread
+// recorded in its rollout metadata. The boolean is true only when sessionID
+// itself is an internal subagent. Current Codex session_meta records carry the
+// root ID in payload.session_id even for nested workers and guardians.
+func CodexTopLevelSessionID(codexHome, sessionID string) (string, bool) {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	path := codexRolloutPathInHome(sessionID, codexHome)
+	if path == "" {
+		return sessionID, false
+	}
+	meta := readCodexRolloutThreadMetadata(path)
+	if meta.kind != codexThreadSubagent {
+		return sessionID, false
+	}
+	rootID := strings.ToLower(strings.TrimSpace(meta.rootID))
+	if !isCodexSessionUUID(rootID) {
+		return "", true
+	}
+	return rootID, true
+}
+
+type codexRolloutThreadMetadata struct {
+	kind   codexThreadKind
+	rootID string
+}
+
+// codexRolloutThreadKind reads only the session_meta record near the start of
+// a rollout. Current Codex represents top-level sources as strings such as
+// "cli"/"exec", while internal workers and approval reviewers use an object
+// with a "subagent" key. Unknown/missing metadata stays permissive for older
+// Codex versions rather than making otherwise valid sessions unresumable.
+func codexRolloutThreadKind(path string) codexThreadKind {
+	return readCodexRolloutThreadMetadata(path).kind
+}
+
+func readCodexRolloutThreadMetadata(path string) codexRolloutThreadMetadata {
+	if cached, ok := codexRolloutThreadMetadataCache.Load(path); ok {
+		return cached.(codexRolloutThreadMetadata)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return codexRolloutThreadMetadata{kind: codexThreadUnknown}
+	}
+	defer f.Close()
+
+	type rolloutMetaLine struct {
+		Type    string `json:"type"`
+		Payload struct {
+			SessionID string          `json:"session_id"`
+			Source    json.RawMessage `json:"source"`
+		} `json:"payload"`
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for lineNo := 0; lineNo < 32 && scanner.Scan(); lineNo++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var rec rolloutMetaLine
+		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec.Type != "session_meta" {
+			continue
+		}
+		meta := codexRolloutThreadMetadata{
+			kind:   codexSourceThreadKind(rec.Payload.Source),
+			rootID: rec.Payload.SessionID,
+		}
+		if meta.kind != codexThreadUnknown {
+			codexRolloutThreadMetadataCache.Store(path, meta)
+		}
+		return meta
+	}
+	return codexRolloutThreadMetadata{kind: codexThreadUnknown}
+}
+
+func codexSourceThreadKind(raw json.RawMessage) codexThreadKind {
+	if len(raw) == 0 || string(raw) == "null" {
+		return codexThreadUnknown
+	}
+
+	var sourceName string
+	if err := json.Unmarshal(raw, &sourceName); err == nil {
+		if strings.EqualFold(strings.TrimSpace(sourceName), "subagent") {
+			return codexThreadSubagent
+		}
+		if strings.TrimSpace(sourceName) != "" {
+			return codexThreadTopLevel
+		}
+	}
+
+	var sourceObject map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &sourceObject); err != nil {
+		return codexThreadUnknown
+	}
+	for key := range sourceObject {
+		if strings.EqualFold(strings.TrimSpace(key), "subagent") {
+			return codexThreadSubagent
+		}
+	}
+	if len(sourceObject) > 0 {
+		return codexThreadTopLevel
+	}
+	return codexThreadUnknown
 }
 
 func codexRolloutPathInHome(sessionID, codexHome string) string {

@@ -136,6 +136,68 @@ func TestHandleCodexNotify_JSONRPCMethodPayload(t *testing.T) {
 	}
 }
 
+func TestHandleCodexNotify_IgnoresGuardianSubagent(t *testing.T) {
+	tmpHome := t.TempDir()
+	codexHome := filepath.Join(tmpHome, ".codex")
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-guardian")
+	t.Setenv("CODEX_SESSION_ID", "")
+
+	const rootID = "11111111-1111-1111-1111-111111111111"
+	const guardianID = "22222222-2222-2222-2222-222222222222"
+	const newerRootID = "33333333-3333-3333-3333-333333333333"
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+	guardianMeta := map[string]any{
+		"type": "session_meta",
+		"payload": map[string]any{
+			"id":         guardianID,
+			"session_id": rootID,
+			"source": map[string]any{
+				"subagent": map[string]any{"other": "guardian"},
+			},
+		},
+	}
+	data, err := json.Marshal(guardianMeta)
+	if err != nil {
+		t.Fatalf("marshal guardian rollout: %v", err)
+	}
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-07-10T12-00-00-"+guardianID+".jsonl")
+	if err := os.WriteFile(rolloutPath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write guardian rollout: %v", err)
+	}
+
+	writeHookStatus("inst-guardian", "running", rootID, "turn/started")
+	// Model a late guardian from rootID completing after the interactive thread
+	// has already rotated and established a newer sticky anchor.
+	session.WriteHookSessionAnchor("inst-guardian", newerRootID)
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	os.Args = []string{"agent-deck", "codex-notify",
+		`{"event":"turn/completed","thread_id":"` + guardianID + `"}`}
+
+	handleCodexNotify()
+
+	hookPath := filepath.Join(getHooksDir(), "inst-guardian.json")
+	hookData, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hook file: %v", err)
+	}
+	var hook hookStatusFile
+	if err := json.Unmarshal(hookData, &hook); err != nil {
+		t.Fatalf("unmarshal hook: %v", err)
+	}
+	if hook.SessionID != rootID || hook.Status != "running" || hook.Event != "turn/started" {
+		t.Fatalf("guardian event replaced parent hook: %+v", hook)
+	}
+	if got := session.ReadHookSessionAnchor("inst-guardian"); got != newerRootID {
+		t.Fatalf("late guardian replaced newer hook anchor: got %q, want %q", got, newerRootID)
+	}
+}
+
 func TestHandleCodexNotify_EmptyTailEventKeepsJSONEmptyAndPersistsAnchor(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

@@ -45,7 +45,11 @@ func (i *Instance) reconcileTitleFromCodexLocked() (string, bool, error) {
 		return "", false, nil
 	}
 
-	name, err := CodexSessionNameIn(i.getCodexHomeDir(), i.CodexSessionID)
+	codexHome := i.getCodexHomeDir()
+	if IsCodexSubagentSession(codexHome, i.CodexSessionID) {
+		return "", false, nil
+	}
+	name, err := CodexSessionNameIn(codexHome, i.CodexSessionID)
 	if err != nil {
 		return "", false, err
 	}
@@ -114,6 +118,9 @@ func (i *Instance) EnsureCodexSessionIDForRename() string {
 	if i.CodexSessionID == "" {
 		i.updateCodexSession(i.collectOtherCodexSessionIDs(), true)
 	}
+	if IsCodexSubagentSession(i.getCodexHomeDir(), i.CodexSessionID) {
+		return ""
+	}
 	return i.CodexSessionID
 }
 
@@ -134,6 +141,9 @@ func SyncCodexSessionNameForCommand(command, codexHome, sessionID, title string,
 	codexHome = strings.TrimSpace(codexHome)
 	if codexHome == "" {
 		return fmt.Errorf("codex home is empty")
+	}
+	if IsCodexSubagentSession(codexHome, sessionID) {
+		return fmt.Errorf("refusing to rename internal Codex subagent thread %q", sessionID)
 	}
 
 	nativeErr := setCodexThreadNameNative(command, codexHome, sessionID, title)

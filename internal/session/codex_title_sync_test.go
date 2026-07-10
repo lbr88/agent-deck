@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +109,58 @@ func TestReconcileTitleFromCodexPersistsThroughOwningStorageWithoutGlobal(t *tes
 	}
 	if got, _ := toolData["codex_session_id"].(string); got != threadID {
 		t.Fatalf("persisted codex_session_id = %q, want %q", got, threadID)
+	}
+}
+
+func TestReconcileTitleFromCodexIgnoresInternalSubagentBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	const (
+		rootID     = "abababab-abab-abab-abab-abababababab"
+		subagentID = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"
+	)
+	writeCodexRolloutWithSourceAndRoot(t, home, subagentID, rootID, "/repo", map[string]any{
+		"subagent": map[string]any{"other": "guardian"},
+	})
+	writeCodexStateThread(t, home, subagentID, "hidden guardian title", "preview", "/repo", time.Now().UnixMilli())
+
+	inst := &Instance{
+		ID:             "subagent-title-guard",
+		Title:          "visible Agent Deck title",
+		ProjectPath:    "/repo",
+		Tool:           "codex",
+		CodexSessionID: subagentID,
+	}
+	if name, changed, err := inst.ReconcileTitleFromCodex(); err != nil {
+		t.Fatalf("ReconcileTitleFromCodex: %v", err)
+	} else if changed || name != "" {
+		t.Fatalf("reconcile = (%q, %v), want ignored subagent", name, changed)
+	}
+	if inst.Title != "visible Agent Deck title" {
+		t.Fatalf("title changed to hidden subagent title: %q", inst.Title)
+	}
+}
+
+func TestSyncCodexSessionNameRejectsInternalSubagentBinding(t *testing.T) {
+	home := t.TempDir()
+	const (
+		rootID     = "efefefef-efef-efef-efef-efefefefefef"
+		subagentID = "10101010-1010-1010-1010-101010101010"
+	)
+	writeCodexRolloutWithSourceAndRoot(t, home, subagentID, rootID, "/repo", map[string]any{
+		"subagent": map[string]any{"other": "guardian"},
+	})
+	writeCodexStateThread(t, home, subagentID, "hidden guardian title", "preview", "/repo", time.Now().UnixMilli())
+
+	err := SyncCodexSessionNameForCommand("codex", home, subagentID, "must not overwrite guardian", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "internal Codex subagent") {
+		t.Fatalf("SyncCodexSessionNameForCommand error = %v, want subagent rejection", err)
+	}
+	got, readErr := CodexSessionNameIn(home, subagentID)
+	if readErr != nil {
+		t.Fatalf("CodexSessionNameIn: %v", readErr)
+	}
+	if got != "hidden guardian title" {
+		t.Fatalf("hidden subagent title = %q, want unchanged", got)
 	}
 }

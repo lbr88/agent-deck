@@ -335,7 +335,7 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 	for _, inst := range instances {
 		byID[inst.ID] = inst
 		if IsClaudeCompatible(inst.Tool) || inst.Tool == "codex" || inst.Tool == "gemini" || inst.Tool == "cursor" {
-			if hs := d.hookStatusForInstance(inst.ID); hs != nil {
+			if hs := d.hookStatusForInstance(inst); hs != nil {
 				// Issue #1349: only let a hook status rebind the session id when
 				// the instance is actually LIVE (running/waiting/idle with a real
 				// tmux session). A stopped/removed session keeps a stale
@@ -692,7 +692,11 @@ func copyStatusMap(in map[string]string) map[string]string {
 	return out
 }
 
-func (d *TransitionDaemon) hookStatusForInstance(instanceID string) *HookStatus {
+func (d *TransitionDaemon) hookStatusForInstance(inst *Instance) *HookStatus {
+	if inst == nil {
+		return nil
+	}
+	instanceID := inst.ID
 	var best *HookStatus
 	if d.hookWatcher != nil {
 		if hs := d.hookWatcher.GetHookStatus(instanceID); hs != nil {
@@ -703,6 +707,21 @@ func (d *TransitionDaemon) hookStatusForInstance(instanceID string) *HookStatus 
 		if best == nil || hs.UpdatedAt.After(best.UpdatedAt) {
 			best = hs
 		}
+	}
+	bestIsCodexSubagent := best != nil && strings.TrimSpace(best.SessionID) != "" &&
+		IsCodexSubagentSession(inst.getCodexHomeDir(), best.SessionID)
+	currentIsLegacyCodexSubagent := best != nil && strings.TrimSpace(best.SessionID) != "" &&
+		best.SessionID != inst.CodexSessionID && IsCodexSubagentSession(inst.getCodexHomeDir(), inst.CodexSessionID) &&
+		!inst.isFreshCodexMigrationTarget(best.SessionID)
+	if IsCodexCompatible(inst.Tool) && (bestIsCodexSubagent || currentIsLegacyCodexSubagent) {
+		// Defense in depth for records written by older hook binaries. Reject
+		// before terminal-event handling so a guardian completion cannot be
+		// attributed to the owning interactive thread.
+		if d.hookWatcher != nil {
+			d.hookWatcher.ClearHookStatus(instanceID)
+		}
+		inst.removePersistedHookStatusFile()
+		return nil
 	}
 	return best
 }

@@ -1717,6 +1717,9 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 	// has persisted the reconciliation into Agent Deck's state DB.
 	if session.IsCodexCompatible(row.Tool) && strings.TrimSpace(codexSessionID) != "" {
 		codexHome := session.GetCodexHomeDirForCommand(row.Command)
+		if session.IsCodexSubagentSession(codexHome, codexSessionID) {
+			return info
+		}
 		if nativeTitle, err := session.CodexSessionNameIn(codexHome, codexSessionID); err == nil && nativeTitle != "" {
 			info.Title = nativeTitle
 		}

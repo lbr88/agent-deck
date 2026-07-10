@@ -154,8 +154,20 @@ func (w *StatusFileWatcher) Start() {
 				}
 			}
 
-			// Only process .json file writes/creates
+			// Only process .json status files.
 			if filepath.Ext(event.Name) != ".json" {
+				continue
+			}
+			// Unlink/rename must evict the in-memory entry too. Without this, a
+			// quarantined poisoned hook record remains authoritative to the
+			// transition daemon even after its file is removed.
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				if instanceID, valid := w.instanceIDForStatusFile(event.Name); valid {
+					w.ClearHookStatus(instanceID)
+					if w.onChange != nil {
+						w.onChange()
+					}
+				}
 				continue
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Write) == 0 {

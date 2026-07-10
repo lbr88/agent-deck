@@ -55,6 +55,10 @@ func handleSessionImportCodex(profile string, args []string) {
 		out.Error(formatCodexImportResolveError(err), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
+	if session.IsCodexSubagentSession(codexHome, entry.ID) {
+		out.Error(fmt.Sprintf("cannot import Codex internal subagent thread %s; fork it into a top-level thread first", entry.ID), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
 
 	projectPath := strings.TrimSpace(*pathFlag)
 	if projectPath == "" {
