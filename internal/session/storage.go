@@ -89,8 +89,9 @@ type InstanceData struct {
 	OpenCodeDetectedAt time.Time `json:"opencode_detected_at,omitempty"`
 
 	// Codex session (persisted for resume after app restart)
-	CodexSessionID  string    `json:"codex_session_id,omitempty"`
-	CodexDetectedAt time.Time `json:"codex_detected_at,omitempty"`
+	CodexSessionID       string    `json:"codex_session_id,omitempty"`
+	CodexDetectedAt      time.Time `json:"codex_detected_at,omitempty"`
+	CodexBindingRevision int64     `json:"-"`
 
 	// Kiro session (persisted for resume after app restart)
 	KiroSessionID  string    `json:"kiro_session_id,omitempty"`
@@ -319,17 +320,47 @@ func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) er
 	UpdateClaudeSessionsWithDedup(instances)
 
 	// Convert instances to database rows
-	rows := make([]*statedb.InstanceRow, len(instances))
-	for i, inst := range instances {
+	rows := make([]*statedb.InstanceRow, 0, len(instances))
+	codexRecords := make([]codexBindingSaveRecord, 0, len(instances))
+	for _, inst := range instances {
+		// A long-running UI/web process may be saving unrelated metadata after a
+		// short-lived CLI migrated a legacy Codex guardian binding. Merge that
+		// one-way promotion before serializing so the stale whole-row snapshot
+		// cannot overwrite the repaired database binding.
+		inst.mu.Lock()
+		if IsCodexCompatible(inst.Tool) {
+			inst.adoptPersistedCodexPromotion(true)
+		}
+		snapshot := captureCodexBindingSaveSnapshot(inst)
+		inst.mu.Unlock()
 		row, err := instanceToRow(inst)
 		if err != nil {
 			return err
 		}
-		rows[i] = row
+		row.ToolData = statedb.WriteCodexSessionBindingToToolData(
+			row.ToolData,
+			snapshot.sessionID,
+			snapshot.detectedAt,
+			snapshot.revision,
+		)
+		row.CodexBindingOverrideIntent = snapshot.overrideIntent
+		rows = append(rows, row)
+		codexRecords = append(codexRecords, codexBindingSaveRecord{
+			instance: inst,
+			row:      row,
+			snapshot: snapshot,
+		})
 	}
 
 	if err := s.db.SaveInstances(rows); err != nil {
 		return fmt.Errorf("failed to save instances: %w", err)
+	}
+	// SaveInstances may have rejected this process's stale Codex binding at the
+	// transaction boundary. Its returned row payload is the exact JSON that
+	// committed, so refresh the in-memory generation immediately; otherwise the
+	// same long-running process would keep trying to write the losing snapshot.
+	for _, record := range codexRecords {
+		record.instance.syncCommittedCodexBinding(s.db, record.row.ToolData, record.snapshot)
 	}
 
 	// Save groups (including empty ones)
@@ -354,6 +385,118 @@ func (s *Storage) SaveWithGroups(instances []*Instance, groupTree *GroupTree) er
 	_ = s.db.Touch()
 
 	return nil
+}
+
+type codexBindingSaveSnapshot struct {
+	sessionID      string
+	detectedAt     time.Time
+	revision       int64
+	overrideIntent bool
+}
+
+type codexBindingSaveRecord struct {
+	instance *Instance
+	row      *statedb.InstanceRow
+	snapshot codexBindingSaveSnapshot
+}
+
+// captureCodexBindingSaveSnapshot must be called while i.mu is held.
+func captureCodexBindingSaveSnapshot(i *Instance) codexBindingSaveSnapshot {
+	return codexBindingSaveSnapshot{
+		sessionID:      strings.ToLower(strings.TrimSpace(i.CodexSessionID)),
+		detectedAt:     i.CodexDetectedAt,
+		revision:       i.CodexBindingRevision,
+		overrideIntent: i.codexSessionBindingOverrideIntent,
+	}
+}
+
+func (s codexBindingSaveSnapshot) matches(i *Instance) bool {
+	return strings.EqualFold(strings.TrimSpace(i.CodexSessionID), s.sessionID) &&
+		i.CodexDetectedAt.Equal(s.detectedAt) &&
+		i.CodexBindingRevision == s.revision &&
+		i.codexSessionBindingOverrideIntent == s.overrideIntent
+}
+
+func (i *Instance) syncCommittedCodexBinding(
+	db *statedb.StateDB,
+	toolData json.RawMessage,
+	snapshot codexBindingSaveSnapshot,
+) {
+	if i == nil {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !snapshot.matches(i) {
+		return
+	}
+	sessionID, detectedAt, revision := statedb.ReadCodexSessionBindingFromToolData(toolData)
+	if !IsCodexCompatible(i.Tool) {
+		// A Codex ID can be edited before switching tools. Preserve its committed
+		// tuple and consume explicit intent, but avoid one lockfile + SQLite point
+		// read for every unrelated Claude/Gemini/etc. row in a full-registry save.
+		i.CodexSessionID = sessionID
+		i.CodexDetectedAt = detectedAt
+		i.CodexBindingRevision = revision
+		i.codexSessionBindingOverrideIntent = false
+		return
+	}
+
+	// A targeted accept may commit immediately after SaveInstances. Take the
+	// same hook lock as that writer, then re-read SQLite so the row image returned
+	// by SaveInstances cannot regress memory or the sticky anchor to revision N
+	// after revision N+1 has already committed.
+	release, lockErr := AcquireHookSessionLock(i.ID)
+	if lockErr == nil {
+		defer release()
+	} else {
+		storageLog.Warn("codex_post_save_sync_lock_failed",
+			slog.String("instance_id", i.ID),
+			slog.String("error", lockErr.Error()))
+	}
+	// acceptCodexSessionID mutates under the hook lock but does not necessarily
+	// own i.mu. Recheck after acquiring the hook lock so a winner that committed
+	// while we waited cannot be overwritten by this older save image.
+	if !snapshot.matches(i) {
+		return
+	}
+	if db != nil {
+		persistedID, persistedAt, persistedRevision, err := db.ReadCodexSessionBinding(i.ID)
+		if err != nil {
+			storageLog.Warn("codex_post_save_binding_read_failed",
+				slog.String("instance_id", i.ID),
+				slog.String("error", err.Error()))
+		} else {
+			sessionID, detectedAt, revision = persistedID, persistedAt, persistedRevision
+		}
+	}
+
+	previousID := strings.ToLower(strings.TrimSpace(i.CodexSessionID))
+	i.CodexSessionID = sessionID
+	i.CodexDetectedAt = detectedAt
+	i.CodexBindingRevision = revision
+	i.codexSessionBindingOverrideIntent = false
+
+	if lockErr != nil {
+		return
+	}
+	if !detectedAt.IsZero() {
+		ensureCodexBindingFloorState(i.ID, sessionID, detectedAt, revision)
+	}
+	if previousID != sessionID {
+		i.hookStatus = ""
+		i.hookEvent = ""
+		i.hookLastUpdate = time.Time{}
+		i.hookSessionID = sessionID
+	}
+	if sessionID == "" {
+		ClearHookSessionAnchor(i.ID)
+	} else if IsCodexTopLevelSession(i.getCodexHomeDir(), sessionID) {
+		WriteHookSessionAnchor(i.ID, sessionID)
+	}
+	if previousID != sessionID && i.tmuxSession != nil && i.tmuxSession.Exists() {
+		_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", sessionID)
+	}
 }
 
 // DeleteInstance removes a single instance from the database by ID.
@@ -723,35 +866,37 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 	// the positional MarshalToolData signature so legacy binaries that don't
 	// know the key preserve it via MergeToolDataExtras.
 	toolData = statedb.WriteKiroSessionBindingToToolData(toolData, inst.KiroSessionID, inst.KiroDetectedAt)
+	toolData = statedb.WriteCodexBindingRevisionToToolData(toolData, inst.CodexBindingRevision)
 	toolData = WriteIdleTimeoutSecsToToolData(toolData, inst.IdleTimeoutSecs)
 
 	return &statedb.InstanceRow{
-		ID:                  inst.ID,
-		Title:               inst.Title,
-		ProjectPath:         inst.ProjectPath,
-		GroupPath:           inst.GroupPath,
-		Order:               inst.Order,
-		Command:             inst.Command,
-		Wrapper:             inst.Wrapper,
-		Tool:                inst.Tool,
-		Status:              string(inst.Status),
-		TmuxSession:         tmuxName,
-		TmuxSocketName:      inst.TmuxSocketName,
-		CreatedAt:           inst.CreatedAt,
-		LastAccessed:        inst.LastAccessedAt,
-		ParentSessionID:     inst.ParentSessionID,
-		IsConductor:         inst.IsConductor,
-		NoTransitionNotify:  inst.NoTransitionNotify,
-		TitleLocked:         inst.TitleLocked,
-		AutoName:            inst.GetAutoName(),
-		AutoNameDescription: inst.GetAutoNameDescription(),
-		WorktreePath:        inst.WorktreePath,
-		WorktreeRepo:        inst.WorktreeRepoRoot,
-		WorktreeBranch:      inst.WorktreeBranch,
-		Account:             inst.Account,
-		ArchivedAt:          inst.ArchivedAt,
-		Pin:                 string(inst.Pin),
-		ToolData:            toolData,
+		ID:                         inst.ID,
+		Title:                      inst.Title,
+		ProjectPath:                inst.ProjectPath,
+		GroupPath:                  inst.GroupPath,
+		Order:                      inst.Order,
+		Command:                    inst.Command,
+		Wrapper:                    inst.Wrapper,
+		Tool:                       inst.Tool,
+		Status:                     string(inst.Status),
+		TmuxSession:                tmuxName,
+		TmuxSocketName:             inst.TmuxSocketName,
+		CreatedAt:                  inst.CreatedAt,
+		LastAccessed:               inst.LastAccessedAt,
+		ParentSessionID:            inst.ParentSessionID,
+		IsConductor:                inst.IsConductor,
+		NoTransitionNotify:         inst.NoTransitionNotify,
+		TitleLocked:                inst.TitleLocked,
+		AutoName:                   inst.GetAutoName(),
+		AutoNameDescription:        inst.GetAutoNameDescription(),
+		WorktreePath:               inst.WorktreePath,
+		WorktreeRepo:               inst.WorktreeRepoRoot,
+		WorktreeBranch:             inst.WorktreeBranch,
+		Account:                    inst.Account,
+		ArchivedAt:                 inst.ArchivedAt,
+		Pin:                        string(inst.Pin),
+		ToolData:                   toolData,
+		CodexBindingOverrideIntent: inst.codexSessionBindingOverrideIntent,
 	}, nil
 }
 
@@ -839,6 +984,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			autoLinkedChannels2,
 			color2 := statedb.UnmarshalToolData(r.ToolData)
 		kiroSID, kiroAt := statedb.ReadKiroSessionBindingFromToolData(r.ToolData)
+		codexBindingRevision := statedb.ReadCodexBindingRevisionFromToolData(r.ToolData)
 		sandboxCfg := decodeSandboxConfig(sandboxJSON)
 
 		instances[i] = &InstanceData{
@@ -877,6 +1023,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			OpenCodeDetectedAt:        opencodeAt,
 			CodexSessionID:            codexSID,
 			CodexDetectedAt:           codexAt,
+			CodexBindingRevision:      codexBindingRevision,
 			KiroSessionID:             kiroSID,
 			KiroDetectedAt:            kiroAt,
 			LatestPrompt:              latestPrompt,
@@ -961,6 +1108,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			autoLinkedChannels,
 			color := statedb.UnmarshalToolData(r.ToolData)
 		kiroSID, kiroAt := statedb.ReadKiroSessionBindingFromToolData(r.ToolData)
+		codexBindingRevision := statedb.ReadCodexBindingRevisionFromToolData(r.ToolData)
 		sandboxCfg := decodeSandboxConfig(sandboxJSON)
 
 		data.Instances[i] = &InstanceData{
@@ -999,6 +1147,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			OpenCodeDetectedAt:        opencodeAt,
 			CodexSessionID:            codexSID,
 			CodexDetectedAt:           codexAt,
+			CodexBindingRevision:      codexBindingRevision,
 			KiroSessionID:             kiroSID,
 			KiroDetectedAt:            kiroAt,
 			LatestPrompt:              latestPrompt,
@@ -1255,6 +1404,7 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			OpenCodeDetectedAt:        instData.OpenCodeDetectedAt,
 			CodexSessionID:            instData.CodexSessionID,
 			CodexDetectedAt:           instData.CodexDetectedAt,
+			CodexBindingRevision:      instData.CodexBindingRevision,
 			KiroSessionID:             instData.KiroSessionID,
 			KiroDetectedAt:            instData.KiroDetectedAt,
 			ToolOptionsJSON:           instData.ToolOptionsJSON,

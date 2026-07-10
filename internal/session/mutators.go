@@ -345,8 +345,50 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		if err != nil {
 			return oldValue, nil, err
 		}
+		if normalized != "" {
+			codexHome := inst.getCodexHomeDir()
+			if IsCodexSubagentSession(codexHome, normalized) {
+				return oldValue, nil, &MutationError{
+					Field: field,
+					Msg:   "internal Codex subagent/guardian IDs cannot own an Agent Deck session",
+				}
+			}
+			if CodexSessionRolloutExists(codexHome, normalized) && !IsCodexTopLevelSession(codexHome, normalized) {
+				return oldValue, nil, &MutationError{
+					Field: field,
+					Msg:   "Codex session rollout is not a verified top-level thread",
+				}
+			}
+		}
+		inst.mu.Lock()
+		releaseHookLock, lockErr := AcquireHookSessionLock(inst.ID)
+		if lockErr != nil {
+			inst.mu.Unlock()
+			return oldValue, nil, &MutationError{Field: field, Msg: fmt.Sprintf("lock Codex binding edit: %v", lockErr)}
+		}
+		defer func() {
+			releaseHookLock()
+			inst.mu.Unlock()
+		}()
 		inst.CodexSessionID = normalized
 		inst.CodexDetectedAt = time.Now()
+		// Entering this field case is explicit user intent even when a stale
+		// process happens to hold the same local value or the user repeats the
+		// edit. SQLite decides against its authoritative revision at commit time.
+		inst.codexSessionBindingOverrideIntent = true
+		writeCodexBindingFloorState(inst.ID, normalized, inst.CodexDetectedAt, inst.CodexBindingRevision)
+		inst.clearCodexSubagentMigration()
+		inst.removePersistedHookStatusFile()
+		inst.hookStatus = ""
+		inst.hookEvent = ""
+		inst.hookSessionID = ""
+		inst.hookLastUpdate = time.Time{}
+		if normalized == "" {
+			ClearHookSessionAnchor(inst.ID)
+		} else {
+			WriteHookSessionAnchor(inst.ID, normalized)
+		}
+		postCommit = makeCodexSessionEnvPostCommit(inst, normalized)
 
 	case FieldTitleLocked:
 		oldValue = strconv.FormatBool(inst.TitleLocked)
@@ -495,6 +537,42 @@ func makeSessionEnvPostCommit(inst *Instance, envName, value string) func() erro
 			}
 		}
 		return nil
+	}
+}
+
+func makeCodexSessionEnvPostCommit(inst *Instance, value string) func() error {
+	syncEnv := makeSessionEnvPostCommit(inst, "CODEX_SESSION_ID", value)
+	if syncEnv == nil {
+		return nil
+	}
+	return func() error {
+		inst.mu.Lock()
+		release, err := AcquireHookSessionLock(inst.ID)
+		if err != nil {
+			inst.mu.Unlock()
+			return fmt.Errorf("lock Codex session binding env sync: %w", err)
+		}
+		defer func() {
+			release()
+			inst.mu.Unlock()
+		}()
+		ensureCodexBindingFloorState(inst.ID, value, inst.CodexDetectedAt, inst.CodexBindingRevision)
+		if value == "" {
+			ClearHookSessionAnchor(inst.ID)
+		} else {
+			WriteHookSessionAnchor(inst.ID, value)
+		}
+		if hs := readHookStatusFile(inst.ID); hs != nil {
+			hookID := strings.ToLower(strings.TrimSpace(hs.SessionID))
+			if hookID != "" && hookID != strings.ToLower(strings.TrimSpace(value)) {
+				inst.removePersistedHookStatusFile()
+				inst.hookStatus = ""
+				inst.hookEvent = ""
+				inst.hookSessionID = ""
+				inst.hookLastUpdate = time.Time{}
+			}
+		}
+		return syncEnv()
 	}
 }
 

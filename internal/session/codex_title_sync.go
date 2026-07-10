@@ -85,6 +85,9 @@ func (i *Instance) refreshCodexMetadataLocked() {
 	if !IsCodexCompatible(i.Tool) {
 		return
 	}
+	// This must precede the metadata throttle: peer-process guardian migrations
+	// are correctness state, not optional title-refresh work.
+	i.adoptPersistedCodexPromotion(true)
 	now := time.Now()
 	if !i.lastCodexTitleSync.IsZero() && now.Sub(i.lastCodexTitleSync) < codexTitleReconcileInterval {
 		return

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -198,21 +199,27 @@ func handleCodexNotify() {
 		// A late child from an older root can finish after the interactive
 		// thread has rotated. Never replace an established anchor with a
 		// child's ancestry; only use it to bootstrap an otherwise empty one.
-		if rootID != "" && session.ReadHookSessionAnchor(instanceID) == "" {
-			session.WriteHookSessionAnchor(instanceID, rootID)
+		if rootID != "" {
+			releaseHookLock, err := session.AcquireHookSessionLock(instanceID)
+			if err != nil {
+				hookHandlerLog.Warn("codex_notify_lock_failed",
+					slog.String("instance", instanceID),
+					slog.String("error", err.Error()),
+				)
+				return
+			}
+			// Recheck under the shared lock: the interactive parent or a
+			// runtime promotion may have established its anchor while the
+			// guardian rollout was being classified.
+			if session.ReadHookSessionAnchor(instanceID) == "" &&
+				!session.CodexHookCandidateRejectedByBindingFloor(instanceID, rootID, session.GetCodexHomeDir()) {
+				session.WriteHookSessionAnchor(instanceID, rootID)
+			}
+			releaseHookLock()
 		}
 		return
 	}
-	if anchorID := session.ReadHookSessionAnchor(instanceID); sessionID != "" && anchorID != "" && sessionID != anchorID &&
-		session.CodexSessionRolloutExists(session.GetCodexHomeDir(), sessionID) &&
-		!session.IsCodexTopLevelSession(session.GetCodexHomeDir(), sessionID) {
-		// Do not let an unclassified foreign candidate win the short window
-		// before Codex flushes session_meta. A later hook or the process probe
-		// will bind it once ownership is positively known.
-		return
-	}
-
-	writeHookStatus(instanceID, status, sessionID, event)
+	writeCodexHookStatus(instanceID, status, sessionID, event)
 }
 
 func handleCodexHooks(args []string) {

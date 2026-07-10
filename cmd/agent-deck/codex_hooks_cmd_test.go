@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
@@ -195,6 +196,179 @@ func TestHandleCodexNotify_IgnoresGuardianSubagent(t *testing.T) {
 	}
 	if got := session.ReadHookSessionAnchor("inst-guardian"); got != newerRootID {
 		t.Fatalf("late guardian replaced newer hook anchor: got %q, want %q", got, newerRootID)
+	}
+}
+
+func TestHandleCodexNotify_GuardianBootstrapUsesSharedLock(t *testing.T) {
+	tmpHome := t.TempDir()
+	codexHome := filepath.Join(tmpHome, ".codex")
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-guardian-lock")
+	t.Setenv("CODEX_SESSION_ID", "")
+
+	const rootID = "61111111-1111-4111-8111-111111111111"
+	const guardianID = "62222222-2222-4222-8222-222222222222"
+	const promotedID = "63333333-3333-4333-8333-333333333333"
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+	guardianMeta, err := json.Marshal(map[string]any{
+		"type": "session_meta",
+		"payload": map[string]any{
+			"id": guardianID, "session_id": rootID,
+			"source": map[string]any{"subagent": map[string]any{"other": "guardian"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal guardian rollout: %v", err)
+	}
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-07-10T12-00-00-"+guardianID+".jsonl")
+	if err := os.WriteFile(rolloutPath, append(guardianMeta, '\n'), 0o600); err != nil {
+		t.Fatalf("write guardian rollout: %v", err)
+	}
+
+	release, err := session.AcquireHookSessionLock("inst-guardian-lock")
+	if err != nil {
+		t.Fatalf("acquire shared hook lock: %v", err)
+	}
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	os.Args = []string{"agent-deck", "codex-notify",
+		`{"event":"turn/completed","thread_id":"` + guardianID + `"}`}
+
+	done := make(chan struct{})
+	go func() {
+		handleCodexNotify()
+		close(done)
+	}()
+	select {
+	case <-done:
+		release()
+		t.Fatal("guardian notify did not wait for shared hook lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Model the runtime completing a promotion while it owns the shared lock.
+	// The guardian must recheck after acquiring the lock and preserve this ID.
+	session.WriteHookSessionAnchor("inst-guardian-lock", promotedID)
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("guardian notify remained blocked after shared lock release")
+	}
+	if got := session.ReadHookSessionAnchor("inst-guardian-lock"); got != promotedID {
+		t.Fatalf("guardian replaced promoted anchor: got %q, want %q", got, promotedID)
+	}
+}
+
+func TestHandleCodexNotify_IgnoresDelayedOlderTopLevel(t *testing.T) {
+	tmpHome := t.TempDir()
+	codexHome := filepath.Join(tmpHome, ".codex")
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-old-root")
+	t.Setenv("CODEX_SESSION_ID", "")
+
+	const (
+		oldRootID = "44444444-4444-4444-8444-444444444444"
+		forkID    = "55555555-5555-4555-8555-555555555555"
+	)
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+	for _, rec := range []struct {
+		id, timestamp, filenameTime string
+	}{
+		{oldRootID, "2026-07-10T10:00:00Z", "10-00-00"},
+		{forkID, "2026-07-10T11:00:00Z", "11-00-00"},
+	} {
+		data, err := json.Marshal(map[string]any{
+			"timestamp": rec.timestamp,
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id": rec.id, "session_id": rec.id, "source": "cli",
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal rollout: %v", err)
+		}
+		path := filepath.Join(rolloutDir, "rollout-2026-07-10T"+rec.filenameTime+"-"+rec.id+".jsonl")
+		if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+			t.Fatalf("write rollout: %v", err)
+		}
+	}
+
+	writeHookStatus("inst-old-root", "running", forkID, "turn/started")
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	os.Args = []string{"agent-deck", "codex-notify",
+		`{"event":"turn/completed","thread_id":"` + oldRootID + `"}`}
+
+	handleCodexNotify()
+
+	hookPath := filepath.Join(getHooksDir(), "inst-old-root.json")
+	hookData, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	var hook hookStatusFile
+	if err := json.Unmarshal(hookData, &hook); err != nil {
+		t.Fatalf("unmarshal hook: %v", err)
+	}
+	if hook.SessionID != forkID || hook.Status != "running" {
+		t.Fatalf("delayed old root replaced promoted hook: %+v", hook)
+	}
+	if got := session.ReadHookSessionAnchor("inst-old-root"); got != forkID {
+		t.Fatalf("delayed old root replaced promoted anchor: %q", got)
+	}
+}
+
+func TestHandleCodexNotify_RejectsCandidateBelowEmptyBindingFloor(t *testing.T) {
+	tmpHome := t.TempDir()
+	codexHome := filepath.Join(tmpHome, ".codex")
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("AGENTDECK_INSTANCE_ID", "inst-clear-floor")
+	t.Setenv("CODEX_SESSION_ID", "")
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	const oldID = "66666666-6666-4666-8666-666666666666"
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "10")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"timestamp": "2026-07-10T10:00:00Z",
+		"type":      "session_meta",
+		"payload":   map[string]any{"id": oldID, "session_id": oldID, "source": "cli"},
+	})
+	rolloutPath := filepath.Join(rolloutDir, "rollout-2026-07-10T10-00-00-"+oldID+".jsonl")
+	if err := os.WriteFile(rolloutPath, append(meta, '\n'), 0o600); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+
+	inst := session.NewInstanceWithTool("clear-floor", t.TempDir(), "codex")
+	inst.ID = "inst-clear-floor"
+	if _, _, err := session.SetField(inst, session.FieldCodexSessionID, "", nil); err != nil {
+		t.Fatalf("create empty binding floor: %v", err)
+	}
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
+	os.Args = []string{"agent-deck", "codex-notify",
+		`{"event":"turn/completed","thread_id":"` + oldID + `"}`}
+
+	handleCodexNotify()
+
+	if got := session.ReadHookSessionAnchor("inst-clear-floor"); got != "" {
+		t.Fatalf("old candidate crossed empty binding floor into anchor: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(getHooksDir(), "inst-clear-floor.json")); !os.IsNotExist(err) {
+		t.Fatalf("old candidate crossed empty binding floor into hook JSON: %v", err)
 	}
 }
 

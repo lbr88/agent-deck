@@ -439,8 +439,9 @@ func CodexTopLevelSessionID(codexHome, sessionID string) (string, bool) {
 }
 
 type codexRolloutThreadMetadata struct {
-	kind   codexThreadKind
-	rootID string
+	kind      codexThreadKind
+	rootID    string
+	createdAt time.Time
 }
 
 // codexRolloutThreadKind reads only the session_meta record near the start of
@@ -464,8 +465,9 @@ func readCodexRolloutThreadMetadata(path string) codexRolloutThreadMetadata {
 	defer f.Close()
 
 	type rolloutMetaLine struct {
-		Type    string `json:"type"`
-		Payload struct {
+		Timestamp string `json:"timestamp"`
+		Type      string `json:"type"`
+		Payload   struct {
 			SessionID string          `json:"session_id"`
 			Source    json.RawMessage `json:"source"`
 		} `json:"payload"`
@@ -483,8 +485,9 @@ func readCodexRolloutThreadMetadata(path string) codexRolloutThreadMetadata {
 			continue
 		}
 		meta := codexRolloutThreadMetadata{
-			kind:   codexSourceThreadKind(rec.Payload.Source),
-			rootID: rec.Payload.SessionID,
+			kind:      codexSourceThreadKind(rec.Payload.Source),
+			rootID:    rec.Payload.SessionID,
+			createdAt: parseCodexRolloutTimestamp(rec.Timestamp),
 		}
 		if meta.kind != codexThreadUnknown {
 			codexRolloutThreadMetadataCache.Store(path, meta)
@@ -492,6 +495,36 @@ func readCodexRolloutThreadMetadata(path string) codexRolloutThreadMetadata {
 		return meta
 	}
 	return codexRolloutThreadMetadata{kind: codexThreadUnknown}
+}
+
+func parseCodexRolloutTimestamp(value string) time.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func codexRolloutCreatedAt(codexHome, sessionID string) time.Time {
+	path := codexRolloutPathInHome(sessionID, codexHome)
+	if path == "" {
+		return time.Time{}
+	}
+	return readCodexRolloutThreadMetadata(path).createdAt
+}
+
+// CodexTopLevelSessionPredates reports whether candidate and current are known
+// top-level rollouts and candidate's immutable session_meta timestamp is older.
+// Zero/missing timestamps return false for backward compatibility with older
+// Codex rollouts; callers then fall back to their existing ownership guards.
+func CodexTopLevelSessionPredates(codexHome, candidate, current string) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(current)) ||
+		!IsCodexTopLevelSession(codexHome, candidate) || !IsCodexTopLevelSession(codexHome, current) {
+		return false
+	}
+	candidateAt := codexRolloutCreatedAt(codexHome, candidate)
+	currentAt := codexRolloutCreatedAt(codexHome, current)
+	return !candidateAt.IsZero() && !currentAt.IsZero() && candidateAt.Before(currentAt)
 }
 
 func codexSourceThreadKind(raw json.RawMessage) codexThreadKind {

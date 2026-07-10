@@ -21,7 +21,8 @@ func writeCodexRolloutWithSourceAndRoot(t *testing.T, codexHome, sessionID, root
 	}
 	path := filepath.Join(dir, "rollout-2026-07-10T12-00-00-"+sessionID+".jsonl")
 	record := map[string]any{
-		"type": "session_meta",
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"type":      "session_meta",
 		"payload": map[string]any{
 			"id":         sessionID,
 			"session_id": rootID,
@@ -318,8 +319,9 @@ func TestCodexSubagentMigrationAcceptsOnlyFreshFork(t *testing.T) {
 		t.Fatalf("process probe selected %q, want fresh fork %q", got, freshForkID)
 	}
 	reloaded.acceptCodexSessionID(freshForkID, false)
-	if _, err := os.Stat(codexSubagentMigrationStatePath(inst.ID)); !os.IsNotExist(err) {
-		t.Fatalf("migration sidecar was not cleared after rebind: %v", err)
+	completed, ok := readCodexSubagentMigrationState(inst.ID)
+	if !ok || completed.TargetID != freshForkID || completed.Completed.IsZero() {
+		t.Fatalf("completed migration provenance was not retained: %+v ok=%v", completed, ok)
 	}
 }
 

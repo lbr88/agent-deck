@@ -509,7 +509,15 @@ func (m *WebMutator) RestartFreshSession(id string) error {
 	if inst == nil {
 		return fmt.Errorf("session not found: %s", id)
 	}
-	return inst.RestartFresh()
+	restartErr := inst.RestartFresh()
+	// RestartFresh clears the binding before touching tmux. Persist that explicit
+	// tombstone even when the restart itself fails, matching the TUI/hub paths
+	// and preventing the next web process from resurrecting the old thread.
+	persistErr := m.persistAllInstances()
+	if restartErr != nil || persistErr != nil {
+		return errors.Join(restartErr, persistErr)
+	}
+	return nil
 }
 
 // DeleteSession kills a session and removes it from persistent storage.
@@ -1153,7 +1161,7 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 			m.h.instancesMu.Unlock()
 			return nil, false, nil, err
 		}
-		if oldValue == value {
+		if oldValue == value && field != session.FieldCodexSessionID {
 			continue
 		}
 		changed = append(changed, field)

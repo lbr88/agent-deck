@@ -1990,8 +1990,8 @@ func TestBuildCodexCommand_DropsResumeWhenRolloutMissing(t *testing.T) {
 	if inst.CodexSessionID != "" {
 		t.Fatalf("CodexSessionID should be cleared after stale-sid drop, got %q", inst.CodexSessionID)
 	}
-	if !inst.CodexDetectedAt.IsZero() {
-		t.Fatalf("CodexDetectedAt should be zeroed after stale-sid drop, got %v", inst.CodexDetectedAt)
+	if inst.CodexDetectedAt.IsZero() {
+		t.Fatal("CodexDetectedAt should record the stale-binding clear floor")
 	}
 	if got := ReadHookSessionAnchor(inst.ID); got != "" {
 		t.Fatalf(".sid anchor should be cleared after stale-sid drop, got %q", got)
@@ -3595,13 +3595,15 @@ func TestInstance_UpdateCodexSession_ScanCooldown(t *testing.T) {
 		t.Fatalf("post-cooldown known ID should keep %q, got %q", sessionID1, inst.CodexSessionID)
 	}
 
-	// If the binding is genuinely missing, bootstrap scan still works and picks
-	// the newest matching session.
-	inst.CodexSessionID = ""
-	inst.lastCodexScanAt = time.Now().Add(-codexRotationScanInterval - time.Second)
-	inst.UpdateCodexSession(nil)
-	if inst.CodexSessionID != sessionID2 {
-		t.Fatalf("bootstrap scan picked %q, want %q", inst.CodexSessionID, sessionID2)
+	// A genuinely unbound instance has no pending binding intent or durable
+	// creation-time floor. Bootstrap scan still works and picks the newest
+	// matching session. Do not model that state by directly blanking the first
+	// instance's ID: its initial discovery is intentionally journaled until the
+	// first whole-row save and must reject a delayed replacement.
+	bootstrapInst := NewInstanceWithTool("codex-bootstrap", projectPath, "codex")
+	bootstrapInst.UpdateCodexSession(nil)
+	if bootstrapInst.CodexSessionID != sessionID2 {
+		t.Fatalf("bootstrap scan picked %q, want %q", bootstrapInst.CodexSessionID, sessionID2)
 	}
 }
 

@@ -286,6 +286,30 @@ func writeHookStatus(instanceID, status, sessionID, event string, done ...sessio
 // unflushed tail persists as transcript_path so the daemon can finish the
 // scan (issue #1186 flush race).
 func writeHookStatusWithScan(instanceID, status, sessionID, event string, scan doneScanResult) {
+	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, scan, nil)
+}
+
+func writeCodexHookStatus(instanceID, status, sessionID, event string) {
+	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, doneScanResult{},
+		func(instanceID, candidateID string) bool {
+			codexHome := session.GetCodexHomeDir()
+			if session.CodexHookCandidateRejectedByBindingFloor(instanceID, candidateID, codexHome) {
+				return false
+			}
+			anchorID := session.ReadHookSessionAnchor(instanceID)
+			return candidateID == "" || anchorID == "" || candidateID == anchorID ||
+				!session.CodexSessionRolloutExists(codexHome, candidateID) ||
+				session.IsCodexTopLevelSession(codexHome, candidateID)
+		})
+}
+
+// writeHookStatusWithScanValidated runs validate while holding the shared
+// per-instance hook lock, before either the sticky anchor or JSON is replaced.
+func writeHookStatusWithScanValidated(
+	instanceID, status, sessionID, event string,
+	scan doneScanResult,
+	validate func(instanceID, sessionID string) bool,
+) {
 	if instanceID == "" || status == "" {
 		return
 	}
@@ -299,8 +323,29 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event string, scan d
 		)
 		return
 	}
+	// Parent, guardian, delayed old-root notify processes, and the Agent Deck
+	// runtime all share this lock. Keep validation, anchor healing, and status
+	// replacement in the same total order as runtime binding promotion.
+	releaseHookLock, err := session.AcquireHookSessionLock(instanceID)
+	if err != nil {
+		hookHandlerLog.Warn("hook_status_write_failed",
+			slog.String("path", filepath.Join(hooksDir, filepath.Base(instanceID)+".json")),
+			slog.String("instance", instanceID),
+			slog.String("phase", "acquire_hook_session_lock"),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	defer releaseHookLock()
 
 	sessionID = strings.TrimSpace(sessionID)
+	if validate != nil && !validate(instanceID, sessionID) {
+		return
+	}
+	if anchorID := session.ReadHookSessionAnchor(instanceID); sessionID != "" && anchorID != "" && sessionID != anchorID &&
+		session.CodexTopLevelSessionPredates(session.GetCodexHomeDir(), sessionID, anchorID) {
+		return
+	}
 	// Preserve legacy hook JSON semantics: empty stays empty.
 	// Persist non-empty session IDs in a sidecar, to be used only when reading.
 	if sessionID != "" {
@@ -329,13 +374,35 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event string, scan d
 	}
 
 	filePath := filepath.Join(hooksDir, filepath.Base(instanceID)+".json")
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, jsonData, 0600); err != nil {
+	tmp, err := os.CreateTemp(hooksDir, "."+filepath.Base(instanceID)+"-*.json.tmp")
+	if err != nil {
+		hookHandlerLog.Warn("hook_status_write_failed",
+			slog.String("path", filePath),
+			slog.String("instance", instanceID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		_ = tmp.Close()
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return
+	}
+	if _, err := tmp.Write(jsonData); err != nil {
 		hookHandlerLog.Warn("hook_status_write_failed",
 			slog.String("path", tmpPath),
 			slog.String("instance", instanceID),
 			slog.String("error", err.Error()),
 		)
+		return
+	}
+	if err := tmp.Close(); err != nil {
 		return
 	}
 	if err := os.Rename(tmpPath, filePath); err != nil {
@@ -345,10 +412,9 @@ func writeHookStatusWithScan(instanceID, status, sessionID, event string, scan d
 			slog.String("instance", instanceID),
 			slog.String("error", err.Error()),
 		)
-		// Best-effort cleanup of the orphaned temp file.
-		_ = os.Remove(tmpPath)
 		return
 	}
+	committed = true
 
 	// Clear sticky session mapping when the upstream session is explicitly ended.
 	if isTerminalHookEvent(event) {
