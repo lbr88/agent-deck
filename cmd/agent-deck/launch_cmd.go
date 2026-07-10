@@ -142,7 +142,7 @@ func handleLaunch(profile string, args []string) {
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  agent-deck launch . -c claude")
-		fmt.Println("  agent-deck launch . -c codex --model gpt-5.5")
+		fmt.Println("  agent-deck launch . -c codex --model gpt-5.6")
 		fmt.Println("  agent-deck launch . -c gemini --model gemini-3.1-pro-preview")
 		fmt.Println("  agent-deck launch . -c claude -m \"Explain this codebase\"")
 		fmt.Println("  agent-deck launch /path/to/project -t \"My Agent\" -c claude -g work")

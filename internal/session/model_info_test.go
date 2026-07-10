@@ -39,6 +39,13 @@ func TestParseModelID(t *testing.T) {
 			display: "GPT Pro 5.5",
 		},
 		{
+			name:    "gpt 5.6 sol",
+			modelID: "gpt-5.6-sol",
+			model:   "GPT Sol",
+			version: "5.6",
+			display: "GPT Sol 5.6",
+		},
+		{
 			name:    "codex optimized gpt",
 			modelID: "gpt-5.3-codex",
 			model:   "GPT Codex",

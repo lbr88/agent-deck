@@ -1023,6 +1023,10 @@ func knownModelIDsForTool(tool string) []string {
 		}
 	case session.IsCodexCompatible(tool):
 		return []string{
+			"gpt-5.6",
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+			"gpt-5.6-luna",
 			"gpt-5.5",
 			"gpt-5.5-pro",
 			"gpt-5.4",
@@ -1315,7 +1319,7 @@ func (d *NewDialog) updateModelPlaceholder() {
 	case cmd == "kiro":
 		d.modelInput.Placeholder = "auto"
 	case session.IsCodexCompatible(cmd):
-		d.modelInput.Placeholder = "gpt-5.5"
+		d.modelInput.Placeholder = "gpt-5.6"
 	default:
 		d.modelInput.Placeholder = "tool default"
 	}
@@ -1332,7 +1336,7 @@ func (d *NewDialog) modelInputHint() string {
 	case cmd == "kiro":
 		return "Examples: auto, claude-sonnet-4.6, claude-opus-4.8"
 	case session.IsCodexCompatible(cmd):
-		return "Examples: gpt-5.5, gpt-5.4, gpt-5.3-codex, gpt-5.4-mini"
+		return "Examples: gpt-5.6, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna"
 	default:
 		return ""
 	}

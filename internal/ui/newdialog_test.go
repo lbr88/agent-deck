@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,13 +84,28 @@ func TestNewDialog_ModelInputForCodex(t *testing.T) {
 	if !strings.Contains(view, "Model ID") {
 		t.Fatal("codex new-session dialog should render a model input")
 	}
-	if !strings.Contains(view, "gpt-5.5") || !strings.Contains(view, "gpt-5.4") {
-		t.Fatalf("codex model hints should include current ChatGPT versions: %q", view)
+	if !strings.Contains(view, "gpt-5.6-sol") || !strings.Contains(view, "gpt-5.6-terra") || !strings.Contains(view, "gpt-5.6-luna") {
+		t.Fatalf("codex model hints should include the current GPT-5.6 family: %q", view)
 	}
 
 	d.modelInput.SetValue("gpt-5.5")
 	if got := d.GetLaunchModelID(); got != "gpt-5.5" {
 		t.Fatalf("GetLaunchModelID() = %q, want gpt-5.5", got)
+	}
+}
+
+func TestNewDialog_CodexModelCatalogIncludesGPT56Family(t *testing.T) {
+	models := knownModelIDsForTool("codex")
+	want := []string{"gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	for _, model := range want {
+		if !slices.Contains(models, model) {
+			t.Fatalf("Codex model catalog missing %q: %v", model, models)
+		}
+	}
+	for i, model := range want {
+		if models[i] != model {
+			t.Fatalf("Codex model catalog[%d] = %q, want newest model %q first", i, models[i], model)
+		}
 	}
 }
 

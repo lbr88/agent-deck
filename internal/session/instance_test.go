@@ -1518,6 +1518,22 @@ func TestBuildCodexCommand_ModelOption(t *testing.T) {
 	}
 }
 
+func TestBuildCodexCommand_GPT56ModelOption(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+
+	inst := NewInstanceWithTool("codex-model-56", "/tmp/codex-model-56", "codex")
+	if err := inst.SetCodexOptions(&CodexOptions{Model: "gpt-5.6-sol"}); err != nil {
+		t.Fatalf("SetCodexOptions: %v", err)
+	}
+
+	cmd := inst.buildCodexCommand("codex")
+	if !strings.Contains(cmd, "--model gpt-5.6-sol") {
+		t.Fatalf("buildCodexCommand should pass the exact GPT-5.6 model, got %q", cmd)
+	}
+}
+
 func TestApplyLaunchModel_SetsToolSpecificFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
