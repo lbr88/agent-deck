@@ -1711,6 +1711,16 @@ func sessionInfoFromRow(row *statedb.InstanceRow) SessionInfo {
 		archivedAt := row.ArchivedAt
 		info.ArchivedAt = &archivedAt
 	}
+	// Hub snapshots are often produced by a headless connector without the
+	// full TUI status loop. Overlay Codex's native thread name here so an
+	// in-Codex /rename is visible remotely even before another local surface
+	// has persisted the reconciliation into Agent Deck's state DB.
+	if session.IsCodexCompatible(row.Tool) && strings.TrimSpace(codexSessionID) != "" {
+		codexHome := session.GetCodexHomeDirForCommand(row.Command)
+		if nativeTitle, err := session.CodexSessionNameIn(codexHome, codexSessionID); err == nil && nativeTitle != "" {
+			info.Title = nativeTitle
+		}
+	}
 	return info
 }
 

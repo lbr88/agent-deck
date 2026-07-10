@@ -441,6 +441,49 @@ func SyncCodexSessionNameIn(codexHome, sessionID, title string, now time.Time) e
 	return updateCodexStateThreadTitle(codexHome, sessionID, title)
 }
 
+// CodexSessionNameIn returns the title Codex currently stores for sessionID.
+// The native SQLite thread row is authoritative for current Codex versions;
+// session_index.jsonl is intentionally not consulted because Agent Deck's own
+// older append records can otherwise mask a newer in-Codex /rename.
+func CodexSessionNameIn(codexHome, sessionID string) (string, error) {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if sessionID == "" {
+		return "", nil
+	}
+	if !isCodexSessionUUID(sessionID) {
+		return "", fmt.Errorf("invalid codex session id %q", sessionID)
+	}
+	if strings.TrimSpace(codexHome) == "" {
+		return "", fmt.Errorf("codex home is empty")
+	}
+
+	path := filepath.Join(codexHome, "state_5.sqlite")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+
+	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var title sql.NullString
+	err = db.QueryRow(`SELECT title FROM threads WHERE id = ?`, sessionID).Scan(&title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(title.String), nil
+}
+
 func updateCodexStateThreadTitle(codexHome, sessionID, title string) error {
 	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
 	title = strings.TrimSpace(title)

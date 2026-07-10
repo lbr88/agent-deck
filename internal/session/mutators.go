@@ -148,13 +148,17 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		// next hook event. Unlock via `session set <id> title-locked false`.
 		inst.TitleLocked = true
 		inst.SyncTmuxDisplayName()
-		if strings.TrimSpace(value) != "" && ((IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "") || (inst.Tool == "kiro" && inst.KiroSessionID != "")) {
+		if strings.TrimSpace(value) != "" && (IsCodexCompatible(inst.Tool) || (inst.Tool == "kiro" && inst.KiroSessionID != "")) {
 			title := inst.Title
+			codexCommand := inst.resolveCodexCommand(inst.Command)
+			codexHome := inst.getCodexHomeDir()
 			postCommit = func() error {
 				var syncErr error
-				if IsCodexCompatible(inst.Tool) && inst.CodexSessionID != "" {
-					sessionID := inst.CodexSessionID
-					if err := SyncCodexSessionNameIn(inst.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
+				if IsCodexCompatible(inst.Tool) {
+					sessionID := inst.EnsureCodexSessionIDForRename()
+					if sessionID == "" {
+						syncErr = errors.Join(syncErr, fmt.Errorf("Codex session name sync failed: active session ID is not available"))
+					} else if err := SyncCodexSessionNameForCommand(codexCommand, codexHome, sessionID, title, time.Now()); err != nil {
 						sessionLog.Warn("codex_session_name_sync_failed",
 							slog.String("session_id", sessionID),
 							slog.String("title", title),

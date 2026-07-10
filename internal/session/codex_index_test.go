@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	_ "modernc.org/sqlite"
 )
 
@@ -324,6 +325,67 @@ func TestSyncCodexSessionNameInMissingStateDBStillWritesJSONIndex(t *testing.T) 
 	}
 	if len(entries) != 1 || entries[0].ID != id || entries[0].ThreadName != "json-only" {
 		t.Fatalf("entries = %#v, want json-only title", entries)
+	}
+}
+
+func TestCodexSessionNameInReadsNativeThreadTitle(t *testing.T) {
+	home := t.TempDir()
+	id := "77777777-7777-7777-7777-777777777777"
+	writeCodexStateThread(t, home, id, "renamed with slash command", "preview", "/repo", time.Now().UnixMilli())
+
+	got, err := CodexSessionNameIn(home, id)
+	if err != nil {
+		t.Fatalf("CodexSessionNameIn: %v", err)
+	}
+	if got != "renamed with slash command" {
+		t.Fatalf("CodexSessionNameIn = %q, want slash-command title", got)
+	}
+}
+
+func TestReconcileTitleFromCodexUpdatesLockedTitleAndPersists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+
+	db := withTempGlobalStateDB(t)
+	id := "88888888-8888-8888-8888-888888888888"
+	writeCodexStateThread(t, GetCodexHomeDir(), id, "renamed from codex", "preview", "/repo", time.Now().UnixMilli())
+
+	inst := NewInstanceWithTool("agent deck title", "/repo", "codex")
+	inst.CodexSessionID = id
+	inst.TitleLocked = true
+	if err := db.SaveInstance(&statedb.InstanceRow{
+		ID:          inst.ID,
+		Title:       inst.Title,
+		ProjectPath: inst.ProjectPath,
+		GroupPath:   inst.GroupPath,
+		Tool:        inst.Tool,
+		Status:      "idle",
+		CreatedAt:   time.Now(),
+		TitleLocked: true,
+		ToolData:    json.RawMessage(`{"codex_session_id":"` + id + `"}`),
+	}); err != nil {
+		t.Fatalf("SaveInstance: %v", err)
+	}
+
+	name, changed, err := inst.ReconcileTitleFromCodex()
+	if err != nil {
+		t.Fatalf("ReconcileTitleFromCodex: %v", err)
+	}
+	if !changed || name != "renamed from codex" || inst.Title != name {
+		t.Fatalf("reconcile = (%q, %v), instance title %q", name, changed, inst.Title)
+	}
+	rows, err := db.LoadInstances()
+	if err != nil {
+		t.Fatalf("LoadInstances: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Title != "renamed from codex" {
+		t.Fatalf("persisted rows = %#v, want renamed title", rows)
+	}
+	if !inst.TitleLocked {
+		t.Fatal("Codex rename must not silently change the user's title-lock setting")
 	}
 }
 

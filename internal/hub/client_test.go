@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1107,6 +1108,61 @@ func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	}
 	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(now) {
 		t.Fatalf("UpdatedAt = %v, want %v", got.UpdatedAt, now)
+	}
+}
+
+func TestLocalSessionSourceUsesNativeCodexRename(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	id := "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	storage, err := session.NewStorageWithProfile("hub-codex-title")
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	if err := storage.Save([]*session.Instance{{
+		ID:             "codex-row",
+		Title:          "stale agent deck title",
+		ProjectPath:    "/repo",
+		GroupPath:      "default",
+		Tool:           "codex",
+		Command:        "codex",
+		Status:         session.StatusWaiting,
+		CreatedAt:      time.Now(),
+		CodexSessionID: id,
+	}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatalf("mkdir CODEX_HOME: %v", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(home, ".codex", "state_5.sqlite"))
+	if err != nil {
+		t.Fatalf("open Codex state: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create threads: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO threads (id, title) VALUES (?, ?)`, id, "renamed in codex"); err != nil {
+		t.Fatalf("insert thread: %v", err)
+	}
+	_ = db.Close()
+
+	snapshot, err := (LocalSessionSource{Profile: "hub-codex-title"}).Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].Title != "renamed in codex" {
+		t.Fatalf("snapshot sessions = %+v", snapshot.Sessions)
 	}
 }
 

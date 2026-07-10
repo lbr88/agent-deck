@@ -1276,6 +1276,7 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			AdditionalPaths:           instData.AdditionalPaths,
 			MultiRepoTempDir:          instData.MultiRepoTempDir,
 			tmuxSession:               tmuxSess,
+			stateDB:                   s.db,
 		}
 		// Convert multi-repo worktree data
 		for _, wt := range instData.MultiRepoWorktrees {

@@ -389,6 +389,10 @@ type Instance struct {
 	ToolOptionsJSON json.RawMessage `json:"tool_options,omitempty"`
 
 	tmuxSession *tmux.Session // Internal tmux session
+	// stateDB is the owning profile database for instances loaded from Storage.
+	// Targeted metadata reconciliation must not rely only on statedb.GetGlobal:
+	// short-lived CLI subcommands return before main installs that singleton.
+	stateDB *statedb.StateDB
 
 	// Hook-based status detection (set by StatusFileWatcher from Claude Code hooks)
 	hookStatus     string    // running, idle, waiting, dead (empty = no hook data)
@@ -437,6 +441,7 @@ type Instance struct {
 	// Rate-limits expensive session metadata sync work (Claude/Gemini/Codex)
 	// that runs from UpdateStatus while this instance lock is held.
 	lastSessionMetaSync time.Time
+	lastCodexTitleSync  time.Time
 
 	// SkipMCPRegenerate skips .mcp.json regeneration on next Restart()
 	// Set by MCP dialog Apply() to avoid race condition where Apply writes
@@ -3796,6 +3801,11 @@ func (i *Instance) UpdateStatus() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	// Codex thread names and late session-ID bindings are native metadata, not
+	// tmux status. Refresh them before the early-return paths below so /rename
+	// is observed even while a session is detached, stopped, or hook-fast.
+	i.refreshCodexMetadataLocked()
+
 	// Short grace period for tmux initialization (not Claude startup)
 	// Use lastStartTime for accuracy on restarts, fallback to CreatedAt
 	graceTime := i.lastStartTime
@@ -4427,24 +4437,36 @@ func (i *Instance) bindCodexSessionFromHook(sessionID, hookEvent string) {
 		slog.String("new_id", sessionID),
 		slog.String("event", hookEvent),
 	)
-	i.acceptCodexSessionID(sessionID, true)
+	changed := i.acceptCodexSessionID(sessionID, true)
 	i.hookSessionID = i.CodexSessionID
-
-	// Persist the rebind to SQLite. See bindClaudeSessionFromHook for the
-	// full rationale: none of the three UpdateHookStatus callers (TUI
-	// tick, web refresh, CLI status refresh) save after a hook-triggered
-	// rebind, so tool_data.codex_session_id stays pinned at the stale
-	// UUID indefinitely for DB-direct consumers, and peer processes
-	// holding stale snapshots keep clobbering the in-memory mutation —
-	// producing a runaway loop of fresh "rebind" decisions on every
-	// poll. WriteCodexSessionBinding rewrites only the typed schema
-	// fields via json_set, leaving every other tool_data key untouched.
-	if db := statedb.GetGlobal(); db != nil {
-		if err := db.WriteCodexSessionBinding(i.ID, i.CodexSessionID, i.CodexDetectedAt); err != nil {
-			sessionLog.Warn("codex_session_rebind_persist_failed",
+	if changed {
+		codexTitle, titleErr := CodexSessionNameIn(i.getCodexHomeDir(), i.CodexSessionID)
+		switch {
+		case titleErr != nil:
+			sessionLog.Warn("codex_title_read_after_bind_failed",
 				slog.String("instance_id", i.ID),
-				slog.String("new_id", i.CodexSessionID),
-				slog.String("error", err.Error()))
+				slog.String("session_id", i.CodexSessionID),
+				slog.String("error", titleErr.Error()))
+		case codexTitle == "":
+			// A newly-created Codex thread may not have a native title yet. Seed
+			// the legacy index with Agent Deck's creation title, but never overwrite
+			// an existing native /rename discovered above.
+			if title := strings.TrimSpace(i.Title); title != "" {
+				if err := SyncCodexSessionNameIn(i.getCodexHomeDir(), i.CodexSessionID, title, time.Now()); err != nil {
+					sessionLog.Warn("codex_session_name_seed_failed",
+						slog.String("instance_id", i.ID),
+						slog.String("session_id", i.CodexSessionID),
+						slog.String("error", err.Error()))
+				}
+			}
+		default:
+			_, _, titleErr = i.reconcileTitleFromCodexLocked()
+		}
+		if titleErr != nil {
+			sessionLog.Warn("codex_title_reconcile_after_bind_failed",
+				slog.String("instance_id", i.ID),
+				slog.String("session_id", i.CodexSessionID),
+				slog.String("error", titleErr.Error()))
 		}
 	}
 }
@@ -4466,22 +4488,26 @@ func (i *Instance) acceptCodexSessionID(sessionID string, syncTmuxEnv bool) bool
 	}
 
 	if changed {
-		i.syncCodexSessionIndexName(sessionID)
+		// Every discovery path must persist immediately. CLI launch/rename
+		// processes can exit before a later whole-row save, and stale rows then
+		// lose both native rename directions on the next reload.
+		if db := i.metadataStateDB(); db != nil {
+			if err := db.WriteCodexSessionBinding(i.ID, i.CodexSessionID, i.CodexDetectedAt); err != nil {
+				sessionLog.Warn("codex_session_binding_persist_failed",
+					slog.String("instance_id", i.ID),
+					slog.String("new_id", i.CodexSessionID),
+					slog.String("error", err.Error()))
+			}
+		}
 	}
 	return changed
 }
 
-func (i *Instance) syncCodexSessionIndexName(sessionID string) {
-	title := strings.TrimSpace(i.Title)
-	if title == "" {
-		return
+func (i *Instance) metadataStateDB() *statedb.StateDB {
+	if i != nil && i.stateDB != nil {
+		return i.stateDB
 	}
-	if err := SyncCodexSessionNameIn(i.getCodexHomeDir(), sessionID, title, time.Now()); err != nil {
-		sessionLog.Warn("codex_session_name_sync_failed",
-			slog.String("session_id", sessionID),
-			slog.String("title", title),
-			slog.String("error", err.Error()))
-	}
+	return statedb.GetGlobal()
 }
 
 // bindGeminiSessionFromHook is the Gemini counterpart of

@@ -1306,6 +1306,20 @@ func (s *StateDB) WriteCodexSessionBinding(id, sessionID string, detectedAt time
 	})
 }
 
+// WriteSessionTitle persists an agent-native title change without replacing
+// the rest of the instance row. Codex /rename reconciliation uses this path so
+// a title discovered during a status refresh cannot clobber concurrent edits
+// to tool_data, group placement, or lifecycle state.
+func (s *StateDB) WriteSessionTitle(id, title string) error {
+	return withBusyRetry(func() error {
+		_, err := s.db.Exec(
+			`UPDATE instances SET title = ?, auto_name = 0 WHERE id = ?`,
+			title, id,
+		)
+		return err
+	})
+}
+
 // WriteGeminiSessionBinding is the Gemini counterpart of
 // WriteClaudeSessionBinding. See that function's doc comment for the
 // PERSIST-12 / json_set / withBusyRetry rationale; the Gemini rebind

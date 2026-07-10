@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetField_Title_UpdatesAndReturnsOldValue(t *testing.T) {
@@ -93,6 +94,40 @@ func TestSetFieldTitleCodexPostCommitReturnsSyncError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Codex session name") {
 		t.Fatalf("postCommit error = %v, want Codex session name context", err)
+	}
+}
+
+func TestSetFieldTitleCodexResolvesMissingSessionIDBeforeSync(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	project := t.TempDir()
+	id := "99999999-9999-9999-9999-999999999999"
+	writeCodexRolloutBody(t, home, id, `{"type":"session_meta","payload":{"id":"`+id+`","cwd":"`+project+`"}}`+"\n")
+	writeCodexStateThread(t, home, id, "codex old title", "preview", project, time.Now().UnixMilli())
+
+	inst := NewInstanceWithTool("agent deck old title", project, "codex")
+	inst.Command = "custom-codex-wrapper"
+	inst.CodexStartedAt = time.Now().Add(-time.Minute).UnixMilli()
+
+	_, postCommit, err := SetField(inst, FieldTitle, "agent deck new title", nil)
+	if err != nil {
+		t.Fatalf("SetField: %v", err)
+	}
+	if postCommit == nil {
+		t.Fatal("Codex rename with a missing cached ID must still return a sync action")
+	}
+	if err := postCommit(); err != nil {
+		t.Fatalf("postCommit: %v", err)
+	}
+	if inst.CodexSessionID != id {
+		t.Fatalf("CodexSessionID = %q, want detected %q", inst.CodexSessionID, id)
+	}
+	got, err := CodexSessionNameIn(home, id)
+	if err != nil {
+		t.Fatalf("CodexSessionNameIn: %v", err)
+	}
+	if got != "agent deck new title" {
+		t.Fatalf("Codex title = %q, want Agent Deck rename", got)
 	}
 }
 
