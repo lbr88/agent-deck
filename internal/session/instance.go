@@ -2537,7 +2537,7 @@ func resolveDynamicTool(current, detected string, preserveCustom bool) string {
 	switch detected {
 	case "kiro":
 		return detected
-	case "claude", "gemini", "opencode", "codex":
+	case "claude", "gemini", "opencode", "codex", "omp":
 		if current == "kiro" && detected == "claude" {
 			return current
 		}
