@@ -282,11 +282,17 @@ function SessionItem({ s, sel, onSelect, showCols }) {
       <span class="sig">${kindSigil(s.kind)}</span>
       <div class="titleline">
         <${Dot} status=${s.status}/>
-        <span class="tt">${s.title}</span>
+        <span class="tt" title=${s.title}>${s.title}</span>
       </div>
       <div class="meta">
-        ${s.isHub && html`<span class="tag">hub:${s.hubNodeName || s.hubNodeId}</span>`}
-        ${showCols.tool && s.tool && html`<span class="tag">${s.tool}</span>`}
+        ${s.isHub && html`
+          <span class="tag hub-tag" title=${`Hub: ${s.hubNodeName || s.hubNodeId}`}>
+            hub:${s.hubNodeName || s.hubNodeId}
+          </span>
+        `}
+        ${showCols.tool && s.tool && html`
+          <span class="tag tool-tag" title=${`Provider: ${s.tool}`}>${s.tool}</span>
+        `}
         ${showCols.cost && s.cost > 0 && html`<span class="cost">$${s.cost.toFixed(2)}</span>`}
         <button class="row-chev" title="Details" onClick=${e => { e.stopPropagation(); setExp(v => !v) }}>
           ${exp ? '▾' : '▸'}
