@@ -402,11 +402,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		// Signal long-lived handlers (SSE/WS) to stop promptly.
 		s.cancelBase()
 	}
-	if s.hookWatcher != nil {
-		s.hookWatcher.Stop()
-		s.hookWatcher = nil
-	}
-
+	// Start owns hookWatcher and stops it after ListenAndServe returns. Keeping
+	// that ownership on one goroutine avoids racing a concurrent update-driven
+	// Shutdown against watcher initialization/cleanup.
 	err := s.httpServer.Shutdown(ctx)
 	if err == nil {
 		return nil

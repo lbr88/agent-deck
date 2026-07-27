@@ -555,6 +555,13 @@ func selfUpdateTestTarget(t *testing.T, initial []byte) string {
 	}
 	t.Cleanup(func() { detectHomebrewManagedInstall = orig })
 
+	// Most download/branch tests use short sentinel byte slices rather than a
+	// real executable. Candidate execution is covered by self_update_test.go;
+	// keep these tests focused on their checksum and orchestration contracts.
+	origValidator := validateSelfUpdateCandidate
+	validateSelfUpdateCandidate = func(string) error { return nil }
+	t.Cleanup(func() { validateSelfUpdateCandidate = origValidator })
+
 	return execPath
 }
 

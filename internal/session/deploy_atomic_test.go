@@ -24,7 +24,7 @@ func TestDeployBinary_StagesAndRenames_NeverTruncatesLiveBinary(t *testing.T) {
 
 	r, calls := recordingRunner(func(string) (string, error) { return "", nil })
 
-	if err := r.DeployBinary(context.Background(), []byte("new-binary-bytes"), target); err != nil {
+	if err := r.DeployBinary(context.Background(), []byte("new-binary-bytes"), target, "1.2.3"); err != nil {
 		t.Fatalf("DeployBinary returned error: %v", err)
 	}
 
@@ -42,7 +42,7 @@ func TestDeployBinary_StagesAndRenames_NeverTruncatesLiveBinary(t *testing.T) {
 	if !strings.Contains(cmd, "mv -f ") {
 		t.Fatalf("deploy must atomically `mv -f` the staged binary into place; got:\n%s", cmd)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(cmd), shellQuote(target)) {
-		t.Fatalf("the rename destination must be the final target %s; got:\n%s", target, cmd)
+	if !strings.Contains(cmd, `mv -f "$ad_tmp" "$ad_target"`) {
+		t.Fatalf("the atomic rename destination must be the final target %s; got:\n%s", target, cmd)
 	}
 }

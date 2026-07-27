@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Live in-place updates for long-running modes.** Verified local and remote updates now publish atomically, and running TUI, web, hub, OpenClaw bridge, notification, and credential-refresh processes gracefully re-exec the replacement with the same PID and launch context. Managed tmux agent sessions remain alive; `agent-deck update --yes` enables non-interactive host automation.
+
+### Fixed
+
+- **Self-update transactions are concurrency-safe and recoverable.** Local and SSH deployments use serialized unique staging, executable preflight checks, atomic publication, and rollback; SSH deployments also verify after publication and refuse to flatten package-manager symlinks. Stop-vs-update races now honor explicit operator shutdown instead of resurrecting a process.
+
 ## [1.10.11] - 2026-07-07
 
 ### Added

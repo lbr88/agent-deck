@@ -99,6 +99,25 @@ agent-deck status [-v|-q|--json]
 - `-v`: Detailed list by status
 - `-q`: Just waiting count (for scripts)
 
+### update - Install an update
+
+```bash
+agent-deck update [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check for an update without installing it |
+| `-y`, `--yes` | Install without an interactive confirmation (headless/automation) |
+| `--version <version>` | Install or downgrade to a specific release |
+| `--repo <owner/repo>` | Use a different public GitHub repository for this run |
+| `--channel <release\|branch>` | Select the release or source-branch update channel |
+| `--branch <name>` | Branch to track when using the branch channel |
+
+The installer verifies and atomically replaces a writable native executable. Long-running TUI, hybrid/headless `web`, `hub serve`, `hub connect`, `openclaw bridge`, `notify-daemon`, and `creds-refresh` processes then gracefully re-exec the replacement with the same PID and launch context. Their tmux-backed agent sessions stay alive. Short-lived protocol, attach, and task helpers finish on their existing executable to avoid interrupting in-flight work. Web and hub clients may briefly reconnect; this handoff is not zero downtime.
+
+Processes running a release from before live handoff require one final manual or service restart after upgrading. Immutable/container installs must update their image and redeploy instead of replacing the executable in place.
+
 ### migrate-paths - Copy legacy data into XDG layout
 
 ```bash
@@ -617,7 +636,7 @@ Renames a session on a remote instance.
 agent-deck remote update [name]
 ```
 
-Downloads and installs the correct agent-deck binary (detected platform/arch) on all remotes, or on a specific remote if `name` is provided. Prompts for confirmation before updating.
+Downloads, verifies, and atomically installs the correct agent-deck binary (detected platform/arch) on all remotes, or on a specific remote if `name` is provided. Compatible long-running processes on each host detect the replacement and perform the same-PID live handoff described under [`update`](#update---install-an-update), leaving tmux-backed agent sessions running.
 
 ### Examples
 

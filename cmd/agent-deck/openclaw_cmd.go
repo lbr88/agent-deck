@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/docker"
@@ -189,7 +190,15 @@ func handleOpenClawBridge(args []string) {
 
 	cfg := loadOpenClawConfig()
 
-	if err := openclaw.RunBridge(cfg.GatewayURL, cfg.Password, *agentID, *agentName); err != nil {
+	ctx, stop, _ := runtimeHandoffSignalContext(os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := openclaw.RunBridge(ctx, cfg.GatewayURL, cfg.Password, *agentID, *agentName)
+	if ctx.Err() == nil {
+		// Bubble Tea can exit from Ctrl+C without canceling the process context;
+		// make that explicit user quit win over a late replacement detection.
+		cancelRuntimeHandoff()
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bridge error: %v\n", err)
 		os.Exit(1)
 	}

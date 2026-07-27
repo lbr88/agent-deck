@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
 type hubServiceScope string
@@ -552,8 +554,11 @@ func systemdUnitToken(s string) string {
 }
 
 func findAgentDeckExecutable() (string, error) {
-	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
-		return exe, nil
+	// Prefer the stable argv0/PATH entry (for example /opt/homebrew/bin) over
+	// os.Executable, which may be a versioned Homebrew Cellar target that is
+	// removed on the next upgrade.
+	if path := session.FindAgentDeck(); strings.TrimSpace(path) != "" {
+		return path, nil
 	}
 	if path, err := exec.LookPath("agent-deck"); err == nil && strings.TrimSpace(path) != "" {
 		return path, nil

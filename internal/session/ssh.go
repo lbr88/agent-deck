@@ -693,32 +693,534 @@ func (r *SSHRunner) ResolveRemotePath(ctx context.Context) string {
 	return "~/" + defaultRemoteInstallSubpath
 }
 
-// DeployBinary streams binaryData to remotePath on the remote, creating the
-// parent directory and marking it executable. It pipes through `ssh "cat > ..."`
-// rather than scp so the remote shell handles the path uniformly; remotePath is
-// expected to be absolute (see ResolveRemotePath) (#1171).
-func (r *SSHRunner) DeployBinary(ctx context.Context, binaryData []byte, remotePath string) error {
-	dir := remotePath
-	if idx := strings.LastIndex(remotePath, "/"); idx > 0 {
-		dir = remotePath[:idx]
+// expectedRemoteVersionRe validates the trusted value interpolated into the
+// remote deployment transaction. shellQuote already prevents command
+// injection, but accepting only the version format agent-deck itself reports
+// also keeps the candidate/published-version check unambiguous.
+var expectedRemoteVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// remoteDeployMutexes avoids needless contention between concurrent update
+// requests originating in one agent-deck process. The remote mkdir lock below
+// remains authoritative across separate local processes and machines.
+var remoteDeployMutexes sync.Map // map[host+NUL+remotePath]*sync.Mutex
+
+func normalizeExpectedRemoteVersion(version string) (string, error) {
+	want := strings.TrimLeft(strings.TrimSpace(version), "vV")
+	if !expectedRemoteVersionRe.MatchString(want) {
+		return "", fmt.Errorf("invalid expected agent-deck version %q", version)
 	}
+	return want, nil
+}
 
-	// Stage to a sibling temp file and atomically rename it into place rather
-	// than redirecting onto remotePath directly. agent-deck keeps a long-lived
-	// `session attach` process running from remotePath, so truncating it in
-	// place (`cat > remotePath`) makes the kernel reject the write with ETXTBSY
-	// ("text file busy"). rename(2) only repoints the directory entry, so it
-	// succeeds while the old binary is still executing (the running process
-	// keeps the now-unlinked inode); the next launch picks up the new binary.
-	tmpPath := remotePath + ".new"
-	cmd := fmt.Sprintf("mkdir -p %s && cat > %s && chmod +x %s && mv -f %s %s",
-		shellQuote(dir), shellQuote(tmpPath), shellQuote(tmpPath),
-		shellQuote(tmpPath), shellQuote(remotePath))
+// remotePathDir returns the slash-separated parent of a remote path. Remote
+// updates support Linux and macOS, whose path separator is `/`; filepath.Dir
+// would unnecessarily apply the local machine's path rules.
+func remotePathDir(remotePath string) string {
+	if idx := strings.LastIndex(remotePath, "/"); idx > 0 {
+		return remotePath[:idx]
+	} else if idx == 0 {
+		return "/"
+	}
+	return "."
+}
 
+// buildRemoteDeployCommand builds one remote-shell transaction that owns the
+// update lock from the first staged byte through post-publish verification.
+// Keeping this in a single SSH process makes trap cleanup reliable and avoids
+// a lock hand-off race between separate remote commands.
+func buildRemoteDeployCommand(remotePath, expectedVersion string) string {
+	dir := remotePathDir(remotePath)
+	return fmt.Sprintf(`ad_target=%s
+ad_dir=%s
+ad_want=%s
+ad_target_exec=$ad_target
+case "$ad_target_exec" in */*) ;; *) ad_target_exec="./$ad_target_exec" ;; esac
+ad_lock="$ad_dir/.agent-deck.update.lock"
+umask 077
+ad_tmp=
+ad_backup=
+ad_restore=
+ad_keep_backup=0
+ad_lock_held=0
+ad_recovery_held=0
+ad_had_target=0
+ad_published=0
+ad_committed=0
+ad_is_direct_child() {
+	ad_child_path=$1
+	case "$ad_dir" in
+		/)
+			case "$ad_child_path" in
+				/*) ad_child_name=${ad_child_path#/} ;;
+				*) return 1 ;;
+			esac
+			case "$ad_child_name" in ''|*/*) return 1 ;; esac
+			;;
+		.)
+			case "$ad_child_path" in
+				*/*)
+					[ "${ad_child_path%%/*}" = "." ] || return 1
+					ad_child_name=${ad_child_path##*/}
+					;;
+				*) ad_child_name=$ad_child_path ;;
+			esac
+			;;
+		*)
+			[ "${ad_child_path%%/*}" = "$ad_dir" ] || return 1
+			ad_child_name=${ad_child_path##*/}
+			;;
+	esac
+	case "$ad_child_name" in ''|.|..) return 1 ;; esac
+	return 0
+}
+ad_valid_target_path() {
+	ad_is_direct_child "$1"
+}
+ad_refuse_managed_target() {
+	ad_checked_target=${1:-$ad_target}
+	case "$ad_checked_target" in
+		*/Cellar/*)
+			printf 'agent-deck: refusing to replace Homebrew-managed install at %%s; run brew upgrade asheshgoplani/tap/agent-deck instead\n' "$ad_checked_target" >&2
+			return 1
+			;;
+	esac
+	if [ -L "$ad_checked_target" ]; then
+		printf 'agent-deck: refusing to replace symbolic-link install at %%s; update its package manager or configure agent_deck_path to a standalone binary\n' "$ad_checked_target" >&2
+		return 1
+	fi
+	if [ -e "$ad_checked_target" ] && [ ! -f "$ad_checked_target" ]; then
+		printf 'agent-deck: refusing to replace non-regular install target at %%s\n' "$ad_checked_target" >&2
+		return 1
+	fi
+	return 0
+}
+ad_valid_tmp_path() {
+	ad_is_direct_child "$1" || return 1
+	case "$ad_child_name" in
+		.agent-deck.update.??????)
+			ad_suffix=${ad_child_name#.agent-deck.update.}
+			case "$ad_suffix" in *[!0-9A-Za-z]*) return 1 ;; esac
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+ad_valid_backup_path() {
+	ad_is_direct_child "$1" || return 1
+	case "$ad_child_name" in
+		.agent-deck.backup.??????)
+			ad_suffix=${ad_child_name#.agent-deck.backup.}
+			case "$ad_suffix" in *[!0-9A-Za-z]*) return 1 ;; esac
+			return 0
+			;;
+		*) return 1 ;;
+	esac
+}
+ad_restore_backup() {
+	if ! ad_valid_backup_path "$ad_backup" || [ ! -f "$ad_backup" ] || [ -L "$ad_backup" ]; then
+		ad_keep_backup=1
+		printf 'agent-deck: rollback file is missing or invalid: %%s; preserving recovery lock %%s\n' "$ad_backup" "$ad_lock" >&2
+		return 1
+	fi
+	# Keep the original backup until state is cleared. Copying to a sibling and
+	# renaming that copy makes rollback itself restartable after SIGKILL.
+	ad_restore="$ad_backup.restore"
+	rm -f "$ad_restore" 2>/dev/null || :
+	if ! cp -p "$ad_backup" "$ad_restore"; then
+		ad_keep_backup=1
+		printf 'agent-deck: cannot stage rollback from %%s; preserving recovery lock %%s\n' "$ad_backup" "$ad_lock" >&2
+		return 1
+	fi
+	if ! mv -f "$ad_restore" "$ad_target"; then
+		ad_keep_backup=1
+		printf 'agent-deck: cannot restore previous binary from %%s; preserving recovery lock %%s\n' "$ad_backup" "$ad_lock" >&2
+		return 1
+	fi
+	ad_restore=
+	ad_published=0
+	rm -f "$ad_lock/publishing" 2>/dev/null || :
+	return 0
+}
+ad_rollback() {
+	if [ "$ad_published" -ne 1 ] || [ "$ad_committed" -eq 1 ]; then return 0; fi
+	if ! ad_refuse_managed_target "$ad_target"; then
+		ad_keep_backup=1
+		printf 'agent-deck: refusing unsafe rollback; preserved backup %%s and recovery journal %%s\n' "$ad_backup" "$ad_lock" >&2
+		return 1
+	fi
+	if [ "$ad_had_target" -eq 1 ]; then
+		ad_restore_backup
+		return $?
+	fi
+	if rm -f "$ad_target" 2>/dev/null; then
+		ad_published=0
+		rm -f "$ad_lock/publishing" 2>/dev/null || :
+		return 0
+	fi
+	ad_keep_backup=1
+	printf 'agent-deck: failed to remove uncommitted published binary %%s; preserving recovery journal %%s\n' "$ad_target" "$ad_lock" >&2
+	return 1
+}
+ad_remove_artifacts() {
+	# A signal can arrive after mktemp wrote its durable pointer but before the
+	# following read populated the shell variable. Load such pointers lazily so
+	# trap cleanup does not leak a sibling staging or backup file.
+	if [ -z "$ad_tmp" ] && [ -r "$ad_lock/tmp-path" ] && [ ! -L "$ad_lock/tmp-path" ]; then
+		IFS= read -r ad_tmp < "$ad_lock/tmp-path" || ad_tmp=
+	fi
+	if [ -z "$ad_backup" ] && [ -r "$ad_lock/backup-path" ] && [ ! -L "$ad_lock/backup-path" ]; then
+		IFS= read -r ad_backup < "$ad_lock/backup-path" || ad_backup=
+	fi
+	if ad_valid_tmp_path "$ad_tmp"; then rm -f "$ad_tmp" 2>/dev/null || :; fi
+	if ad_valid_backup_path "$ad_backup"; then
+		rm -f "$ad_backup.restore" 2>/dev/null || :
+		if [ "$ad_keep_backup" -eq 0 ]; then rm -f "$ad_backup" 2>/dev/null || :; fi
+	fi
+}
+ad_remove_lock_metadata() {
+	# committed is removed last. If cleanup is killed before that point, stale
+	# recovery still knows the published target is authoritative. Once it is
+	# gone, publishing is already gone too, so recovery will leave the target.
+	if [ "$ad_recovery_held" -eq 1 ]; then
+		rm -f "$ad_lock/recovering/pid" 2>/dev/null || return 1
+		rmdir "$ad_lock/recovering" 2>/dev/null || return 1
+		ad_recovery_held=0
+	fi
+	if ! rm -f "$ad_lock/pid" "$ad_lock/target-path" "$ad_lock/tmp-path" "$ad_lock/backup-path" \
+		"$ad_lock/version-output" "$ad_lock/version-error" \
+		"$ad_lock/publishing" "$ad_lock/had-target" 2>/dev/null; then
+		return 1
+	fi
+	rm -f "$ad_lock/committed" 2>/dev/null || return 1
+	rmdir "$ad_lock" 2>/dev/null
+}
+ad_cleanup() {
+	# Publication is provisional until its version command succeeds. Signals
+	# and ordinary shell errors therefore restore the previous target before
+	# removing any rollback artifact.
+	if [ "$ad_lock_held" -eq 1 ]; then
+		ad_rollback || :
+		ad_remove_artifacts
+		if [ "$ad_keep_backup" -eq 0 ]; then ad_remove_lock_metadata || :; fi
+	fi
+}
+ad_recover_stale_lock() {
+	ad_requested_target=$ad_target
+	ad_recovery_target=
+	ad_tmp=
+	ad_backup=
+	ad_restore=
+	ad_keep_backup=0
+	ad_had_target=0
+	ad_published=0
+	ad_committed=0
+	if [ -r "$ad_lock/target-path" ]; then
+		IFS= read -r ad_recovery_target < "$ad_lock/target-path" || ad_recovery_target=
+	fi
+	if [ -r "$ad_lock/tmp-path" ]; then
+		IFS= read -r ad_tmp < "$ad_lock/tmp-path" || ad_tmp=
+	fi
+	if [ -r "$ad_lock/backup-path" ]; then
+		IFS= read -r ad_backup < "$ad_lock/backup-path" || ad_backup=
+	fi
+	if [ -e "$ad_lock/had-target" ]; then ad_had_target=1; fi
+	if [ -e "$ad_lock/publishing" ]; then ad_published=1; fi
+	if [ -e "$ad_lock/committed" ]; then ad_committed=1; fi
+	if [ "$ad_published" -eq 1 ] && [ "$ad_committed" -ne 1 ]; then
+		if ! ad_valid_target_path "$ad_recovery_target"; then
+			printf 'agent-deck: stale provisional update has a missing or invalid target journal; preserving recovery lock %%s\n' "$ad_lock" >&2
+			return 1
+		fi
+		ad_target=$ad_recovery_target
+	fi
+
+	# A committed target stays published. A provisional target is restored (or
+	# removed when the transaction began without one) before the lock is reused.
+	if [ "$ad_committed" -ne 1 ] && [ "$ad_published" -eq 1 ]; then
+		if ! ad_rollback; then
+			printf 'agent-deck: cannot recover stale remote update lock %%s automatically\n' "$ad_lock" >&2
+			ad_target=$ad_requested_target
+			return 1
+		fi
+	fi
+	ad_remove_artifacts
+	if [ "$ad_keep_backup" -ne 0 ]; then
+		ad_target=$ad_requested_target
+		return 1
+	fi
+	if ! ad_remove_lock_metadata; then
+		printf 'agent-deck: stale update lock %%s contains unknown or unremovable files; refusing unsafe cleanup\n' "$ad_lock" >&2
+		ad_target=$ad_requested_target
+		return 1
+	fi
+	ad_target=$ad_requested_target
+	ad_tmp=
+	ad_backup=
+	ad_restore=
+	ad_had_target=0
+	ad_published=0
+	ad_committed=0
+	return 0
+}
+ad_claim_recovery() {
+	ad_recovering="$ad_lock/recovering"
+	if [ -L "$ad_lock" ] || [ ! -d "$ad_lock" ]; then
+		printf 'agent-deck: refusing unsafe non-directory or symbolic-link update lock %%s\n' "$ad_lock" >&2
+		return 2
+	fi
+	if [ -L "$ad_recovering" ]; then
+		printf 'agent-deck: refusing unsafe symbolic-link recovery claim %%s\n' "$ad_recovering" >&2
+		return 2
+	fi
+	if ! mkdir "$ad_recovering" 2>/dev/null; then
+		ad_recovery_holder=
+		if [ -r "$ad_recovering/pid" ] && [ ! -L "$ad_recovering/pid" ]; then
+			IFS= read -r ad_recovery_holder < "$ad_recovering/pid" || ad_recovery_holder=
+		fi
+		ad_recovery_stale=0
+		case "$ad_recovery_holder" in
+			''|*[!0-9]*)
+				# Never steal the non-atomic mkdir-before-pid-write window merely
+				# because its owner was descheduled. Ownerless claims are stale only
+				# after the conservative age threshold.
+				if find "$ad_recovering" -prune -mmin +3 -print 2>/dev/null | grep -q .; then
+					ad_recovery_stale=1
+				fi
+				;;
+			*)
+				# A confirmed live recovery owner always wins, regardless of age.
+				if ! kill -0 "$ad_recovery_holder" 2>/dev/null && ! ps -p "$ad_recovery_holder" >/dev/null 2>&1; then
+					ad_recovery_stale=1
+				fi
+				;;
+		esac
+		if [ "$ad_recovery_stale" -ne 1 ]; then return 1; fi
+		rm -f "$ad_recovering/pid" 2>/dev/null || return 1
+		rmdir "$ad_recovering" 2>/dev/null || return 1
+		if ! mkdir "$ad_recovering" 2>/dev/null; then return 1; fi
+	fi
+	ad_recovery_held=1
+	if ! chmod 0700 "$ad_lock" "$ad_recovering"; then return 2; fi
+	# The claim is exclusive, so unlink stale metadata before writing. This
+	# prevents a malicious/stale pid symlink from redirecting the owner write.
+	rm -f "$ad_lock/pid" 2>/dev/null || return 2
+	if ! printf '%%s\n' "$$" > "$ad_recovering/pid" || ! printf '%%s\n' "$$" > "$ad_lock/pid"; then
+		printf 'agent-deck: cannot journal stale-lock recovery owner\n' >&2
+		return 2
+	fi
+	return 0
+}
+trap 'ad_cleanup' 0
+trap 'exit 129' 1
+trap 'exit 130' 2
+trap 'exit 143' 15
+ad_version_ok() {
+	case "$1" in
+		"Agent Deck v$ad_want"|"Agent Deck v$ad_want ("*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+ad_read_version_output() {
+	ad_output=
+	ad_extra_output=0
+	{
+		IFS= read -r ad_output || :
+		if IFS= read -r ad_unused; then ad_extra_output=1; fi
+	} < "$ad_lock/version-output"
+}
+if ! mkdir -p "$ad_dir"; then
+	printf 'agent-deck: cannot create install directory %%s\n' "$ad_dir" >&2
+	exit 72
+fi
+ad_attempt=0
+while ! mkdir "$ad_lock" 2>/dev/null; do
+	if [ -L "$ad_lock" ] || [ ! -d "$ad_lock" ]; then
+		printf 'agent-deck: refusing unsafe non-directory or symbolic-link update lock %%s\n' "$ad_lock" >&2
+		exit 87
+	fi
+	ad_stale=0
+	ad_holder=
+	if [ -r "$ad_lock/pid" ] && [ ! -L "$ad_lock/pid" ]; then
+		IFS= read -r ad_holder < "$ad_lock/pid" || ad_holder=
+	fi
+	case "$ad_holder" in
+		''|*[!0-9]*)
+			# Covers a crash in the tiny mkdir-before-pid-write window without
+			# stealing a live owner that is merely being scheduled slowly. Only
+			# the conservative age threshold can reclaim an ownerless lock.
+			if find "$ad_lock" -prune -mmin +3 -print 2>/dev/null | grep -q .; then
+				ad_stale=1
+			fi
+			;;
+		*)
+			# kill -0 can return EPERM for a live process in constrained
+			# environments; ps is a portable Linux/macOS liveness fallback. A
+			# confirmed live owner always wins, regardless of lock age.
+			if ! kill -0 "$ad_holder" 2>/dev/null && ! ps -p "$ad_holder" >/dev/null 2>&1; then
+				ad_stale=1
+			fi
+			;;
+	esac
+	if [ "$ad_stale" -eq 1 ]; then
+		if ad_claim_recovery; then
+			if ad_recover_stale_lock; then
+				continue
+			fi
+			exit 85
+		else
+			ad_claim_status=$?
+			if [ "$ad_claim_status" -eq 2 ]; then exit 87; fi
+		fi
+	fi
+	ad_attempt=$((ad_attempt + 1))
+	if [ "$ad_attempt" -ge 30 ]; then
+		printf 'agent-deck: timed out waiting for remote update lock %%s\n' "$ad_lock" >&2
+		exit 73
+	fi
+	sleep 1
+done
+ad_lock_held=1
+if ! chmod 0700 "$ad_lock"; then
+	printf 'agent-deck: cannot secure remote update lock %%s\n' "$ad_lock" >&2
+	exit 74
+fi
+if ! printf '%%s\n' "$$" > "$ad_lock/pid"; then
+	printf 'agent-deck: cannot record remote update lock owner\n' >&2
+	exit 74
+fi
+if ! ad_valid_target_path "$ad_target"; then
+	printf 'agent-deck: refusing remote update target outside its direct install directory: %%s\n' "$ad_target" >&2
+	exit 84
+fi
+if ! printf '%%s\n' "$ad_target" > "$ad_lock/target-path"; then
+	printf 'agent-deck: cannot journal remote update target\n' >&2
+	exit 74
+fi
+if ! ad_refuse_managed_target; then
+	exit 84
+fi
+# Avoid command substitutions while the lock is held: some POSIX shells inherit
+# trap 0 into them, which could let a short-lived child remove its parent's
+# still-live lock. The lock directory safely carries mktemp's returned path.
+if ! mktemp "$ad_dir/.agent-deck.update.XXXXXX" > "$ad_lock/tmp-path"; then
+	printf 'agent-deck: cannot create remote staging file in %%s\n' "$ad_dir" >&2
+	exit 75
+fi
+IFS= read -r ad_tmp < "$ad_lock/tmp-path" || ad_tmp=
+if ! ad_valid_tmp_path "$ad_tmp" || [ ! -f "$ad_tmp" ] || [ -L "$ad_tmp" ]; then
+	printf 'agent-deck: remote mktemp returned no staging path\n' >&2
+	exit 75
+fi
+if ! cat > "$ad_tmp"; then
+	printf 'agent-deck: failed to stream candidate binary\n' >&2
+	exit 76
+fi
+if ! chmod 0755 "$ad_tmp"; then
+	printf 'agent-deck: cannot make candidate binary executable\n' >&2
+	exit 77
+fi
+ad_candidate_status=0
+"$ad_tmp" version > "$ad_lock/version-output" 2> "$ad_lock/version-error" || ad_candidate_status=$?
+ad_read_version_output
+ad_error=
+IFS= read -r ad_error < "$ad_lock/version-error" || ad_error=
+rm -f "$ad_lock/version-output" "$ad_lock/version-error" 2>/dev/null || :
+if [ "$ad_candidate_status" -ne 0 ]; then
+	if [ -z "$ad_output" ]; then ad_output=$ad_error; fi
+	printf 'agent-deck: staged candidate failed its version command: %%s\n' "$ad_output" >&2
+	exit 78
+fi
+if [ "$ad_extra_output" -ne 0 ] || ! ad_version_ok "$ad_output"; then
+	printf 'agent-deck: staged candidate reports an unexpected version (wanted v%%s): %%s\n' "$ad_want" "$ad_output" >&2
+	exit 79
+fi
+# Re-check immediately before preserving/publishing the live path. This avoids
+# flattening a package-manager symlink if it appeared while candidate preflight
+# was running.
+if ! ad_refuse_managed_target; then
+	exit 84
+fi
+ad_had_target=0
+if [ -e "$ad_target" ] || [ -L "$ad_target" ]; then
+	if ! mktemp "$ad_dir/.agent-deck.backup.XXXXXX" > "$ad_lock/backup-path"; then
+		printf 'agent-deck: cannot create rollback file in %%s\n' "$ad_dir" >&2
+		exit 80
+	fi
+	IFS= read -r ad_backup < "$ad_lock/backup-path" || ad_backup=
+	if ! ad_valid_backup_path "$ad_backup" || [ ! -f "$ad_backup" ] || [ -L "$ad_backup" ]; then
+		printf 'agent-deck: remote mktemp returned no rollback path\n' >&2
+		exit 80
+	fi
+	if ! cp -p "$ad_target" "$ad_backup"; then
+		printf 'agent-deck: cannot preserve current binary before publish\n' >&2
+		exit 81
+	fi
+	ad_had_target=1
+	if ! : > "$ad_lock/had-target"; then
+		printf 'agent-deck: cannot journal existing remote target\n' >&2
+		exit 81
+	fi
+fi
+ad_published=1
+if ! : > "$ad_lock/publishing"; then
+	printf 'agent-deck: cannot journal provisional publication\n' >&2
+	exit 82
+fi
+if ! mv -f "$ad_tmp" "$ad_target"; then
+	printf 'agent-deck: cannot atomically publish candidate to %%s\n' "$ad_target" >&2
+	exit 82
+fi
+ad_tmp=
+ad_published_status=0
+"$ad_target_exec" version > "$ad_lock/version-output" 2> "$ad_lock/version-error" || ad_published_status=$?
+ad_read_version_output
+ad_error=
+IFS= read -r ad_error < "$ad_lock/version-error" || ad_error=
+rm -f "$ad_lock/version-output" "$ad_lock/version-error" 2>/dev/null || :
+ad_published_output=$ad_output
+	if [ -z "$ad_published_output" ]; then ad_published_output=$ad_error; fi
+ad_published_ok=0
+if [ "$ad_published_status" -eq 0 ] && [ "$ad_extra_output" -eq 0 ] && ad_version_ok "$ad_published_output"; then
+	ad_published_ok=1
+fi
+if [ "$ad_published_ok" -ne 1 ]; then
+	ad_rollback || :
+	printf 'agent-deck: published binary failed verification (wanted v%%s): %%s\n' "$ad_want" "$ad_published_output" >&2
+	exit 83
+fi
+if ! : > "$ad_lock/committed"; then
+	printf 'agent-deck: cannot journal completed publication; rolling back\n' >&2
+	exit 86
+fi
+ad_committed=1
+`, shellQuote(remotePath), shellQuote(dir), shellQuote(expectedVersion))
+}
+
+// DeployBinary streams binaryData to a unique sibling temp file on the remote,
+// verifies the staged candidate reports expectedVersion, then atomically
+// publishes it. A portable mkdir lock serializes concurrent deployers. The
+// transaction backs up an existing target and restores it if verification
+// after publish fails. All staging, backup, and lock artifacts are trap-cleaned
+// (except a backup intentionally retained when rollback itself fails).
+func (r *SSHRunner) DeployBinary(ctx context.Context, binaryData []byte, remotePath, expectedVersion string) error {
+	want, err := normalizeExpectedRemoteVersion(expectedVersion)
+	if err != nil {
+		return err
+	}
+	if remotePath == "" || strings.ContainsAny(remotePath, "\x00\r\n") {
+		return fmt.Errorf("invalid remote agent-deck path %q", remotePath)
+	}
+	lockKey := r.Host + "\x00" + remotePath
+	lockValue, _ := remoteDeployMutexes.LoadOrStore(lockKey, &sync.Mutex{})
+	deployMu := lockValue.(*sync.Mutex)
+	deployMu.Lock()
+	defer deployMu.Unlock()
+
+	cmd := buildRemoteDeployCommand(remotePath, want)
 	deployCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	if _, err := r.remoteExec(deployCtx, cmd, binaryData); err != nil {
-		return fmt.Errorf("failed to deploy binary to %s: %w", remotePath, err)
+		return fmt.Errorf("failed to deploy v%s to %s: %w", want, remotePath, err)
 	}
 	return nil
 }
@@ -729,11 +1231,14 @@ func (r *SSHRunner) DeployBinary(ctx context.Context, binaryData []byte, remoteP
 // binary is not the one the remote executes (#1171).
 func (r *SSHRunner) InstallBinary(ctx context.Context, binaryData []byte, expectedVersion string) error {
 	path := r.ResolveRemotePath(ctx)
-	if err := r.DeployBinary(ctx, binaryData, path); err != nil {
+	if err := r.DeployBinary(ctx, binaryData, path, expectedVersion); err != nil {
 		return err
 	}
 
-	want := strings.TrimPrefix(expectedVersion, "v")
+	want, err := normalizeExpectedRemoteVersion(expectedVersion)
+	if err != nil {
+		return err
+	}
 
 	// The binary the remote actually runs: bare `agent-deck` through its $PATH.
 	if pathVer, found := r.versionAt(ctx, "agent-deck"); found && pathVer == want {

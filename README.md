@@ -823,6 +823,8 @@ agent-deck remote update          # all remotes
 agent-deck remote update dev      # specific remote
 ```
 
+`remote update` verifies and atomically installs the release on each selected host. Long-running remote processes that support [live update handoff](#updates) detect the replacement and switch automatically; their tmux-backed agent sessions stay running.
+
 Remote configuration is stored under `[remotes]` in `$XDG_CONFIG_HOME/agent-deck/config.toml` (default `~/.config/agent-deck/config.toml`). All `remote` subcommands support `--json` output for scripting. Run `agent-deck remote --help` for the full flag reference.
 
 Pressing `n` on a remote group or session opens the full new-session dialog in **remote mode**: path suggestions come from the remote host, the remote session's group is pre-filled, and the create routes over SSH with your chosen tool — sessions are never accidentally created on localhost.
@@ -981,10 +983,21 @@ and answer: How do I fork a session?
 
 ### Updates
 
-Agent Deck checks for updates automatically.
-- Standalone/manual install: run `agent-deck update` to install.
+Agent Deck checks for updates automatically. Install one locally or across SSH remotes with:
+
+```bash
+agent-deck update              # interactive local update
+agent-deck update --yes        # non-interactive; suitable for headless hosts
+agent-deck remote update       # all configured remotes
+agent-deck remote update dev   # one configured remote
+```
+
+For writable native installs, the verified binary is replaced atomically. Running TUI, hybrid or headless `web`, `hub serve`, `hub connect`, `openclaw bridge`, `notify-daemon`, and `creds-refresh` processes detect the new executable, shut down their own UI or network resources cleanly, and re-exec it with the same PID, arguments, environment, profile, and working directory. The tmux-backed agent sessions are separate processes and stay alive. Short-lived protocol, attach, and task helpers finish on their existing executable so an in-flight stream or task is never interrupted.
+
+The handoff is automatic, but it is not zero downtime: web and hub clients may briefly disconnect and reconnect while the process changes executable. A process started from a release that predates live handoff needs one final manual or service restart after its first upgrade. Read-only/immutable filesystems and container images cannot replace their executable in place; update or rebuild the image and redeploy the container instead.
+
 - Homebrew install: run `brew upgrade asheshgoplani/tap/agent-deck`.
-- Optional: set `auto_update = true` in [config.toml](skills/agent-deck/references/config-reference.md) for automatic update prompts.
+- Optional: set `auto_update = true` in [config.toml](skills/agent-deck/references/config-reference.md) to offer installation during interactive startup.
 
 ## FAQ
 

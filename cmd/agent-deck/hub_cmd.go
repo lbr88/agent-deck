@@ -191,6 +191,9 @@ func handleHub(profile string, args []string) {
 	default:
 		err = fmt.Errorf("unknown hub command %q", args[0])
 	}
+	if runtimeHandoffRequested() && errors.Is(err, context.Canceled) {
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -261,7 +264,19 @@ func handleHubServe(args []string) error {
 			fmt.Println("Bootstrap admin invite skipped: hub already has registered nodes.")
 		}
 	}
-	return server.Serve()
+	ctx, stop, _ := runtimeHandoffSignalContext(os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve() }()
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		return <-serveErr
+	}
 }
 
 func resolveHubServeTLSFiles(dataDir, certFile, keyFile string) (string, string, bool, error) {
@@ -1782,7 +1797,7 @@ func hubInviteOutputs(invites []hub.Invite) []hubInviteOutput {
 }
 
 func handleHubConnect(profile string, args []string) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop, _ := runtimeHandoffSignalContext(os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return handleHubConnectWithContext(ctx, profile, args)
 }

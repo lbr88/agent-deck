@@ -3,7 +3,22 @@ package main
 import (
 	"io"
 	"testing"
+
+	"github.com/asheshgoplani/agent-deck/internal/update"
 )
+
+func TestRemoteReleaseVersionUsesResolvedReleaseTag(t *testing.T) {
+	got, err := remoteReleaseVersion(&update.Release{TagName: "v9.8.7"})
+	if err != nil {
+		t.Fatalf("remoteReleaseVersion: %v", err)
+	}
+	if got != "9.8.7" {
+		t.Fatalf("remoteReleaseVersion = %q, want 9.8.7", got)
+	}
+	if _, err := remoteReleaseVersion(nil); err == nil {
+		t.Fatal("remoteReleaseVersion(nil) returned nil error")
+	}
+}
 
 func TestIsValidRemoteName(t *testing.T) {
 	t.Parallel()

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -183,7 +184,11 @@ func promptForUpdate() bool {
 		return false
 	}
 
-	fmt.Println("Restart agent-deck to use the new version.")
+	if requestRuntimeHandoff() {
+		fmt.Println("Switching to the updated version...")
+	} else {
+		fmt.Println("Update installed. Start Agent Deck again to use the new version.")
+	}
 	return true
 }
 
@@ -221,7 +226,11 @@ func promptForBranchUpdate(settings session.UpdateSettings) bool {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to update bridge.py: %v\n", err)
 	}
 
-	fmt.Println("Restart agent-deck to use the new version.")
+	if requestRuntimeHandoff() {
+		fmt.Println("Switching to the updated version...")
+	} else {
+		fmt.Println("Update installed. Start Agent Deck again to use the new version.")
+	}
 	return true
 }
 
@@ -293,7 +302,7 @@ func initColorProfile() {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 }
 
-func main() {
+func runAgentDeckMain() {
 	// Extract global -p/--profile flag before subcommand dispatch
 	profile, args := extractProfileFlag(os.Args[1:])
 	if profile != "" {
@@ -526,7 +535,8 @@ func main() {
 	// hang a non-TTY process.
 	if !webHeadless {
 		if promptForUpdate() {
-			// Update was performed, exit so user can restart with new version
+			// The outer lifecycle wrapper performs the same-PID handoff after
+			// startup cleanup has returned.
 			return
 		}
 	}
@@ -886,11 +896,18 @@ func main() {
 			// reads live data from storage on each request.
 			fmt.Println("Headless mode: TUI disabled")
 			fmt.Printf("Web server: http://%s\n", server.Addr())
-			defer func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = server.Shutdown(ctx)
-			}()
+			var shutdownOnce sync.Once
+			shutdown := func() {
+				shutdownOnce.Do(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = server.Shutdown(ctx)
+				})
+			}
+			defer shutdown()
+			handoffCtx, stopHandoffWatch := context.WithCancel(context.Background())
+			defer stopHandoffWatch()
+			watchRuntimeHandoff(handoffCtx, shutdown)
 			if err := server.Start(); err != nil {
 				logging.ForComponent(logging.CompWeb).Error("web_server_error",
 					slog.String("error", err.Error()))
@@ -945,6 +962,13 @@ func main() {
 		tea.WithMouseCellMotion(),
 		tea.WithInput(ui.NewCSIuReader(os.Stdin)),
 	)
+	handoffCtx, stopHandoffWatch := context.WithCancel(context.Background())
+	defer stopHandoffWatch()
+	watchRuntimeHandoff(handoffCtx, func() {
+		// Sending a model message (rather than Program.Quit) runs Home's full
+		// final-shutdown path before main performs the same-PID exec.
+		p.Send(ui.RuntimeHandoffMsg{OnRejected: func() { cancelRuntimeHandoff() }})
+	})
 
 	// Start maintenance worker (background goroutine, respects config toggle)
 	maintenanceCtx, maintenanceCancel := context.WithCancel(context.Background())
@@ -957,6 +981,11 @@ func main() {
 		uiLog := logging.ForComponent(logging.CompUI)
 		uiLog.Error("tui_run_failed", slog.String("error", err.Error()))
 		os.Exit(1)
+	}
+	if !homeModel.RuntimeHandoffAccepted() {
+		// A user quit that reached Bubble Tea first must not be turned into a
+		// process resurrection by a racing executable replacement.
+		cancelRuntimeHandoff()
 	}
 }
 
@@ -2863,6 +2892,8 @@ func handleProfileSetDefault(out *CLIOutput, name string) {
 func handleUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	checkOnly := fs.Bool("check", false, "Only check for updates, don't install")
+	assumeYes := fs.Bool("yes", false, "Install without an interactive confirmation (for headless/automation use)")
+	fs.BoolVar(assumeYes, "y", false, "Alias for --yes")
 	targetVersion := fs.String("version", "", "Install a specific released version (e.g. 1.7.3); may be a downgrade")
 	repoOverride := fs.String("repo", "", "GitHub repo to fetch releases from for this run (owner/repo)")
 	channelOverride := fs.String("channel", "", "Update channel for this run: release or branch")
@@ -2878,6 +2909,7 @@ func handleUpdate(args []string) {
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  agent-deck update              # Check and install latest if available")
+		fmt.Println("  agent-deck update --yes        # Non-interactive install for headless hosts")
 		fmt.Println("  agent-deck update --check      # Only check, don't install")
 		fmt.Println("  agent-deck update --version 1.7.3  # Install a specific version (may downgrade)")
 		fmt.Println("  agent-deck update --repo lbr88/agent-deck  # Use a public fork for this run")
@@ -2900,7 +2932,7 @@ func handleUpdate(args []string) {
 	}
 
 	if strings.TrimSpace(*targetVersion) != "" {
-		handleUpdateToSpecificVersion(*targetVersion, *checkOnly)
+		handleUpdateToSpecificVersion(*targetVersion, *checkOnly, *assumeYes)
 		return
 	}
 
@@ -2912,7 +2944,7 @@ func handleUpdate(args []string) {
 	branch := resolveUpdateBranch(settings, *branchOverride)
 
 	if channel == update.UpdateChannelBranch {
-		handleBranchUpdate(branch, *checkOnly)
+		handleBranchUpdate(branch, *checkOnly, *assumeYes)
 		return
 	}
 
@@ -2963,19 +2995,21 @@ func handleUpdate(args []string) {
 		fmt.Printf("Will run: %s\n", homebrewInstallCmd)
 	}
 
-	// Confirm update - drain any buffered input first to avoid garbage
-	drainStdin()
-	if homebrewManaged {
-		fmt.Print("\nInstall update via Homebrew now? [Y/n] ")
-	} else {
-		fmt.Print("\nInstall update? [Y/n] ")
-	}
-	reader := bufio.NewReader(os.Stdin)
-	response, _ := reader.ReadString('\n')
-	response = strings.TrimSpace(response)
-	if response != "" && response != "y" && response != "Y" {
-		fmt.Println("Update cancelled.")
-		return
+	if !*assumeYes {
+		// Confirm update - drain any buffered input first to avoid garbage
+		drainStdin()
+		if homebrewManaged {
+			fmt.Print("\nInstall update via Homebrew now? [Y/n] ")
+		} else {
+			fmt.Print("\nInstall update? [Y/n] ")
+		}
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(response)
+		if response != "" && response != "y" && response != "Y" {
+			fmt.Println("Update cancelled.")
+			return
+		}
 	}
 
 	// Perform update (direct binary replacement or Homebrew upgrade)
@@ -3004,13 +3038,15 @@ func handleUpdate(args []string) {
 	}
 
 	fmt.Printf("\n✓ Updated to v%s\n", info.LatestVersion)
-	fmt.Println("  Restart agent-deck to use the new version.")
+	fmt.Println("  Supported running Agent Deck modes will switch to it automatically.")
 
 	// Offer to update remotes
-	updateRemotesAfterLocalUpdate(info.LatestVersion)
+	if !*assumeYes {
+		updateRemotesAfterLocalUpdate(info.LatestVersion)
+	}
 }
 
-func handleBranchUpdate(branch string, checkOnly bool) {
+func handleBranchUpdate(branch string, checkOnly, assumeYes bool) {
 	fmt.Printf("Agent Deck v%s\n", Version)
 	if strings.TrimSpace(Commit) != "" {
 		fmt.Printf("Current commit: %s\n", update.ShortCommit(Commit))
@@ -3042,14 +3078,16 @@ func handleBranchUpdate(branch string, checkOnly bool) {
 		return
 	}
 
-	drainStdin()
-	fmt.Print("\nBuild from source and install update? [Y/n] ")
-	reader := bufio.NewReader(os.Stdin)
-	response, _ := reader.ReadString('\n')
-	response = strings.TrimSpace(response)
-	if response != "" && response != "y" && response != "Y" {
-		fmt.Println("Update cancelled.")
-		return
+	if !assumeYes {
+		drainStdin()
+		fmt.Print("\nBuild from source and install update? [Y/n] ")
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(response)
+		if response != "" && response != "y" && response != "Y" {
+			fmt.Println("Update cancelled.")
+			return
+		}
 	}
 
 	fmt.Println()
@@ -3064,13 +3102,13 @@ func handleBranchUpdate(branch string, checkOnly bool) {
 	}
 
 	fmt.Printf("\n✓ Updated to %s at %s\n", update.BranchVersion(info.Branch), update.ShortCommit(info.LatestCommit))
-	fmt.Println("  Restart agent-deck to use the new version.")
+	fmt.Println("  Supported running Agent Deck modes will switch to it automatically.")
 }
 
 // handleUpdateToSpecificVersion installs a user-specified release version.
 // Unlike the default update flow, this bypasses the "is this newer?" check so
 // callers can reinstall or downgrade to a prior release on purpose.
-func handleUpdateToSpecificVersion(requested string, checkOnly bool) {
+func handleUpdateToSpecificVersion(requested string, checkOnly, assumeYes bool) {
 	fmt.Printf("Agent Deck v%s\n", Version)
 
 	normalized := update.NormalizeReleaseTag(requested)
@@ -3120,21 +3158,23 @@ func handleUpdateToSpecificVersion(requested string, checkOnly bool) {
 		return
 	}
 
-	drainStdin()
-	defaultYes := cmp <= 0
-	prompt := fmt.Sprintf("\nInstall v%s now? [Y/n] ", targetVersion)
-	if !defaultYes {
-		prompt = fmt.Sprintf("\nDowngrade to v%s now? [y/N] ", targetVersion)
-	}
-	fmt.Print(prompt)
-	reader := bufio.NewReader(os.Stdin)
-	response, _ := reader.ReadString('\n')
-	response = strings.TrimSpace(strings.ToLower(response))
+	if !assumeYes {
+		drainStdin()
+		defaultYes := cmp <= 0
+		prompt := fmt.Sprintf("\nInstall v%s now? [Y/n] ", targetVersion)
+		if !defaultYes {
+			prompt = fmt.Sprintf("\nDowngrade to v%s now? [y/N] ", targetVersion)
+		}
+		fmt.Print(prompt)
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(strings.ToLower(response))
 
-	confirmed := response == "y" || response == "yes" || (defaultYes && response == "")
-	if !confirmed {
-		fmt.Println("Update cancelled.")
-		return
+		confirmed := response == "y" || response == "yes" || (defaultYes && response == "")
+		if !confirmed {
+			fmt.Println("Update cancelled.")
+			return
+		}
 	}
 
 	fmt.Println()
@@ -3149,7 +3189,7 @@ func handleUpdateToSpecificVersion(requested string, checkOnly bool) {
 	}
 
 	fmt.Printf("\n✓ Installed v%s\n", targetVersion)
-	fmt.Println("  Restart agent-deck to use this version.")
+	fmt.Println("  Supported running Agent Deck modes will switch to it automatically.")
 }
 
 // brewRunner abstracts `brew <args...>` so tests can inject canned output

@@ -24,14 +24,15 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	cfg             ServerConfig
-	store           *Store
-	httpServer      *http.Server
-	mu              sync.Mutex
-	nodeConnections map[string]int
-	peers           map[*hubPeer]struct{}
-	attachRouter    *AttachRouter
-	commandRoutes   map[string]commandRoute
+	cfg               ServerConfig
+	store             *Store
+	httpServer        *http.Server
+	shutdownRequested bool
+	mu                sync.Mutex
+	nodeConnections   map[string]int
+	peers             map[*hubPeer]struct{}
+	attachRouter      *AttachRouter
+	commandRoutes     map[string]commandRoute
 }
 
 type hubPeer struct {
@@ -140,6 +141,61 @@ func (s *Server) Close() error {
 	return closeErr
 }
 
+// Shutdown gracefully stops accepting hub traffic and closes connected node
+// WebSockets so clients immediately enter their normal reconnect loop. It is
+// used by the runtime update handoff before the process execs the replacement
+// binary. The store remains open until Close, allowing Serve's caller and
+// deferred cleanup to finish in their normal order.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	s.shutdownRequested = true
+	httpServer := s.httpServer
+	peers := make([]*hubPeer, 0, len(s.peers))
+	for peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	s.mu.Unlock()
+
+peerLoop:
+	for _, peer := range peers {
+		select {
+		case <-ctx.Done():
+			break peerLoop
+		default:
+		}
+		if peer == nil || peer.conn == nil {
+			continue
+		}
+		deadline := time.Now().Add(time.Second)
+		if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+			deadline = contextDeadline
+		}
+		// Gorilla permits Close and WriteControl concurrently with data writes,
+		// so do not wait on peer.mu: a stuck data writer must not make update
+		// handoff exceed the caller's shutdown deadline.
+		_ = peer.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseServiceRestart, "agent-deck update"),
+			deadline,
+		)
+		_ = peer.conn.Close()
+	}
+	if httpServer == nil {
+		return nil
+	}
+	if err := httpServer.Shutdown(ctx); err != nil {
+		_ = httpServer.Close()
+		return err
+	}
+	return nil
+}
+
 func (s *Server) Serve() error {
 	if strings.TrimSpace(s.cfg.CertFile) == "" || strings.TrimSpace(s.cfg.KeyFile) == "" {
 		return fmt.Errorf("agent-deck hub serve requires --tls-cert and --tls-key")
@@ -150,6 +206,10 @@ func (s *Server) Serve() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	s.mu.Lock()
+	if s.shutdownRequested {
+		s.mu.Unlock()
+		return nil
+	}
 	s.httpServer = httpServer
 	s.mu.Unlock()
 

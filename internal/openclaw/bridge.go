@@ -61,6 +61,7 @@ type connectResultMsg struct{ err error }
 type gatewayEventMsg struct{ event *GatewayEvent }
 type sendResultMsg struct{ err error }
 type historyResultMsg struct{ messages []ChatMessage }
+type bridgeShutdownMsg struct{}
 
 // NewBridgeModel creates a new bridge TUI model.
 func NewBridgeModel(gatewayURL, password, agentID, agentName string) *BridgeModel {
@@ -98,6 +99,11 @@ func (m *BridgeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case bridgeShutdownMsg:
+		m.cancel()
+		m.client.Close()
+		return m, tea.Quit
+
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -595,10 +601,24 @@ func (m *BridgeModel) isMyEvent(agentID, sessionKey string) bool {
 	return false
 }
 
-// RunBridge launches the bridge TUI as a bubbletea program.
-func RunBridge(gatewayURL, password, agentID, agentName string) error {
+// RunBridge launches the bridge TUI as a bubbletea program. Canceling ctx
+// closes the gateway connection and exits through Bubble Tea's normal terminal
+// restoration path, which allows the outer process to perform update handoff.
+func RunBridge(ctx context.Context, gatewayURL, password, agentID, agentName string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	model := NewBridgeModel(gatewayURL, password, agentID, agentName)
 	p := tea.NewProgram(model)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			p.Send(bridgeShutdownMsg{})
+		case <-done:
+		}
+	}()
 	_, err := p.Run()
+	close(done)
 	return err
 }

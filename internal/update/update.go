@@ -703,37 +703,6 @@ func PerformVerifiedUpdate(release *Release, goos, goarch string) error {
 	return installSelfUpdateBinary(execPath, binaryData)
 }
 
-func installSelfUpdateBinary(execPath string, binaryData []byte) error {
-	// Create temp file for new binary
-	newBinaryPath := execPath + ".new"
-	if err := os.WriteFile(newBinaryPath, binaryData, 0755); err != nil {
-		return fmt.Errorf("failed to write new binary: %w", err)
-	}
-
-	// Backup old binary
-	oldBinaryPath := execPath + ".old"
-	if err := os.Rename(execPath, oldBinaryPath); err != nil {
-		os.Remove(newBinaryPath)
-		return fmt.Errorf("failed to backup old binary: %w", err)
-	}
-
-	// Move new binary into place
-	if err := os.Rename(newBinaryPath, execPath); err != nil {
-		// Try to restore old binary
-		_ = os.Rename(oldBinaryPath, execPath)
-		return fmt.Errorf("failed to install new binary: %w", err)
-	}
-
-	// Remove old binary
-	os.Remove(oldBinaryPath)
-
-	// Invalidate update cache so the banner dismisses in any running TUI
-	InvalidateCache()
-
-	fmt.Println("✓ Update complete!")
-	return nil
-}
-
 // InvalidateCache removes the update cache file so the next check
 // fetches fresh data from GitHub. This should be called after a
 // successful update to prevent stale "update available" banners.

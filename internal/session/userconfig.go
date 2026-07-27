@@ -965,7 +965,7 @@ type UpdateSettings struct {
 	// Default: main
 	Branch string `toml:"branch,omitempty"`
 
-	// AutoUpdate automatically installs updates without prompting
+	// AutoUpdate offers to install available updates during interactive startup
 	// Default: false
 	AutoUpdate bool `toml:"auto_update,omitempty"`
 
@@ -4000,7 +4000,7 @@ remove_orphans = true
 # channel = "release"
 # Branch to track when channel = "branch"
 # branch = "main"
-# Automatically install updates without prompting (default: false)
+# Offer to install available updates during interactive startup (default: false)
 # auto_update = true
 # Enable update checks on startup (default: true)
 check_enabled = true

@@ -464,7 +464,7 @@ Auto-update settings.
 
 ```toml
 [updates]
-auto_update = false           # Auto-install updates
+auto_update = false           # Offer updates during interactive startup
 check_enabled = true          # Check on startup
 check_interval_hours = 24     # Check frequency
 notify_in_cli = true          # Show in CLI commands
@@ -472,10 +472,12 @@ notify_in_cli = true          # Show in CLI commands
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `auto_update` | bool | `false` | Install updates without prompting. |
+| `auto_update` | bool | `false` | Offer to install available updates during interactive startup. |
 | `check_enabled` | bool | `true` | Enable startup update checks. |
 | `check_interval_hours` | int | `24` | Hours between checks. |
 | `notify_in_cli` | bool | `true` | Show updates in CLI (not just TUI). |
+
+After an update is installed, supported long-running modes automatically hand off to the replacement executable while keeping their PID and tmux-backed agent sessions. For non-interactive or headless automation, use `agent-deck update --yes`; use `agent-deck remote update [name]` to deploy to configured SSH hosts. Immutable/container installs must update and redeploy their image instead.
 
 ## [display] Section
 

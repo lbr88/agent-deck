@@ -152,12 +152,13 @@ func handleRemoteAdd(args []string) {
 		}
 	} else {
 		fmt.Printf("  agent-deck not found on remote at '%s'\n", rc.GetAgentDeckPath())
-		fmt.Printf("  Installing v%s...\n", Version)
-		if err := installOnRemote(runner, ctx); err != nil {
+		fmt.Println("  Installing latest verified release...")
+		installedVersion, err := installOnRemote(runner, ctx)
+		if err != nil {
 			fmt.Printf("  Warning: auto-install failed: %v\n", err)
 			fmt.Printf("  You can install manually or run: agent-deck remote update %s\n", name)
 		} else {
-			fmt.Printf("  ✓ Installed agent-deck v%s on remote '%s'\n", Version, name)
+			fmt.Printf("  ✓ Installed agent-deck v%s on remote '%s'\n", installedVersion, name)
 		}
 	}
 }
@@ -476,6 +477,16 @@ func handleRemoteUpdate(args []string) {
 	}
 
 	ctx := context.Background()
+	release, err := update.FetchLatestRelease()
+	if err != nil {
+		fmt.Printf("Error: failed to fetch latest release: %v\n", err)
+		return
+	}
+	targetVersion, err := remoteReleaseVersion(release)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
 
 	for name, rc := range config.Remotes {
 		if remoteName != "" && name != remoteName {
@@ -490,19 +501,19 @@ func handleRemoteUpdate(args []string) {
 		remoteVersion, found := runner.CheckBinary(ctx)
 		if found {
 			fmt.Printf("  Current version: v%s\n", remoteVersion)
-			if update.CompareVersions(remoteVersion, Version) >= 0 {
-				fmt.Printf("  ✓ Up to date (local: v%s)\n", Version)
+			if update.CompareVersions(remoteVersion, targetVersion) >= 0 {
+				fmt.Printf("  ✓ Up to date (latest: v%s)\n", targetVersion)
 				continue
 			}
-			fmt.Printf("  Updating to v%s...\n", Version)
+			fmt.Printf("  Updating to v%s...\n", targetVersion)
 		} else {
-			fmt.Printf("  agent-deck not found, installing v%s...\n", Version)
+			fmt.Printf("  agent-deck not found, installing v%s...\n", targetVersion)
 		}
 
-		if err := installOnRemote(runner, ctx); err != nil {
+		if err := installReleaseOnRemote(runner, ctx, release); err != nil {
 			fmt.Printf("  ✗ Failed: %v\n", err)
 		} else {
-			fmt.Printf("  ✓ Installed v%s\n", Version)
+			fmt.Printf("  ✓ Installed v%s\n", targetVersion)
 		}
 	}
 
@@ -529,6 +540,16 @@ func updateRemotesAfterLocalUpdate(newVersion string) {
 	}
 
 	ctx := context.Background()
+	release, err := update.FetchReleaseByTag(newVersion)
+	if err != nil {
+		fmt.Printf("\nCould not fetch v%s for remote installation: %v\n", newVersion, err)
+		return
+	}
+	targetVersion, err := remoteReleaseVersion(release)
+	if err != nil {
+		fmt.Printf("\nCould not resolve remote update version: %v\n", err)
+		return
+	}
 	for name, rc := range config.Remotes {
 		fmt.Printf("\n═══ Remote: %s (%s) ═══\n", name, rc.Host)
 		runner := session.NewSSHRunner(name, rc)
@@ -536,19 +557,19 @@ func updateRemotesAfterLocalUpdate(newVersion string) {
 		remoteVersion, found := runner.CheckBinary(ctx)
 		if found {
 			fmt.Printf("  Current version: v%s\n", remoteVersion)
-			if update.CompareVersions(remoteVersion, newVersion) >= 0 {
+			if update.CompareVersions(remoteVersion, targetVersion) >= 0 {
 				fmt.Printf("  ✓ Up to date\n")
 				continue
 			}
-			fmt.Printf("  Updating to v%s...\n", newVersion)
+			fmt.Printf("  Updating to v%s...\n", targetVersion)
 		} else {
-			fmt.Printf("  agent-deck not found, installing v%s...\n", newVersion)
+			fmt.Printf("  agent-deck not found, installing v%s...\n", targetVersion)
 		}
 
-		if err := installOnRemote(runner, ctx); err != nil {
+		if err := installReleaseOnRemote(runner, ctx, release); err != nil {
 			fmt.Printf("  ✗ Failed: %v\n", err)
 		} else {
-			fmt.Printf("  ✓ Installed v%s\n", newVersion)
+			fmt.Printf("  ✓ Installed v%s\n", targetVersion)
 		}
 	}
 }
@@ -570,22 +591,49 @@ func shouldProceedWithRemoteUpdate(response string, readErr error) bool {
 	return false
 }
 
-// installOnRemote detects the remote platform and deploys the matching agent-deck binary.
-// It first tries to find a matching release on GitHub. If no release is available for the
-// local version, it falls back to downloading the latest release for the remote platform.
-func installOnRemote(runner *session.SSHRunner, ctx context.Context) error {
+// installOnRemote resolves the latest release once, deploys its matching remote
+// binary, and returns the exact version that was installed.
+func installOnRemote(runner *session.SSHRunner, ctx context.Context) (string, error) {
+	release, err := update.FetchLatestRelease()
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch release info: %w", err)
+	}
+	version, err := remoteReleaseVersion(release)
+	if err != nil {
+		return "", err
+	}
+	if err := installReleaseOnRemote(runner, ctx, release); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
+func remoteReleaseVersion(release *update.Release) (string, error) {
+	if release == nil {
+		return "", fmt.Errorf("remote update release is required")
+	}
+	version := strings.TrimLeft(strings.TrimSpace(release.TagName), "vV")
+	if version == "" {
+		return "", fmt.Errorf("remote update release has an empty tag")
+	}
+	return version, nil
+}
+
+// installReleaseOnRemote detects the remote platform and deploys the matching
+// binary from one already-resolved release. Callers use the same release tag
+// for comparison, download, post-install verification, and user-facing output.
+func installReleaseOnRemote(runner *session.SSHRunner, ctx context.Context, release *update.Release) error {
+	expectedVersion, err := remoteReleaseVersion(release)
+	if err != nil {
+		return err
+	}
+
 	// Detect remote platform
 	goos, goarch, err := runner.DetectPlatform(ctx)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("  Platform: %s/%s\n", goos, goarch)
-
-	// Fetch latest release from GitHub
-	release, err := update.FetchLatestRelease()
-	if err != nil {
-		return fmt.Errorf("failed to fetch release info: %w", err)
-	}
 
 	// Download, verify SHA-256 against the release's checksums.txt, and extract.
 	// We NEVER pipe an unverified artifact to a remote: a missing checksums.txt,
@@ -600,7 +648,7 @@ func installOnRemote(runner *session.SSHRunner, ctx context.Context) error {
 	// before we report success (#1171: deploy + version-check used to target
 	// different files, producing a false "✓ Installed").
 	fmt.Printf("  Deploying to %s...\n", runner.Host)
-	if err := runner.InstallBinary(ctx, binaryData, Version); err != nil {
+	if err := runner.InstallBinary(ctx, binaryData, expectedVersion); err != nil {
 		return fmt.Errorf("deploy failed: %w", err)
 	}
 

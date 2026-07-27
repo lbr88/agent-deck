@@ -59,6 +59,16 @@ func SetVersion(v string) {
 	Version = v
 }
 
+// RuntimeHandoffMsg asks the TUI to perform its full shutdown sequence before
+// the process replaces itself with an updated Agent Deck binary. Unlike
+// tea.Program.Quit, this drains workers, saves UI/session state, disconnects
+// control clients, and restores the terminal first.
+type RuntimeHandoffMsg struct {
+	// OnRejected is called when an explicit user quit already owns shutdown.
+	// The process lifecycle uses it to cancel the pending re-exec.
+	OnRejected func()
+}
+
 // CreatingSession is a lightweight placeholder shown in the UI while
 // a worktree + session is being created asynchronously.
 // It is NOT a real session.Instance — it is excluded from save, polling, and search.
@@ -312,25 +322,27 @@ type Home struct {
 	analyticsCacheTime     map[string]time.Time                       // TTL cache: sessionID -> cache timestamp
 
 	// State
-	cursor              int                   // Selected item index in flatItems
-	viewOffset          int                   // First visible item index (for scrolling)
-	previewScrollOffset int                   // Lines scrolled up from tail in the preview pane (#574). 0 = tail (default). Reset on cursor move.
-	isAttaching         atomic.Bool           // Prevents View() output during attach (fixes Bubble Tea Issue #431) - atomic for thread safety
-	statusFilter        session.Status        // Filter sessions by status ("" = all, or specific status)
-	groupScope          string                // Limit TUI to a specific group path ("" = all groups)
-	initialSelect       string                // Session ID or title to preselect on first load (#709). Does NOT scope groups.
-	initialSelectDone   bool                  // Guard so preselection only fires once
-	previewMode         PreviewMode           // What to show in preview pane (both, output-only, analytics-only)
-	groupViewMode       session.GroupViewMode // List partition: normal, active-on-top, populated-on-top (cycled by hotkey 't')
-	sessionActionPrefix bool                  // True after P; next key chooses an action in the session action family.
-	err                 error
-	errTime             time.Time  // When error occurred (for auto-dismiss)
-	isReloading         bool       // Visual feedback during auto-reload
-	initialLoading      bool       // True until first loadSessionsMsg received (shows splash screen)
-	isQuitting          bool       // True when user pressed q, shows quitting splash
-	reloadVersion       uint64     // Incremented on each reload to prevent stale background saves
-	reloadMu            sync.Mutex // Protects reloadVersion, isReloading, and lastLoadMtime for thread-safe access
-	lastLoadMtime       time.Time  // File mtime when we last loaded (for external change detection)
+	cursor                 int                   // Selected item index in flatItems
+	viewOffset             int                   // First visible item index (for scrolling)
+	previewScrollOffset    int                   // Lines scrolled up from tail in the preview pane (#574). 0 = tail (default). Reset on cursor move.
+	isAttaching            atomic.Bool           // Prevents View() output during attach (fixes Bubble Tea Issue #431) - atomic for thread safety
+	statusFilter           session.Status        // Filter sessions by status ("" = all, or specific status)
+	groupScope             string                // Limit TUI to a specific group path ("" = all groups)
+	initialSelect          string                // Session ID or title to preselect on first load (#709). Does NOT scope groups.
+	initialSelectDone      bool                  // Guard so preselection only fires once
+	previewMode            PreviewMode           // What to show in preview pane (both, output-only, analytics-only)
+	groupViewMode          session.GroupViewMode // List partition: normal, active-on-top, populated-on-top (cycled by hotkey 't')
+	sessionActionPrefix    bool                  // True after P; next key chooses an action in the session action family.
+	err                    error
+	errTime                time.Time  // When error occurred (for auto-dismiss)
+	isReloading            bool       // Visual feedback during auto-reload
+	initialLoading         bool       // True until first loadSessionsMsg received (shows splash screen)
+	isQuitting             bool       // True once user quit or update handoff begins; shows quitting splash
+	runtimeHandoffAccepted bool       // True when update handoff, rather than user quit, owns shutdown
+	finalShutdownScheduled bool       // Guards cleanup against overlapping quit/handoff messages
+	reloadVersion          uint64     // Incremented on each reload to prevent stale background saves
+	reloadMu               sync.Mutex // Protects reloadVersion, isReloading, and lastLoadMtime for thread-safe access
+	lastLoadMtime          time.Time  // File mtime when we last loaded (for external change detection)
 
 	// Preview cache (async fetching - View() must be pure, no blocking I/O)
 	previewCache      map[string]string    // previewKey -> cached preview content
@@ -6078,6 +6090,19 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case RuntimeHandoffMsg:
+		if h.isQuitting || h.finalShutdownScheduled {
+			if msg.OnRejected != nil {
+				msg.OnRejected()
+			}
+			return h, nil
+		}
+		h.runtimeHandoffAccepted = true
+		h.isQuitting = true
+		// Leave the shared MCP pool running; the replacement process reconnects
+		// immediately after the same-PID exec.
+		return h, h.performFinalShutdown(false)
+
 	case quitMsg:
 		// Execute final shutdown logic after splash delay
 		return h, h.performFinalShutdown(bool(msg))
@@ -11437,6 +11462,10 @@ func (h *Home) performQuit(shutdownPool bool) tea.Cmd {
 // performFinalShutdown performs the actual cleanup logic before exiting
 // This is called via quitMsg after the splash screen has had time to render
 func (h *Home) performFinalShutdown(shutdownPool bool) tea.Cmd {
+	if h.finalShutdownScheduled {
+		return nil
+	}
+	h.finalShutdownScheduled = true
 	return func() tea.Msg {
 		// Stop system stats collector
 		if h.sysStatsCollector != nil {
@@ -11506,6 +11535,12 @@ func (h *Home) performFinalShutdown(shutdownPool bool) tea.Cmd {
 
 		return tea.Quit()
 	}
+}
+
+// RuntimeHandoffAccepted reports whether the TUI accepted update handoff as
+// its shutdown cause. It is read by the process wrapper after Program.Run.
+func (h *Home) RuntimeHandoffAccepted() bool {
+	return h != nil && h.runtimeHandoffAccepted
 }
 
 // refreshWatcherPanel loads watcher and event data from statedb and updates the panel.

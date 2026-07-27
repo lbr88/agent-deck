@@ -36,7 +36,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -101,7 +100,7 @@ func handleCredsRefresh(args []string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "creds-refresh: keeping %d profile(s) warm every %s (threshold %s)\n", len(dirs), *interval, *threshold)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop, _ := runtimeHandoffSignalContext(os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	credrefresh.Run(ctx, cfg)
 }
