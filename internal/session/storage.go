@@ -45,7 +45,7 @@ type InstanceData struct {
 	ParentSessionID     string    `json:"parent_session_id,omitempty"`     // Links to parent session (sub-session support)
 	IsConductor         bool      `json:"is_conductor,omitempty"`          // True if this session is a conductor orchestrator
 	NoTransitionNotify  bool      `json:"no_transition_notify,omitempty"`  // Suppress transition event dispatch
-	TitleLocked         bool      `json:"title_locked,omitempty"`          // #697: block Claude session-name sync into Title
+	TitleLocked         bool      `json:"title_locked,omitempty"`          // block provider session-name sync into Title
 	AutoName            bool      `json:"auto_name,omitempty"`             // marks Title as a machine-generated quick-session handle
 	AutoNameDescription string    `json:"auto_name_description,omitempty"` // last captured Claude task description for an AutoName session
 	Command             string    `json:"command"`

@@ -115,11 +115,11 @@ type Instance struct {
 	IsConductor        bool    `json:"is_conductor,omitempty"`         // True if this session is a conductor orchestrator
 	NoTransitionNotify bool    `json:"no_transition_notify,omitempty"` // Suppress transition event dispatch for this session
 
-	// TitleLocked, when true, blocks Claude's session name from syncing into
-	// the agent-deck Title (issue #697). Conductors launch workers with a
-	// semantic title (e.g. "SCRUM-351") that Claude would otherwise overwrite
-	// with its auto-generated summary on the next hook event. Set via
-	// `--title-lock` on add/launch or `session set-title-lock`.
+	// TitleLocked, when true, blocks a provider's native session name from
+	// syncing into the agent-deck Title. Conductors launch workers with a
+	// semantic title (e.g. "SCRUM-351") that a provider would otherwise
+	// overwrite with an auto-generated title. Set via `--title-lock` on
+	// add/launch or `session set-title-lock`.
 	TitleLocked bool `json:"title_locked,omitempty"`
 
 	// AutoName, when true, marks Title as a machine-generated adjective-noun

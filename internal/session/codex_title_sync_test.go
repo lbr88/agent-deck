@@ -26,7 +26,6 @@ func TestUpdateStatusReconcilesCodexTitleWithoutLiveTmux(t *testing.T) {
 		Tool:           "codex",
 		Status:         StatusStopped,
 		CodexSessionID: id,
-		TitleLocked:    true,
 	}
 
 	if err := inst.UpdateStatus(); err != nil {
@@ -69,7 +68,7 @@ func TestReconcileTitleFromCodexPersistsThroughOwningStorageWithoutGlobal(t *tes
 		Status:         StatusStopped,
 		CreatedAt:      time.Now(),
 		CodexSessionID: threadID,
-		TitleLocked:    true,
+		TitleLocked:    false,
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

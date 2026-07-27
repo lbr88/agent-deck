@@ -25,9 +25,8 @@ const (
 
 var codexAppServerCommandContext = exec.CommandContext
 
-// ReconcileTitleFromCodex pulls a native Codex /rename into Agent Deck. A
-// Codex thread name is explicit user input, so TitleLocked (which protects
-// against agent-generated Claude names) does not suppress this direction.
+// ReconcileTitleFromCodex pulls a native Codex title into Agent Deck when
+// inbound title sync is enabled and the session title is not explicitly locked.
 func (i *Instance) ReconcileTitleFromCodex() (string, bool, error) {
 	if i == nil {
 		return "", false, nil
@@ -38,7 +37,7 @@ func (i *Instance) ReconcileTitleFromCodex() (string, bool, error) {
 }
 
 func (i *Instance) reconcileTitleFromCodexLocked() (string, bool, error) {
-	if !IsCodexCompatible(i.Tool) || strings.TrimSpace(i.CodexSessionID) == "" {
+	if i.TitleLocked || !IsCodexCompatible(i.Tool) || strings.TrimSpace(i.CodexSessionID) == "" {
 		return "", false, nil
 	}
 	if cfg, err := LoadUserConfig(); err == nil && cfg != nil && !cfg.GetSyncTitle() {

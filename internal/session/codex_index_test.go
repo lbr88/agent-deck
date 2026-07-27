@@ -342,7 +342,7 @@ func TestCodexSessionNameInReadsNativeThreadTitle(t *testing.T) {
 	}
 }
 
-func TestReconcileTitleFromCodexUpdatesLockedTitleAndPersists(t *testing.T) {
+func TestReconcileTitleFromCodexNoopWhenTitleLocked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
@@ -374,18 +374,21 @@ func TestReconcileTitleFromCodexUpdatesLockedTitleAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileTitleFromCodex: %v", err)
 	}
-	if !changed || name != "renamed from codex" || inst.Title != name {
-		t.Fatalf("reconcile = (%q, %v), instance title %q", name, changed, inst.Title)
+	if changed || name != "" {
+		t.Fatalf("reconcile = (%q, %v), want locked no-op", name, changed)
+	}
+	if inst.Title != "agent deck title" {
+		t.Fatalf("instance title = %q, want explicit Agent Deck title", inst.Title)
 	}
 	rows, err := db.LoadInstances()
 	if err != nil {
 		t.Fatalf("LoadInstances: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Title != "renamed from codex" {
-		t.Fatalf("persisted rows = %#v, want renamed title", rows)
+	if len(rows) != 1 || rows[0].Title != "agent deck title" {
+		t.Fatalf("persisted rows = %#v, want explicit Agent Deck title", rows)
 	}
 	if !inst.TitleLocked {
-		t.Fatal("Codex rename must not silently change the user's title-lock setting")
+		t.Fatal("locked reconciliation must preserve the title-lock setting")
 	}
 }
 
