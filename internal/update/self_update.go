@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
 const selfUpdateValidationTimeout = 15 * time.Second
@@ -237,8 +239,8 @@ func runSelfUpdateCandidateVersion(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), selfUpdateValidationTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, path, "version")
-	cmd.Env = append(os.Environ(), SkipUpdateCheckEnv+"=1")
+	cmd := exec.CommandContext(ctx, path, "version") //nolint:gosec // G702: path is the freshly staged update candidate that this validation intentionally executes.
+	cmd.Env = append(childenv.ForLaunch(""), SkipUpdateCheckEnv+"=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()

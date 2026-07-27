@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -787,6 +788,27 @@ func TestLocalActionBackendGroupActionsPersist(t *testing.T) {
 	}
 	if pos, _ := persistedHubGroupPosition(groups, "platform/worker"); pos != 0 {
 		t.Fatalf("platform/worker persisted position = %d, want 0", pos)
+	}
+}
+
+func TestLocalActionBackendRenameGroupRejectsCollision(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	session.ClearUserConfigCache()
+	t.Cleanup(session.ClearUserConfigCache)
+
+	backend := LocalActionBackend{Profile: "hub-group-rename-collision-test"}
+	if _, err := backend.CreateGroup(context.Background(), GroupCreateRequest{Name: "source"}); err != nil {
+		t.Fatalf("CreateGroup source: %v", err)
+	}
+	if _, err := backend.CreateGroup(context.Background(), GroupCreateRequest{Name: "target"}); err != nil {
+		t.Fatalf("CreateGroup target: %v", err)
+	}
+
+	if _, err := backend.RenameGroup(context.Background(), GroupRenameRequest{GroupPath: "source", Name: "target"}); !errors.Is(err, session.ErrGroupAlreadyExists) {
+		t.Fatalf("RenameGroup collision error = %v, want ErrGroupAlreadyExists", err)
 	}
 }
 

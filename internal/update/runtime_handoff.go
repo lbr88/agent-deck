@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/asheshgoplani/agent-deck/internal/childenv"
 )
 
 const (
@@ -124,7 +126,7 @@ func NewRuntimeHandoff(options RuntimeHandoffOptions) (*RuntimeHandoff, error) {
 		callbackDone: make(chan struct{}),
 		validate:     validateRuntimeHandoffTarget,
 		execProcess:  replaceCurrentProcess,
-		environ:      os.Environ,
+		environ:      childenv.ForReexec,
 	}, nil
 }
 

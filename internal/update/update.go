@@ -689,7 +689,7 @@ func PerformUpdate(downloadURL string) error {
 	// Download the release
 	fmt.Printf("Downloading from %s...\n", downloadURL)
 	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Get(downloadURL)
+	resp, err := client.Get(downloadURL) //nolint:gosec // G704: the legacy updater intentionally fetches its caller-selected release asset URL.
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}

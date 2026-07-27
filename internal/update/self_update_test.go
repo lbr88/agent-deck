@@ -58,6 +58,35 @@ func TestInstallSelfUpdateBinaryRejectsSuccessfulNonAgentDeckExecutable(t *testi
 	assert.Equal(t, oldBinary, installed)
 }
 
+func TestRunSelfUpdateCandidateVersionFiltersConductorEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script candidate is Unix-only")
+	}
+	t.Setenv("TELEGRAM_BOT_TOKEN", "must-not-leak")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/parent/scratch")
+	t.Setenv(SkipUpdateCheckEnv, "0")
+
+	path := filepath.Join(t.TempDir(), "agent-deck-candidate")
+	script := `#!/bin/sh
+if [ -n "${TELEGRAM_BOT_TOKEN+x}" ]; then
+	echo "TELEGRAM_BOT_TOKEN leaked" >&2
+	exit 41
+fi
+if [ -n "${CLAUDE_CONFIG_DIR+x}" ]; then
+	echo "CLAUDE_CONFIG_DIR leaked" >&2
+	exit 42
+fi
+if [ "$AGENTDECK_SKIP_UPDATE_CHECK" != "1" ]; then
+	echo "update check was not disabled" >&2
+	exit 43
+fi
+echo "Agent Deck vcandidate-test"
+`
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+
+	require.NoError(t, runSelfUpdateCandidateVersion(path))
+}
+
 func TestInstallSelfUpdateBinaryStagesUniqueCandidatesBesideTarget(t *testing.T) {
 	isolateUpdatePaths(t)
 	dir := t.TempDir()

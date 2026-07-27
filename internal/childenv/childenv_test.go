@@ -1,6 +1,7 @@
 package childenv
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -43,4 +44,14 @@ func TestFilterEnv_DoesNotMutateInput(t *testing.T) {
 	in := []string{"TELEGRAM_X=1", "PATH=/bin"}
 	_ = FilterEnv(in, "/child")
 	assert.Equal(t, []string{"TELEGRAM_X=1", "PATH=/bin"}, in)
+}
+
+func TestForReexecPreservesCurrentEnvironment(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "secret")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/parent/scratch")
+
+	out := ForReexec()
+
+	assert.Contains(t, out, "TELEGRAM_BOT_TOKEN="+os.Getenv("TELEGRAM_BOT_TOKEN"))
+	assert.Contains(t, out, "CLAUDE_CONFIG_DIR="+os.Getenv("CLAUDE_CONFIG_DIR"))
 }

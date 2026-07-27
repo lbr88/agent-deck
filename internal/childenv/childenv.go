@@ -49,3 +49,10 @@ func FilterEnv(env []string, childConfigDir string) []string {
 func ForLaunch(childConfigDir string) []string {
 	return FilterEnv(os.Environ(), childConfigDir)
 }
+
+// ForReexec returns a copy of the current process environment without applying
+// child-process filtering. Replacing the current process must preserve its
+// launch context, including conductor-specific variables.
+func ForReexec() []string {
+	return append([]string(nil), os.Environ()...)
+}

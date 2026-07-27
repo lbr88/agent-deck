@@ -2411,7 +2411,9 @@ func (b LocalActionBackend) RenameGroup(ctx context.Context, req GroupRenameRequ
 	if name == "" {
 		return GroupRenameResponse{}, fmt.Errorf("group name is required")
 	}
-	groupTree.RenameGroup(oldPath, name)
+	if err := groupTree.RenameGroup(oldPath, name); err != nil {
+		return GroupRenameResponse{}, err
+	}
 	newPath := renamedHubGroupPath(oldPath, name)
 	group := groupTree.Groups[newPath]
 	if group == nil {
