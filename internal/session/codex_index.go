@@ -694,61 +694,74 @@ func SyncCodexSessionNameIn(codexHome, sessionID, title string, now time.Time) e
 	return updateCodexStateThreadTitle(codexHome, sessionID, title)
 }
 
+// codexStateSessionNameIn reads only Codex's native SQLite state. The rowFound
+// result deliberately distinguishes a missing/late thread from an empty
+// explicit name so creation-title sync can keep retrying after a JSON fallback
+// record was written before Codex created the thread row.
+func codexStateSessionNameIn(codexHome, sessionID string) (name string, rowFound bool, hasExplicitName bool, err error) {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if sessionID == "" {
+		return "", false, false, nil
+	}
+	if !isCodexSessionUUID(sessionID) {
+		return "", false, false, fmt.Errorf("invalid codex session id %q", sessionID)
+	}
+	if strings.TrimSpace(codexHome) == "" {
+		return "", false, false, fmt.Errorf("codex home is empty")
+	}
+
+	path := filepath.Join(codexHome, "state_5.sqlite")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return "", false, false, nil
+	} else if err != nil {
+		return "", false, false, err
+	}
+
+	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
+	if err != nil {
+		return "", false, false, err
+	}
+	defer db.Close()
+
+	hasExplicitName, err = codexStateHasThreadNameColumn(db)
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return "", false, false, nil
+		}
+		return "", false, false, err
+	}
+	column := "title"
+	if hasExplicitName {
+		column = "name"
+	}
+	var nativeName sql.NullString
+	err = db.QueryRow(`SELECT `+column+` FROM threads WHERE id = ?`, sessionID).Scan(&nativeName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, hasExplicitName, nil
+	}
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return "", false, hasExplicitName, nil
+		}
+		return "", false, hasExplicitName, err
+	}
+	return strings.TrimSpace(nativeName.String), true, hasExplicitName, nil
+}
+
 // CodexSessionNameIn returns the explicit name Codex currently stores for
 // sessionID. Modern Codex keeps the auto-generated first-prompt title separate
 // from the optional user name; the prompt must never replace an Agent Deck
 // rename. Legacy schemas used title for the explicit name.
 func CodexSessionNameIn(codexHome, sessionID string) (string, error) {
 	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
-	if sessionID == "" {
-		return "", nil
-	}
-	if !isCodexSessionUUID(sessionID) {
-		return "", fmt.Errorf("invalid codex session id %q", sessionID)
-	}
-	if strings.TrimSpace(codexHome) == "" {
-		return "", fmt.Errorf("codex home is empty")
-	}
-
-	path := filepath.Join(codexHome, "state_5.sqlite")
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return codexJSONSessionName(codexHome, sessionID)
-	} else if err != nil {
-		return "", err
-	}
-
-	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
+	name, rowFound, hasExplicitName, err := codexStateSessionNameIn(codexHome, sessionID)
 	if err != nil {
 		return "", err
 	}
-	defer db.Close()
-
-	hasName, err := codexStateHasThreadNameColumn(db)
-	if err != nil {
-		if isMissingCodexStateSchema(err) {
-			return codexJSONSessionName(codexHome, sessionID)
-		}
-		return "", err
-	}
-	column := "title"
-	if hasName {
-		column = "name"
-	}
-	var name sql.NullString
-	err = db.QueryRow(`SELECT `+column+` FROM threads WHERE id = ?`, sessionID).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		return codexJSONSessionName(codexHome, sessionID)
-	}
-	if err != nil {
-		if isMissingCodexStateSchema(err) {
-			return codexJSONSessionName(codexHome, sessionID)
-		}
-		return "", err
-	}
-	if name := strings.TrimSpace(name.String); name != "" {
+	if name != "" {
 		return name, nil
 	}
-	if hasName {
+	if !rowFound || hasExplicitName {
 		return codexJSONSessionName(codexHome, sessionID)
 	}
 	return "", nil

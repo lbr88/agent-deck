@@ -77,6 +77,46 @@ func (i *Instance) reconcileTitleFromCodexLocked() (string, bool, error) {
 	return name, true, nil
 }
 
+// ensureCodexCreationTitleLocked pushes an explicit Agent Deck creation title
+// into Codex after a binding is available. Unlike the hook-time seed, this is
+// retryable: a JSON fallback written before Codex creates its SQLite thread row
+// does not suppress the later native name update.
+func (i *Instance) ensureCodexCreationTitleLocked() error {
+	if !i.TitleLocked || !IsCodexCompatible(i.Tool) || strings.TrimSpace(i.CodexSessionID) == "" {
+		return nil
+	}
+	title := strings.TrimSpace(i.Title)
+	if title == "" {
+		return nil
+	}
+
+	codexHome := i.getCodexHomeDir()
+	if IsCodexSubagentSession(codexHome, i.CodexSessionID) {
+		return nil
+	}
+	nativeName, rowFound, _, err := codexStateSessionNameIn(codexHome, i.CodexSessionID)
+	if err != nil {
+		return err
+	}
+	if nativeName != "" {
+		return nil
+	}
+	if rowFound {
+		return SyncCodexSessionNameIn(codexHome, i.CodexSessionID, title, time.Now())
+	}
+
+	// Preserve JSON-only compatibility without appending the same record every
+	// refresh. A later native row is still checked independently above.
+	jsonName, err := codexJSONSessionName(codexHome, strings.ToLower(strings.TrimSpace(i.CodexSessionID)))
+	if err != nil {
+		return err
+	}
+	if jsonName != "" {
+		return nil
+	}
+	return AppendCodexSessionIndexName(codexHome, i.CodexSessionID, title, time.Now())
+}
+
 // refreshCodexMetadataLocked is called from UpdateStatus before its many early
 // returns. This is what lets /rename propagate even for detached/stopped rows
 // and what lets a late-created Codex thread repair a missing cached binding.
@@ -98,6 +138,12 @@ func (i *Instance) refreshCodexMetadataLocked() {
 	}
 	if i.CodexSessionID == "" {
 		return
+	}
+	if err := i.ensureCodexCreationTitleLocked(); err != nil {
+		sessionLog.Warn("codex_creation_title_sync_failed",
+			slog.String("instance_id", i.ID),
+			slog.String("session_id", i.CodexSessionID),
+			slog.String("error", err.Error()))
 	}
 	if _, _, err := i.reconcileTitleFromCodexLocked(); err != nil {
 		sessionLog.Warn("codex_title_reconcile_failed",

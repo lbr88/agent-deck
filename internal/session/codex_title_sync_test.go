@@ -76,6 +76,103 @@ func TestUpdateStatusReconcilesCodexTitleWithoutLiveTmux(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusSeedsLockedCreationTitleAfterPersistedCodexBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+
+	const (
+		threadID      = "abababab-abab-abab-abab-abababababab"
+		creationTitle = "short creation title"
+		promptTitle   = "the much longer first user prompt that Codex stores as its automatic title"
+	)
+	writeCodexStateThread(t, GetCodexHomeDir(), threadID, promptTitle, "preview", "/repo", time.Now().UnixMilli())
+	addCodexStateThreadNameColumn(t, GetCodexHomeDir(), threadID, "")
+	inst := &Instance{
+		ID:             "codex-persisted-creation-title",
+		Title:          creationTitle,
+		TitleLocked:    true,
+		ProjectPath:    "/repo",
+		Tool:           "codex",
+		Status:         StatusStopped,
+		CodexSessionID: threadID,
+	}
+
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(GetCodexHomeDir(), "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var title, name string
+	if err := db.QueryRow(`SELECT title, name FROM threads WHERE id = ?`, threadID).Scan(&title, &name); err != nil {
+		t.Fatal(err)
+	}
+	if title != promptTitle || name != creationTitle {
+		t.Fatalf("state thread title/name = %q/%q, want %q/%q", title, name, promptTitle, creationTitle)
+	}
+	if inst.Title != creationTitle || !inst.TitleLocked {
+		t.Fatalf("Agent Deck title/lock = %q/%v, want %q/true", inst.Title, inst.TitleLocked, creationTitle)
+	}
+}
+
+func TestUpdateStatusRetriesLockedCreationTitleAfterCodexThreadAppears(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+
+	const (
+		threadID      = "bcbcbcbc-bcbc-bcbc-bcbc-bcbcbcbcbcbc"
+		creationTitle = "title chosen at creation"
+		promptTitle   = "the first prompt arrived in Codex state after Agent Deck learned the thread id"
+	)
+	inst := &Instance{
+		ID:             "codex-late-thread-creation-title",
+		Title:          creationTitle,
+		TitleLocked:    true,
+		ProjectPath:    "/repo",
+		Tool:           "codex",
+		Status:         StatusStopped,
+		CodexSessionID: threadID,
+	}
+
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus before Codex thread exists: %v", err)
+	}
+	if got, err := codexJSONSessionName(GetCodexHomeDir(), threadID); err != nil {
+		t.Fatalf("read seeded JSON name: %v", err)
+	} else if got != creationTitle {
+		t.Fatalf("seeded JSON name = %q, want %q", got, creationTitle)
+	}
+
+	writeCodexStateThread(t, GetCodexHomeDir(), threadID, promptTitle, "preview", "/repo", time.Now().UnixMilli())
+	addCodexStateThreadNameColumn(t, GetCodexHomeDir(), threadID, "")
+	inst.lastCodexTitleSync = time.Time{}
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus after Codex thread appears: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(GetCodexHomeDir(), "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var title, name string
+	if err := db.QueryRow(`SELECT title, name FROM threads WHERE id = ?`, threadID).Scan(&title, &name); err != nil {
+		t.Fatal(err)
+	}
+	if title != promptTitle || name != creationTitle {
+		t.Fatalf("state thread title/name = %q/%q, want %q/%q", title, name, promptTitle, creationTitle)
+	}
+}
+
 func TestReconcileTitleFromCodexPersistsThroughOwningStorageWithoutGlobal(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
