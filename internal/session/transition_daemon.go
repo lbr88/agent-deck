@@ -766,6 +766,7 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		DoneStatus     string `json:"done_status"`
 		DoneSummary    string `json:"done_summary"`
 		TranscriptPath string `json:"transcript_path"`
+		Cwd            string `json:"cwd"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil
@@ -785,6 +786,7 @@ func readHookStatusFile(instanceID string) *HookStatus {
 		DoneStatus:     raw.DoneStatus,
 		DoneSummary:    raw.DoneSummary,
 		TranscriptPath: raw.TranscriptPath,
+		Cwd:            raw.Cwd,
 	}
 }
 

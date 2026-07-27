@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -2533,34 +2534,18 @@ func TestInstance_ForkOpenCode(t *testing.T) {
 		t.Errorf("ForkOpenCode() failed: %v", err)
 	}
 
-	// cmd is "bash '<script_path>'" - extract and read the script file
-	if !strings.HasPrefix(cmd, "bash '") {
-		t.Fatalf("ForkOpenCode() should return bash command, got: %s", cmd)
+	// Native fork: `opencode -s <parent-id> --fork`, no export/import clone script.
+	if !strings.Contains(cmd, "opencode -s ses_abc123def456ffe1234567890abcd --fork") {
+		t.Errorf("ForkOpenCode() should use native `opencode -s <parent> --fork`, got: %s", cmd)
 	}
-	scriptPath := strings.TrimPrefix(cmd, "bash '")
-	scriptPath = strings.TrimSuffix(scriptPath, "'")
-	scriptContent, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("Failed to read fork script at %s: %v", scriptPath, err)
-	}
-	script := string(scriptContent)
-
-	if !strings.Contains(script, "opencode export") {
-		t.Errorf("Fork script should use opencode export, got: %s", script)
-	}
-	if !strings.Contains(script, "opencode import") {
-		t.Errorf("Fork script should use opencode import, got: %s", script)
-	}
-	if !strings.Contains(script, "ses_abc123def456ffe1234567890abcd") {
-		t.Errorf("Fork script should include original session ID, got: %s", script)
-	}
-	// tmux set-environment removed: host-side SetEnvironment handles propagation
-	if strings.Contains(script, "tmux set-environment") {
-		t.Errorf("Fork script should NOT contain tmux set-environment (host-side handles it), got: %s", script)
+	for _, gone := range []string{"bash ", "opencode export", "opencode import", "tmux set-environment"} {
+		if strings.Contains(cmd, gone) {
+			t.Errorf("ForkOpenCode() should not reference the old clone path (%q), got: %s", gone, cmd)
+		}
 	}
 }
 
-func TestInstance_ForkOpenCode_QuotesScriptInputs(t *testing.T) {
+func TestInstance_ForkOpenCode_QuotesInputs(t *testing.T) {
 	workDir := filepath.Join(t.TempDir(), `project with "quote"`)
 	inst := NewInstanceWithTool("test", workDir, "opencode")
 	inst.OpenCodeSessionID = "ses_abc123"
@@ -2570,22 +2555,20 @@ func TestInstance_ForkOpenCode_QuotesScriptInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForkOpenCode() failed: %v", err)
 	}
-	scriptPath := strings.TrimPrefix(cmd, "bash '")
-	scriptPath = strings.TrimSuffix(scriptPath, "'")
-	scriptContent, err := os.ReadFile(scriptPath)
-	if err != nil {
-		t.Fatalf("Failed to read fork script at %s: %v", scriptPath, err)
-	}
-	script := string(scriptContent)
 
-	if strings.Contains(script, fmt.Sprintf(`cd "%s"`, workDir)) {
-		t.Fatalf("workDir must not be interpolated inside double quotes: %s", script)
+	// The native fork command targets the parent session id via -s; the id is
+	// validated safe upstream (normalizeToolSessionID) so shellescape.Quote leaves
+	// it bare.
+	if want := "opencode -s " + shellescape.Quote(inst.OpenCodeSessionID) + " --fork"; !strings.Contains(cmd, want) {
+		t.Fatalf("fork command should target the quoted session id; want %q in %q", want, cmd)
 	}
-	if want := "cd " + shellescape.Quote(workDir); !strings.Contains(script, want) {
-		t.Fatalf("fork script should quote workDir with shellescape; want %q in %s", want, script)
+	// workDir is anchored into the command via `cd` (the multi-repo fork path needs
+	// it), but must be shell-quoted so a path with metacharacters can't break out.
+	if strings.Contains(cmd, fmt.Sprintf(`cd "%s"`, workDir)) {
+		t.Fatalf("workDir must not be interpolated raw (double-quoted): %q", cmd)
 	}
-	if want := "opencode export " + shellescape.Quote(inst.OpenCodeSessionID); !strings.Contains(script, want) {
-		t.Fatalf("fork script should quote OpenCode session ID; want %q in %s", want, script)
+	if want := "cd " + shellescape.Quote(workDir); !strings.Contains(cmd, want) {
+		t.Fatalf("workDir should be shell-quoted in the cd anchor; want %q in %q", want, cmd)
 	}
 }
 
@@ -3725,6 +3708,51 @@ func TestExtractCodexSessionIDFromLsofOutput(t *testing.T) {
 	}
 }
 
+// TestCodexLsofProbe_TimeoutBoundsHungLsof reproduces issue #1581: without a
+// timeout, a single lsof call that blocks (there, on reverse-DNS PTR lookups of
+// the codex process's open sockets) stalls the shared status pass indefinitely.
+// It replicates the exact production invocation and asserts (a) the -n -P flags
+// are passed so lsof never resolves hosts/ports, and (b) codexLsofProbeTimeout
+// bounds a hung lsof so the status pass returns promptly instead of hanging.
+func TestCodexLsofProbe_TimeoutBoundsHungLsof(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	// Fake lsof: record the args it was invoked with, then block for far longer
+	// than the probe timeout (stand-in for a PTR-blackhole resolver stall).
+	fakeLsof := filepath.Join(dir, "lsof")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nsleep 30\n"
+	if err := os.WriteFile(fakeLsof, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake lsof: %v", err)
+	}
+
+	pid := 12345
+	start := time.Now()
+	// Mirror queryCodexSessionFromHostLsof exactly: -n -P plus a hard timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), codexLsofProbeTimeout)
+	defer cancel()
+	// #nosec G204 -- test-only fixed path and flags.
+	err := exec.CommandContext(ctx, fakeLsof, "-n", "-P", "-p", fmt.Sprintf("%d", pid)).Run()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected the hung lsof to be killed by the timeout, got nil error")
+	}
+	// Must return on the order of the timeout, never near the 30s hang.
+	if elapsed > codexLsofProbeTimeout+3*time.Second {
+		t.Fatalf("probe was not bounded by timeout: took %v (timeout %v)", elapsed, codexLsofProbeTimeout)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake lsof did not run (no args file): %v", err)
+	}
+	for _, want := range []string{"-n", "-P"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("lsof invoked without %q flag; args were:\n%s", want, got)
+		}
+	}
+}
+
 func TestExtractCodexSessionIDFromLsofOutput_DockerStyleLine(t *testing.T) {
 	lsofOutput := []byte(`codex 44 root 36w REG 0,608 3392413 5176210 /root/.codex/sessions/2026/02/23/rollout-2026-02-23T18-37-01-019c8a12-e903-7670-bd12-709c6a4c5451.jsonl
 `)
@@ -4712,4 +4740,48 @@ func TestInstance_RefreshLiveSessionIDs_NoOpForNonAgenticTool(t *testing.T) {
 	if inst.GeminiSessionID != "leftover-gemini" {
 		t.Errorf("GeminiSessionID mutated for non-agentic tool: got %q", inst.GeminiSessionID)
 	}
+}
+
+// TestShouldRunCodexProcessProbeSteadyStateBackoff covers issue #1552: once a
+// Codex session ID is known, the process-file probe (lsof on macOS) must back
+// off to codexRotationScanInterval instead of re-running every
+// codexBootstrapScanInterval. Several parked Codex sessions probing lsof every
+// two seconds generated enough filesystem metadata traffic to stall the machine.
+func TestShouldRunCodexProcessProbeSteadyStateBackoff(t *testing.T) {
+	t.Run("bootstrap keeps fast interval while ID unknown", func(t *testing.T) {
+		inst := &Instance{}
+		inst.lastCodexProbeAt = time.Now().Add(-codexBootstrapScanInterval - time.Second)
+		if !inst.shouldRunCodexProcessProbe(false) {
+			t.Fatal("expected probe to run at fast cadence while session ID is unknown")
+		}
+	})
+
+	t.Run("throttles inside fast interval while ID unknown", func(t *testing.T) {
+		inst := &Instance{}
+		inst.lastCodexProbeAt = time.Now()
+		if inst.shouldRunCodexProcessProbe(false) {
+			t.Fatal("expected probe to be throttled within codexBootstrapScanInterval")
+		}
+	})
+
+	t.Run("known ID backs off to steady-state interval", func(t *testing.T) {
+		inst := &Instance{CodexSessionID: "0199a213-81b0-7800-8000-aaaaaaaaaaaa"}
+		inst.lastCodexProbeAt = time.Now().Add(-codexBootstrapScanInterval - time.Second)
+		if inst.shouldRunCodexProcessProbe(false) {
+			t.Fatal("3s after last probe with a known session ID: expected steady-state backoff to skip")
+		}
+
+		inst.lastCodexProbeAt = time.Now().Add(-codexRotationScanInterval - time.Second)
+		if !inst.shouldRunCodexProcessProbe(false) {
+			t.Fatal("past codexRotationScanInterval: expected probe to run")
+		}
+	})
+
+	t.Run("force bypasses backoff", func(t *testing.T) {
+		inst := &Instance{CodexSessionID: "0199a213-81b0-7800-8000-aaaaaaaaaaaa"}
+		inst.lastCodexProbeAt = time.Now()
+		if !inst.shouldRunCodexProcessProbe(true) {
+			t.Fatal("force=true must always probe")
+		}
+	})
 }

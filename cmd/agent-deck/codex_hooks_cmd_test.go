@@ -171,7 +171,7 @@ func TestHandleCodexNotify_IgnoresGuardianSubagent(t *testing.T) {
 		t.Fatalf("write guardian rollout: %v", err)
 	}
 
-	writeHookStatus("inst-guardian", "running", rootID, "turn/started")
+	writeHookStatus("inst-guardian", "running", rootID, "turn/started", "")
 	// Model a late guardian from rootID completing after the interactive thread
 	// has already rotated and established a newer sticky anchor.
 	session.WriteHookSessionAnchor("inst-guardian", newerRootID)
@@ -302,7 +302,7 @@ func TestHandleCodexNotify_IgnoresDelayedOlderTopLevel(t *testing.T) {
 		}
 	}
 
-	writeHookStatus("inst-old-root", "running", forkID, "turn/started")
+	writeHookStatus("inst-old-root", "running", forkID, "turn/started", "")
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 	os.Args = []string{"agent-deck", "codex-notify",

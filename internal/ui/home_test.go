@@ -1329,6 +1329,73 @@ func TestHomeRenameSessionComplete(t *testing.T) {
 	}
 }
 
+// TestHomePinCycleHotkey verifies that pressing ',' cycles the session
+// pin state PinNone → PinTop → PinBottom → PinNone.  Pin-sessions was
+// shipped in #1335; the hotkey is the TUI surface for quick cycling.
+func TestHomePinCycleHotkey(t *testing.T) {
+	// RemoteSession items are ItemTypeRemoteSession and structurally
+	// cannot reach the pin-cycle path (handler gates on ItemTypeSession
+	// && item.Session != nil). No separate test is required.
+	home := NewHome()
+	home.width = 100
+	home.height = 30
+
+	other := session.NewInstance("alpha-session", "/tmp/project")
+	inst := session.NewInstance("target-session", "/tmp/project")
+	home.instancesMu.Lock()
+	home.instances = []*session.Instance{other, inst}
+	home.instanceByID[other.ID] = other
+	home.instanceByID[inst.ID] = inst
+	home.instancesMu.Unlock()
+	home.groupTree = session.NewGroupTree(home.instances)
+	home.rebuildFlatItems()
+
+	sessionIdx := -1
+	for i, item := range home.flatItems {
+		if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == inst.ID {
+			sessionIdx = i
+			break
+		}
+	}
+	if sessionIdx == -1 {
+		t.Fatal("target session missing from flat items")
+	}
+	home.cursor = sessionIdx
+	assertTargetSelected := func(h *Home, step string) {
+		t.Helper()
+		if h.cursor >= len(h.flatItems) || h.flatItems[h.cursor].Session == nil {
+			t.Fatalf("%s: cursor %d does not select a session", step, h.cursor)
+		}
+		if got := h.flatItems[h.cursor].Session.ID; got != inst.ID {
+			t.Fatalf("%s: cursor selects %q, want target %q", step, got, inst.ID)
+		}
+	}
+
+	// Press ',' once: PinNone → PinTop
+	model1, _ := home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{','}})
+	h1 := model1.(*Home)
+	if inst.Pin != session.PinTop {
+		t.Errorf("after 1st press: pin = %q, want %q", inst.Pin, session.PinTop)
+	}
+	assertTargetSelected(h1, "after 1st press")
+
+	// Press ',' again: PinTop → PinBottom
+	model2, _ := h1.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{','}})
+	h2 := model2.(*Home)
+	if inst.Pin != session.PinBottom {
+		t.Errorf("after 2nd press: pin = %q, want %q", inst.Pin, session.PinBottom)
+	}
+	assertTargetSelected(h2, "after 2nd press")
+
+	// Press ',' a third time: PinBottom → PinNone
+	model3, _ := h2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{','}})
+	h3 := model3.(*Home)
+	if inst.Pin != session.PinNone {
+		t.Errorf("after 3rd press: pin = %q, want %q", inst.Pin, session.PinNone)
+	}
+	assertTargetSelected(h3, "after 3rd press")
+}
+
 func TestHomeMoveSessionWithDuplicateGroupNamesUsesSelectedPath(t *testing.T) {
 	home := NewHome()
 	home.width = 100
@@ -1458,7 +1525,7 @@ func TestHomeRenamePendingChangesSurviveReload(t *testing.T) {
 	home.rebuildFlatItems()
 
 	// Simulate a rename that stores a pending title change
-	home.pendingTitleChanges[inst.ID] = "renamed-title"
+	home.pendingTitleChanges[inst.ID] = pendingTitle{title: "renamed-title", locked: true}
 
 	// Simulate a reload (loadSessionsMsg) with the OLD title from disk
 	reloadInst := session.NewInstance("original-name", "/tmp/project")
@@ -1500,7 +1567,7 @@ func TestHomeRenamePendingChangeClearsAutoName(t *testing.T) {
 
 	// User renamed the session; the rename was stored as a pending change
 	// (save was skipped because isReloading=true at the time)
-	home.pendingTitleChanges[inst.ID] = "my-chosen-name"
+	home.pendingTitleChanges[inst.ID] = pendingTitle{title: "my-chosen-name", locked: true}
 
 	// A reload replaces the instance with the stale disk version (AutoName=true, old title)
 	reloadInst := session.NewInstance("quick-adjective-noun", "/tmp/project")
@@ -1541,7 +1608,7 @@ func TestHomeRenamePendingChangesNoop(t *testing.T) {
 	home.rebuildFlatItems()
 
 	// Store a pending change that matches the current title (normal save succeeded)
-	home.pendingTitleChanges[inst.ID] = "desired-name"
+	home.pendingTitleChanges[inst.ID] = pendingTitle{title: "desired-name", locked: true}
 
 	// Reload with data that already has the correct title
 	reloadInst := session.NewInstance("desired-name", "/tmp/project")
@@ -1564,6 +1631,88 @@ func TestHomeRenamePendingChangesNoop(t *testing.T) {
 	if len(h.pendingTitleChanges) != 0 {
 		t.Errorf("pendingTitleChanges should be empty, got %d", len(h.pendingTitleChanges))
 	}
+}
+
+// TestHomeRenamePendingChangeRestoresTitleLock pins the #697 regression: a user
+// rename re-applied after a reload race must come back LOCKED, otherwise the
+// next #572 Claude-name sync reverts it to the cwd-folder default (the "my
+// rename keeps disappearing on restart" bug). A sync-sourced pending title must
+// stay UNLOCKED so it keeps tracking Claude's session name.
+func TestHomeRenamePendingChangeRestoresTitleLock(t *testing.T) {
+	// No RemoteSession case: pendingTitleChanges is keyed by session ID and
+	// resolved through getInstanceByID, which only returns local
+	// *session.Instance objects. A RemoteSession has no local instance and is
+	// renamed via its own SSH-runner branch in handleGroupDialogKey, so it can
+	// never reach this reload-reapply path.
+	t.Run("user rename is relocked", func(t *testing.T) {
+		home := NewHome()
+		home.width = 100
+		home.height = 30
+
+		inst := session.NewInstance("original-name", "/tmp/project")
+		inst.TitleLocked = true
+		home.instancesMu.Lock()
+		home.instances = []*session.Instance{inst}
+		home.instanceByID[inst.ID] = inst
+		home.instancesMu.Unlock()
+		home.groupTree = session.NewGroupTree(home.instances)
+		home.rebuildFlatItems()
+
+		// User rename queued as locked (SetField sets TitleLocked=true).
+		home.pendingTitleChanges[inst.ID] = pendingTitle{title: "renamed-title", locked: true}
+
+		// Reload replaces the instance with a stale disk row: old title AND
+		// UNLOCKED, because the lock was never persisted (save was skipped).
+		reloadInst := session.NewInstance("original-name", "/tmp/project")
+		reloadInst.ID = inst.ID
+		reloadInst.TitleLocked = false
+
+		model, _ := home.Update(loadSessionsMsg{
+			instances:    []*session.Instance{reloadInst},
+			restoreState: &reloadState{cursorSessionID: inst.ID},
+		})
+		h := model.(*Home)
+
+		if h.instances[0].Title != "renamed-title" {
+			t.Fatalf("Title = %q, want renamed-title", h.instances[0].Title)
+		}
+		if !h.instances[0].TitleLocked {
+			t.Error("TitleLocked = false after reapply, want true (#697: else the next Claude-name sync reverts the rename)")
+		}
+	})
+
+	t.Run("sync-sourced title stays unlocked", func(t *testing.T) {
+		home := NewHome()
+		home.width = 100
+		home.height = 30
+
+		inst := session.NewInstance("proj-ab", "/tmp/project")
+		home.instancesMu.Lock()
+		home.instances = []*session.Instance{inst}
+		home.instanceByID[inst.ID] = inst
+		home.instancesMu.Unlock()
+		home.groupTree = session.NewGroupTree(home.instances)
+		home.rebuildFlatItems()
+
+		// An attach-time Claude-name sync queues an UNLOCKED title.
+		home.pendingTitleChanges[inst.ID] = pendingTitle{title: "claude-name", locked: false}
+
+		reloadInst := session.NewInstance("proj-ab", "/tmp/project")
+		reloadInst.ID = inst.ID
+
+		model, _ := home.Update(loadSessionsMsg{
+			instances:    []*session.Instance{reloadInst},
+			restoreState: &reloadState{cursorSessionID: inst.ID},
+		})
+		h := model.(*Home)
+
+		if h.instances[0].Title != "claude-name" {
+			t.Fatalf("Title = %q, want claude-name", h.instances[0].Title)
+		}
+		if h.instances[0].TitleLocked {
+			t.Error("TitleLocked = true after sync reapply, want false (sync titles must keep tracking Claude)")
+		}
+	})
 }
 
 func TestHomeGlobalSearchInitialized(t *testing.T) {
@@ -4430,7 +4579,19 @@ func TestStatusUpdateMsg_PreservesSelectedSessionAcrossRebuild(t *testing.T) {
 	}
 }
 
-func TestStatusUpdateMsg_ReconcilesAttachedSessionBeforeRender(t *testing.T) {
+// TestStatusUpdateMsg_ReconcilesAttachedSessionViaDeferredCmd was
+// ...BeforeRender until #1753: the reconciliation used to run inline in the
+// statusUpdateMsg handler, which held the Bubble Tea event loop — and therefore the
+// first repaint of the list after Ctrl+Q — behind O(fleet) tmux round-trips. It now
+// runs on the Cmd the handler returns.
+//
+// The protection this test encodes is unchanged and still enforced below: a stale
+// "running" hook file must not keep an exited pane green, the render snapshot must
+// agree, and the stale hook file must be gone. Only the timing moved — from "before
+// the first render" to "on the returned Cmd", i.e. one extra repaint later, which is
+// milliseconds. The pre-Cmd assertions make that ordering explicit so a future edit
+// cannot quietly put the blocking work back on the event loop.
+func TestStatusUpdateMsg_ReconcilesAttachedSessionViaDeferredCmd(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -4454,8 +4615,24 @@ func TestStatusUpdateMsg_ReconcilesAttachedSessionBeforeRender(t *testing.T) {
 		t.Fatalf("write stale hook: %v", err)
 	}
 
-	model, _ := h.Update(statusUpdateMsg{attachedSessionID: inst.ID})
+	model, cmd := h.Update(statusUpdateMsg{attachedSessionID: inst.ID})
 	home := model.(*Home)
+
+	// #1753: nothing may have happened yet — the event loop has to be free to repaint
+	// the list from the last snapshot.
+	if got := inst.GetStatusThreadSafe(); got != session.StatusRunning {
+		t.Fatalf("status reconciled inline on the event loop: status = %q, want it still %q "+
+			"until the deferred Cmd runs (#1753)", got, session.StatusRunning)
+	}
+	if _, err := os.Stat(hookPath); err != nil {
+		t.Fatalf("stale hook file removed inline on the event loop (#1753): %v", err)
+	}
+
+	// Now run the deferred reconciliation the handler scheduled.
+	if !yieldsMsg(cmd, "ui.attachReturnSyncedMsg") {
+		t.Fatal("statusUpdateMsg returned no deferred reconcile Cmd, so the exited pane " +
+			"would stay green forever (#1753)")
+	}
 
 	if got := inst.GetStatusThreadSafe(); got != session.StatusError {
 		t.Fatalf("attached session status = %q, want %q", got, session.StatusError)

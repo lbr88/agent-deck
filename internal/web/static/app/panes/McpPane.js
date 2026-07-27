@@ -230,8 +230,8 @@ function CatalogSection({ catalog, attached, mutationsEnabled, onAttach, loading
       ${!loading && catalog.length === 0 && html`
         <div style="font-family: var(--mono); font-size: 12px; color: var(--text-dim); padding: 12px;">
           ${isHubSession
-            ? html`No MCPs in the remote node catalog. Add them to that node's <code>~/.agent-deck/config.toml</code>.`
-            : html`No MCPs in the catalog. Add some to <code>~/.agent-deck/config.toml</code>.`}
+            ? html`No MCPs in the remote node catalog. Add them to that node's <code>~/.config/agent-deck/config.toml</code>.`
+            : html`No MCPs in the catalog. Add some to <code>~/.config/agent-deck/config.toml</code>.`}
         </div>
       `}
       ${catalog.map(entry => {

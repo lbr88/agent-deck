@@ -29,6 +29,7 @@ type CreateSessionRequest struct {
 	AdditionalPaths []string `json:"additionalPaths,omitempty"`
 	GroupPath       string   `json:"groupPath,omitempty"`
 	ModelID         string   `json:"modelId,omitempty"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	HubNodeID       string   `json:"hubNodeId,omitempty"`
 }
 

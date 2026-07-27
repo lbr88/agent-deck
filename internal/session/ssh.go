@@ -1274,13 +1274,7 @@ func (r *SSHRunner) InstallBinary(ctx context.Context, binaryData []byte, expect
 //
 // See the README "Remote Instances" section for the documented assumption.
 func (r *SSHRunner) sshConnOpts() []string {
-	return []string{
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + sshControlDir + "/%r@%h:%p",
-		"-o", "ControlPersist=600",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-	}
+	return sessionSSHConnOpts()
 }
 
 // ValidateSSHHost rejects host strings ssh would misinterpret as options rather

@@ -22,6 +22,42 @@ import (
 // previewPctStep is the percentage delta per < / > keystroke.
 const previewPctStep = 5
 
+// Preview-orientation values, re-exported from the session package so the
+// ui layer can compare h.previewOrientation without importing the constant
+// at every call site.
+const (
+	PreviewOrientationRight = session.PreviewOrientationRight
+	PreviewOrientationBelow = session.PreviewOrientationBelow
+)
+
+// stackedListHeight resolves the SESSIONS-list height (in rows) for the
+// stacked layout, given the total content height. The preview pane gets
+// previewPct of the height and the list gets the remainder — mirroring the
+// dual layout's width convention so the < / > keybindings adjust the split
+// in either orientation. A single source of truth for the three call sites
+// (renderStackedLayout and the two maxVisible calcs) that must stay in
+// lockstep. Guarantees list >= 5 and preview >= 3 rows when height allows.
+func (h *Home) stackedListHeight(totalHeight int) int {
+	if totalHeight <= 0 {
+		return 0
+	}
+	previewPct := h.getPreviewPct()
+	sessionsPct := 100 - previewPct
+	listHeight := (totalHeight * sessionsPct) / 100
+
+	// Reserve a floor for each pane (preview loses 1 row to the separator).
+	if listHeight < 5 {
+		listHeight = 5
+	}
+	if totalHeight-listHeight-1 < 3 {
+		listHeight = totalHeight - 4 // leave 3 for preview + 1 for separator
+	}
+	if listHeight < 0 {
+		listHeight = 0
+	}
+	return listHeight
+}
+
 // previewPctOverlayDuration is how long the "Sessions / Preview ratio"
 // overlay stays visible after an adjustment.
 const previewPctOverlayDuration = 1500 * time.Millisecond
@@ -103,6 +139,45 @@ func (h *Home) splitPaneWidths() (int, int) {
 	return left, right
 }
 
+// isOnDivider reports whether column x falls on the " │ " separator drawn
+// between the sessions and preview panes in the dual layout. The separator
+// occupies the paneSeparatorWidth columns immediately to the right of the
+// sessions pane. Used as the grab target for mouse-drag resizing.
+func (h *Home) isOnDivider(x int) bool {
+	left := h.sessionsPaneWidth()
+	return x >= left && x < left+paneSeparatorWidth
+}
+
+// setPreviewPctFromMouseX resizes the split so the divider follows the mouse
+// to column x: the sessions pane spans columns [0, x), the preview pane takes
+// the rest. The result is clamped to [MinPreviewPct, MaxPreviewPct] and the
+// ratio overlay is armed for visual feedback. This updates the in-memory value
+// only — persistence happens once on drag release, not on every motion event.
+func (h *Home) setPreviewPctFromMouseX(x int) {
+	if h.width <= 0 {
+		return
+	}
+	if x < 0 {
+		x = 0
+	}
+	if x > h.width {
+		x = h.width
+	}
+	// Floor x/width to a percent, matching splitPaneWidths' percent->column
+	// truncation. Using the same rounding rule in both directions keeps the
+	// rendered divider tracking the cursor without a systematic 1-column drift.
+	sessionsPct := x * 100 / h.width
+	previewPct := 100 - sessionsPct
+	if previewPct < session.MinPreviewPct {
+		previewPct = session.MinPreviewPct
+	}
+	if previewPct > session.MaxPreviewPct {
+		previewPct = session.MaxPreviewPct
+	}
+	h.previewPct = previewPct
+	h.previewPctOverlayAt = time.Now().Add(previewPctOverlayDuration)
+}
+
 // adjustPreviewPct shifts the preview percentage by delta (in percent
 // points), clamps to [MinPreviewPct, MaxPreviewPct], persists the new
 // value to config.toml, and arms the on-screen overlay.
@@ -142,5 +217,45 @@ func persistPreviewPct(pct int) {
 		return
 	}
 	cfg.UI.PreviewPct = pct
+	_ = session.SaveUserConfig(cfg)
+}
+
+// getPreviewOrientation returns the current orientation with the package
+// default applied when the field is empty (Home instances built before this
+// feature landed, or tests that bypass NewHome).
+func (h *Home) getPreviewOrientation() string {
+	switch h.previewOrientation {
+	case PreviewOrientationBelow:
+		return PreviewOrientationBelow
+	case PreviewOrientationRight:
+		return PreviewOrientationRight
+	}
+	return session.DefaultPreviewOrientation
+}
+
+// togglePreviewOrientation flips the preview-pane orientation between
+// "right" (side-by-side) and "below" (stacked), persists it to config.toml,
+// and arms the on-screen overlay for visual feedback.
+func (h *Home) togglePreviewOrientation() {
+	if h.getPreviewOrientation() == PreviewOrientationBelow {
+		h.previewOrientation = PreviewOrientationRight
+	} else {
+		h.previewOrientation = PreviewOrientationBelow
+	}
+	h.previewPctOverlayAt = time.Now().Add(previewPctOverlayDuration)
+	persistPreviewOrientation(h.previewOrientation)
+}
+
+// persistPreviewOrientation writes the new orientation to config.toml.
+// Errors are swallowed for the same reason as persistPreviewPct.
+func persistPreviewOrientation(orientation string) {
+	cfg, err := session.LoadUserConfig()
+	if err != nil || cfg == nil {
+		return
+	}
+	if cfg.UI.PreviewOrientation == orientation {
+		return
+	}
+	cfg.UI.PreviewOrientation = orientation
 	_ = session.SaveUserConfig(cfg)
 }

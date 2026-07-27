@@ -2,6 +2,25 @@ package session
 
 import "testing"
 
+func TestShouldDebounceTmuxFlipForTool(t *testing.T) {
+	tests := map[string]bool{
+		"":         true,
+		"claude":   true,
+		"codex":    true,
+		"gemini":   true,
+		"hermes":   true,
+		"cursor":   true,
+		"pi":       false,
+		"shell":    false,
+		"opencode": false,
+	}
+	for tool, want := range tests {
+		if got := shouldDebounceTmuxFlipForTool(tool); got != want {
+			t.Errorf("shouldDebounceTmuxFlipForTool(%q) = %v, want %v", tool, got, want)
+		}
+	}
+}
+
 // debounceFlipFromRunning gates a purely tmux-inferred flip away from running so
 // a single transient sample (long tool-call past the hook freshness window, or a
 // CapturePane failure during subprocess churn) does not fire a false

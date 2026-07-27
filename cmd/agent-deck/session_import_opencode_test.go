@@ -193,7 +193,7 @@ func TestHandleSessionImportOpenCodeRejectsDuplicateOpenCodeSessionIDCLI(t *test
 }
 
 func TestSessionHelpMentionsImportOpenCode(t *testing.T) {
-	output := captureStdout(t, printSessionHelp)
+	output := captureSessionImportStdout(t, printSessionHelp)
 	if !strings.Contains(output, "import-opencode") {
 		t.Fatalf("session help missing import-opencode:\n%s", output)
 	}
@@ -240,7 +240,7 @@ func prepareOpenCodeImportCLITest(t *testing.T) {
 	t.Setenv("GOTMPDIR", "/var/tmp/agent-deck-go-tmp")
 }
 
-func captureStdout(t *testing.T, fn func()) string {
+func captureSessionImportStdout(t *testing.T, fn func()) string {
 	t.Helper()
 
 	old := os.Stdout

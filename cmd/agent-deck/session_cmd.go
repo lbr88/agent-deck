@@ -41,6 +41,12 @@ func handleSession(profile string, args []string) {
 		handleSessionStop(profile, args[1:])
 	case "remove":
 		handleSessionRemove(profile, args[1:])
+	case "cleanup", "prune":
+		handleSessionCleanup(profile, args[1:])
+	case "archive":
+		handleSessionArchive(profile, args[1:])
+	case "unarchive":
+		handleSessionUnarchive(profile, args[1:])
 	case "restart":
 		handleSessionRestart(profile, args[1:])
 	case "revive":
@@ -57,8 +63,12 @@ func handleSession(profile string, args []string) {
 		handleSessionImportKiro(profile, args[1:])
 	case "handover":
 		handleSessionHandover(profile, args[1:])
+	case "handoff":
+		handleSessionHandoff(profile, args[1:])
 	case "attach":
 		handleSessionAttach(profile, args[1:])
+	case "focus":
+		handleSessionFocus(profile, args[1:])
 	case "show":
 		handleSessionShow(profile, args[1:])
 	case "current":
@@ -84,6 +94,8 @@ func handleSession(profile string, args []string) {
 		handleSessionMove(profile, args[1:])
 	case "send":
 		handleSessionSend(profile, args[1:])
+	case "approve":
+		handleSessionApprove(profile, args[1:])
 	case "send-keys":
 		handleSessionSendKeys(profile, args[1:])
 	case "output":
@@ -111,7 +123,10 @@ func printSessionHelp() {
 	fmt.Println("  start <id>              Start a session's tmux process")
 	fmt.Println("  stop <id>               Stop/kill session process")
 	fmt.Println("  remove <id>             Remove session from registry (stopped/error only; --force to bypass)")
-	fmt.Println("  restart [id] [--all]    Restart session (Claude: reload MCPs)")
+	fmt.Println("  cleanup [--days N]      Purge dead sessions idle N+ days (dry-run unless --yes)")
+	fmt.Println("  archive <id|title>      Stop session and hide it from active lists (retained in storage)")
+	fmt.Println("  unarchive <id|title>    Restore an archived session (does not restart it)")
+	fmt.Println("  restart [id] [--all] [--env KEY=VALUE]  Restart session (Claude: reload MCPs)")
 	fmt.Println("  revive [--all|--name]   Rebuild dead control pipes for errored sessions")
 	fmt.Println("  fork <id>               Fork Claude, OpenCode, Pi, or Codex session with context")
 	fmt.Println("  import-codex <id|name>  Import an existing saved Codex session")
@@ -119,13 +134,16 @@ func printSessionHelp() {
 	fmt.Println("  import-opencode <id|title>  Import an existing saved OpenCode session")
 	fmt.Println("  import-kiro <id|title>      Import an existing saved Kiro CLI session")
 	fmt.Println("  handover <id|title> --to <tool>  Create a new Claude, Codex, or OpenCode session with handover context")
+	fmt.Println("  handoff <id>            Build a cross-tool handoff prompt from the session's conversation (read-only)")
 	fmt.Println("  attach <id>             Attach to session interactively")
+	fmt.Println("  focus <id> [--attach]   Signal the running TUI to select (or --attach) a session")
 	fmt.Println("  show [id]               Show session details (auto-detect current if no id)")
 	fmt.Println("  current                 Show current session and profile (auto-detect)")
 	fmt.Println("  set <id> <field> <value>  Update session property")
 	fmt.Println("  switch-account <id> <account>  Switch Claude account and migrate the conversation")
 	fmt.Println("  move <id> <path>        Move session to a new path (migrates Claude history)")
 	fmt.Println("  send <id> <message>     Send a message to a running session")
+	fmt.Println("  approve <id> [choice]   Resolve a visible Codex approval prompt")
 	fmt.Println("  output <id>             Get the last response from a session")
 	fmt.Println("  children [id]           List sub-sessions with status + last completion")
 	fmt.Println("  search <query>          Search message content across Claude sessions")
@@ -163,6 +181,8 @@ func printSessionHelp() {
 	fmt.Println("  agent-deck session set-title-lock SCRUM-351 off        # Re-enable title sync")
 	fmt.Println("  agent-deck session output my-project                 # Get last response from session")
 	fmt.Println("  agent-deck session output my-project --json          # Get response as JSON")
+	fmt.Println("  agent-deck session archive my-project                # Stop and hide the session")
+	fmt.Println("  agent-deck session unarchive my-project              # Restore an archived session")
 	fmt.Println()
 	fmt.Println("Set command fields:")
 	fmt.Println("  title              Session title")
@@ -425,7 +445,9 @@ func handleSessionStart(profile string, args []string) {
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
 	message := fs.String("message", "", "Initial message to send once agent is ready")
 	messageShort := fs.String("m", "", "Initial message to send once agent is ready (short)")
+	messageFile := fs.String("message-file", "", "Read the initial message from a file ('-' for stdin); avoids shell quoting of long prompts")
 	yoloMode := fs.Bool("yolo", false, "Enable YOLO mode when starting Gemini or Codex sessions")
+	attach := fs.Bool("attach", false, "Attach to the session after starting (requires an interactive terminal)")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session start <id|title> [options]")
@@ -439,6 +461,8 @@ func handleSessionStart(profile string, args []string) {
 		fmt.Println("  agent-deck session start my-project")
 		fmt.Println("  agent-deck session start my-project --message \"Research MCP patterns\"")
 		fmt.Println("  agent-deck session start my-project -m \"Explain this codebase\"")
+		fmt.Println("  agent-deck session start my-project --message-file task.md   # long prompt from file, no shell quoting")
+		fmt.Println("  git diff | agent-deck session start my-project --message-file -   # initial message from stdin")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -450,7 +474,11 @@ func handleSessionStart(profile string, args []string) {
 	out := NewCLIOutput(*jsonOutput, quietMode)
 
 	// Merge message flags
-	initialMessage := mergeFlags(*message, *messageShort)
+	initialMessage, err := resolveMessageInput(mergeFlags(*message, *messageShort), *messageFile, os.Stdin)
+	if err != nil {
+		out.Error(err.Error(), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
 
 	// Load sessions
 	storage, instances, groups, err := loadSessionData(profile)
@@ -528,6 +556,27 @@ func handleSessionStart(profile string, args []string) {
 	if err := saveSessionData(storage, instances, groups); err != nil {
 		out.Error(fmt.Sprintf("failed to save session state: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+
+	// --attach: drop the user into the freshly started session's pane. This
+	// suspends the CLI into tmux and blocks until the user detaches, so the
+	// normal success output below is skipped. Refused loudly (never silently)
+	// without an interactive terminal or under --json; the session stays
+	// started in both cases.
+	if *attach {
+		if *jsonOutput {
+			out.Error("--attach cannot be combined with --json; session was started", ErrCodeInvalidOperation)
+			os.Exit(3)
+		}
+		if err := attachInstanceInteractive(inst); err != nil {
+			if errors.Is(err, errAttachNoTTY) {
+				fmt.Fprintf(os.Stderr, "Error: %v; session was started\n", err)
+				os.Exit(3)
+			}
+			fmt.Fprintf(os.Stderr, "Error: failed to attach: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Output success
@@ -636,6 +685,194 @@ func handleSessionStop(profile string, args []string) {
 	out.Success(fmt.Sprintf("Stopped session: %s", inst.Title), result)
 }
 
+// handleSessionArchive stops a session and marks it archived so it is hidden
+// from active lists but retained in storage. Mirrors the TUI archive action
+// (home.go archiveSession) and WebMutator.ArchiveSession.
+func handleSessionArchive(profile string, args []string) {
+	fs := flag.NewFlagSet("session archive", flag.ExitOnError)
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	quiet := fs.Bool("quiet", false, "Minimal output")
+	quietShort := fs.Bool("q", false, "Minimal output (short)")
+
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck session archive <id|title> [options]")
+		fmt.Println()
+		fmt.Println("Stop a session and hide it from active lists (retained in storage).")
+		fmt.Println()
+		fmt.Println("Options:")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	identifier := fs.Arg(0)
+	quietMode := *quiet || *quietShort
+	out := NewCLIOutput(*jsonOutput, quietMode)
+
+	// An empty identifier is a usage error, not a missing session: exit 1 (not
+	// the ResolveSession NOT_FOUND exit 2, which is reserved for a genuinely
+	// unknown id/title).
+	if identifier == "" {
+		out.Error("session <id|title> required", ErrCodeInvalidOperation)
+		if !*jsonOutput {
+			fs.Usage()
+		}
+		os.Exit(1)
+	}
+
+	storage, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		out.Error(err.Error(), ErrCodeNotFound)
+		os.Exit(1)
+	}
+
+	inst, errMsg, errCode := ResolveSession(identifier, instances)
+	if inst == nil {
+		out.Error(errMsg, errCode)
+		if errCode == ErrCodeNotFound {
+			os.Exit(2)
+		}
+		os.Exit(1)
+		return // unreachable, satisfies staticcheck SA5011
+	}
+
+	if inst.IsArchived() {
+		out.Error(fmt.Sprintf("session '%s' is already archived", inst.Title), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+
+	// Only kill a live tmux session. Killing an already-dead session returns a
+	// fatal error that would abort the archive (see idempotent-Kill history),
+	// so gate on Exists() the way handleSessionStop does. Kill() sets
+	// Status=stopped in memory only; persistArchivedCLI persists it below.
+	//
+	// Unlike handleSessionStop we deliberately do NOT SyncSessionIDsFromTmux()
+	// here: archive persists via a targeted UPDATE (to survive concurrent TUI
+	// writers), which cannot carry the whole-row tool-id fields the sync
+	// populates. Late-discovered ids are dropped rather than saved via a
+	// non-targeted write that would reintroduce the archive-clobber race. The
+	// session's normal lifecycle already persists its tool ids.
+	killed := false
+	if inst.Exists() {
+		if err := inst.Kill(); err != nil {
+			out.Error(fmt.Sprintf("failed to stop session: %v", err), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
+		killed = true
+	}
+
+	inst.ArchivedAt = time.Now().UTC()
+	if err := persistArchivedCLI(storage, inst, killed); err != nil {
+		out.Error(fmt.Sprintf("failed to persist archive: %v", err), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+
+	out.Success(fmt.Sprintf("Archived session: %s", inst.Title), map[string]interface{}{
+		"success":  true,
+		"id":       inst.ID,
+		"title":    inst.Title,
+		"archived": true,
+	})
+}
+
+// handleSessionUnarchive clears the archive flag without restarting tmux.
+// Mirrors the TUI unarchiveSession and WebMutator.UnarchiveSession.
+func handleSessionUnarchive(profile string, args []string) {
+	fs := flag.NewFlagSet("session unarchive", flag.ExitOnError)
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	quiet := fs.Bool("quiet", false, "Minimal output")
+	quietShort := fs.Bool("q", false, "Minimal output (short)")
+
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck session unarchive <id|title> [options]")
+		fmt.Println()
+		fmt.Println("Restore an archived session (does not restart its process).")
+		fmt.Println()
+		fmt.Println("Options:")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	identifier := fs.Arg(0)
+	quietMode := *quiet || *quietShort
+	out := NewCLIOutput(*jsonOutput, quietMode)
+
+	// Empty identifier is a usage error (exit 1), mirroring archive.
+	if identifier == "" {
+		out.Error("session <id|title> required", ErrCodeInvalidOperation)
+		if !*jsonOutput {
+			fs.Usage()
+		}
+		os.Exit(1)
+	}
+
+	storage, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		out.Error(err.Error(), ErrCodeNotFound)
+		os.Exit(1)
+	}
+
+	inst, errMsg, errCode := ResolveSession(identifier, instances)
+	if inst == nil {
+		out.Error(errMsg, errCode)
+		if errCode == ErrCodeNotFound {
+			os.Exit(2)
+		}
+		os.Exit(1)
+		return // unreachable, satisfies staticcheck SA5011
+	}
+
+	if !inst.IsArchived() {
+		out.Error(fmt.Sprintf("session '%s' is not archived", inst.Title), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+
+	// unarchive never kills tmux, so there is no post-kill status to persist.
+	inst.ArchivedAt = time.Time{}
+	if err := persistArchivedCLI(storage, inst, false); err != nil {
+		out.Error(fmt.Sprintf("failed to persist unarchive: %v", err), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+
+	out.Success(fmt.Sprintf("Unarchived session: %s", inst.Title), map[string]interface{}{
+		"success":  true,
+		"id":       inst.ID,
+		"title":    inst.Title,
+		"archived": false,
+	})
+}
+
+// persistArchivedCLI writes the archive timestamp (and, when persistStatus is
+// set, the post-kill Status) via targeted UPDATEs. It deliberately avoids
+// saveSessionData: the full-save path has an external-change guard that aborts
+// and reloads under concurrent writers (a running TUI), which would silently
+// revert the archive. This mirrors home.go's persistArchived.
+//
+// persistStatus is true only when archive killed a live session: Kill() sets
+// Status=stopped in memory but writes nothing to the DB, so without this the
+// row keeps its pre-kill running/idle status and a later load misclassifies the
+// stopped session. PersistInstanceStatusesTx is the same targeted, abort-safe
+// primitive revive uses (single status column, no whole-row clobber).
+func persistArchivedCLI(storage *session.Storage, inst *session.Instance, persistStatus bool) error {
+	db := storage.GetDB()
+	if db == nil {
+		return fmt.Errorf("state database unavailable")
+	}
+	if persistStatus {
+		if err := db.PersistInstanceStatusesTx([]statedb.InstanceStatusUpdate{
+			{ID: inst.ID, Status: string(inst.Status)},
+		}); err != nil {
+			return err
+		}
+	}
+	return db.SetArchived(inst.ID, inst.ArchivedAt)
+}
+
 // drainGroupQueue starts the oldest queued instance in groupPath when a slot
 // is available. Returns the drained instance (or nil if nothing to drain).
 // The caller is responsible for persisting state afterward.
@@ -666,6 +903,8 @@ func handleSessionRestart(profile string, args []string) {
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
 	force := fs.Bool("force", false, "Restart even if the session is already healthy and fresh (bypasses issue #30 guard)")
 	all := fs.Bool("all", false, "Restart all active sessions")
+	envFlags := make(envVarFlags)
+	fs.Var(&envFlags, "env", "Environment variable in KEY=VALUE format for the restarted process (can be repeated)")
 
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session restart [id|title] [options]")
@@ -677,11 +916,22 @@ func handleSessionRestart(profile string, args []string) {
 		fmt.Println("60 seconds. This prevents watchdog double-fires from destroying a")
 		fmt.Println("just-created tmux scope (issue #30). Use --force to restart anyway.")
 		fmt.Println()
+		fmt.Println("A restart is also skipped when the session's agent could not authenticate")
+		fmt.Println("(401 / invalid credentials): a restart cannot fix a credential, and each")
+		fmt.Println("attempt races the rotating token shared by every session on this host.")
+		fmt.Println("Re-authenticate (run /login), then restart — --force overrides the hold.")
+		fmt.Println()
+		fmt.Println("--all paces restarts with a jittered stagger, caps how many un-verified")
+		fmt.Println("boots run at once, skips auth-held sessions, and STOPS early if several")
+		fmt.Println("restarts in a row die on authentication (reported as auth_tripped).")
+		fmt.Println()
 		fmt.Println("Options:")
 		fs.PrintDefaults()
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  agent-deck session restart my-project")
+		fmt.Println("  agent-deck session restart my-project --env API_URL=https://api.example.com")
+		fmt.Println("  agent-deck session restart my-project --env FOO=one --env BAR=two")
 		fmt.Println("  agent-deck session restart --all")
 	}
 
@@ -700,7 +950,7 @@ func handleSessionRestart(profile string, args []string) {
 	}
 
 	if *all {
-		restartAllSessions(out, storage, instances, groups)
+		restartAllSessions(out, storage, instances, groups, envFlags)
 		return
 	}
 
@@ -726,7 +976,7 @@ func handleSessionRestart(profile string, args []string) {
 	// scope intact) when the session is healthy and was started very
 	// recently. A watchdog racing `start` → `restart` on the same session
 	// must not tear down the fresh scope.
-	if skip, reason := session.ShouldSkipRestart(inst, time.Now(), *force); skip {
+	if skip, reason := session.ShouldSkipRestart(inst, time.Now(), *force || len(envFlags) > 0); skip {
 		data := map[string]interface{}{
 			"success": true,
 			"skipped": true,
@@ -739,7 +989,7 @@ func handleSessionRestart(profile string, args []string) {
 	}
 
 	// Restart the session
-	if err := inst.Restart(); err != nil {
+	if err := inst.RestartWithEnv(envFlags); err != nil {
 		out.Error(fmt.Sprintf("failed to restart session: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
@@ -774,8 +1024,17 @@ func handleSessionRestart(profile string, args []string) {
 	out.Success(fmt.Sprintf("Restarted session: %s", inst.Title), data)
 }
 
-// restartAllSessions restarts every active session one by one.
-func restartAllSessions(out *CLIOutput, storage *session.Storage, instances []*session.Instance, groups []*session.GroupData) {
+// restartAllSessions restarts every active session, paced and gated by
+// session.BootSweep.
+//
+// This is the path that turned an expired token into a fleet outage on
+// 2026-07-26: it used to boot every session back-to-back with no brake, so
+// during a credential failure it both wasted every restart AND had every fresh
+// agent race the single rotating refresh token. The sweep now skips sessions
+// already held for auth, staggers boots with jitter, caps how many unverified
+// boots contend for the token at once, and stops entirely after a few
+// consecutive auth-deaths with one loud message instead of burning the fleet.
+func restartAllSessions(out *CLIOutput, storage *session.Storage, instances []*session.Instance, groups []*session.GroupData, env map[string]string) {
 	var active []*session.Instance
 	for _, inst := range instances {
 		if inst.Exists() {
@@ -788,29 +1047,28 @@ func restartAllSessions(out *CLIOutput, storage *session.Storage, instances []*s
 		os.Exit(1)
 	}
 
-	var results []map[string]interface{}
-	var failed int
+	results := make(map[string]map[string]interface{}, len(active))
 
-	for _, inst := range active {
+	sweep := session.NewBootSweep()
+	sweepResult := sweep.Run(active, func(inst *session.Instance) error {
 		result := map[string]interface{}{
 			"id":    inst.ID,
 			"title": inst.Title,
 		}
+		results[inst.ID] = result
 
 		if !out.jsonMode {
 			fmt.Printf("Restarting %s...\n", inst.Title)
 		}
 
-		if err := inst.Restart(); err != nil {
+		if err := inst.RestartWithEnv(env); err != nil {
 			errMsg := fmt.Sprintf("failed to restart session '%s': %v", inst.Title, err)
 			if !out.jsonMode {
 				fmt.Fprintf(os.Stderr, "  Error: %s\n", errMsg)
 			}
 			result["success"] = false
 			result["error"] = errMsg
-			failed++
-			results = append(results, result)
-			continue
+			return err
 		}
 		inst.LastStartedAt = time.Now()
 
@@ -828,10 +1086,17 @@ func restartAllSessions(out *CLIOutput, storage *session.Storage, instances []*s
 		if warning != "" {
 			result["warning"] = warning
 		}
-		results = append(results, result)
 
 		if !out.jsonMode {
 			fmt.Printf("  Done: %s\n", inst.Title)
+		}
+		return nil
+	})
+
+	ordered := restartAllSessionRecords(results, sweepResult.Attempts)
+	for _, attempt := range sweepResult.Attempts {
+		if attempt.Skipped && !out.jsonMode && !out.quietMode {
+			fmt.Printf("Skipped %s: %s\n", attempt.Title, attempt.SkipReason)
 		}
 	}
 
@@ -841,23 +1106,27 @@ func restartAllSessions(out *CLIOutput, storage *session.Storage, instances []*s
 		os.Exit(1)
 	}
 
+	if sweepResult.TripMessage != "" && !out.jsonMode {
+		fmt.Fprintf(os.Stderr, "\n🔒 %s\n", sweepResult.TripMessage)
+	}
+
 	if out.jsonMode {
-		out.Success("", map[string]interface{}{
-			"success":   failed == 0,
-			"total":     len(active),
-			"restarted": len(active) - failed,
-			"failed":    failed,
-			"sessions":  results,
-		})
+		out.Success("", restartAllSessionsJSONPayload(len(active), sweepResult, ordered))
 	} else if !out.quietMode {
-		fmt.Printf("Restarted %d/%d sessions", len(active)-failed, len(active))
-		if failed > 0 {
-			fmt.Printf(" (%d failed)", failed)
+		fmt.Printf("Restarted %d/%d sessions", sweepResult.Booted, len(active))
+		if sweepResult.Failed > 0 {
+			fmt.Printf(" (%d failed)", sweepResult.Failed)
+		}
+		if sweepResult.SkippedHeld > 0 {
+			fmt.Printf(" (%d held for auth)", sweepResult.SkippedHeld)
+		}
+		if sweepResult.Abandoned > 0 {
+			fmt.Printf(" (%d abandoned after auth circuit tripped)", sweepResult.Abandoned)
 		}
 		fmt.Println()
 	}
 
-	if failed > 0 {
+	if restartAllSessionsExitCode(sweepResult) != 0 {
 		os.Exit(1)
 	}
 }
@@ -1133,7 +1402,10 @@ func handleSessionFork(profile string, args []string) {
 					os.Exit(1)
 				}
 
-				createdBranch, cwErr := git.CreateWorktreeAtStartPoint(repoRoot, worktreePath, wtBranch, parentHead)
+				// #1708: inherit the PARENT SESSION's sparse state (its own
+				// worktree), not repoRoot's — see git.CaptureSparseCheckout.
+				createdBranch, cwErr := git.CreateWorktreeAtStartPointWithOptions(repoRoot, worktreePath, wtBranch, parentHead,
+					git.SparseInheritOptions(wtSettings.InheritSparseCheckout(), inst.ProjectPath))
 				if cwErr != nil {
 					out.Error(fmt.Sprintf("worktree creation failed: %v", cwErr), ErrCodeInvalidOperation)
 					os.Exit(1)
@@ -1202,9 +1474,10 @@ func handleSessionFork(profile string, args []string) {
 			} else if backend.Type() == vcs.TypeGit {
 				// Non-with-state git path: upstream's combined wrapper unchanged.
 				var cwErr error
-				setupErr, cwErr = git.CreateWorktreeWithStateAndSetup(
+				setupErr, cwErr = git.CreateWorktreeWithSetupOptions(
 					repoRoot, worktreePath, wtBranch,
 					git.WorktreeStateOptions{},
+					git.SparseInheritOptions(wtSettings.InheritSparseCheckout(), inst.ProjectPath),
 					os.Stdout, os.Stderr, session.GetWorktreeSettings().SetupTimeout())
 				if cwErr != nil {
 					out.Error(fmt.Sprintf("worktree creation failed: %v", cwErr), ErrCodeInvalidOperation)
@@ -1389,6 +1662,196 @@ func refreshSessionAfterCLIAttach(inst *session.Instance, db *statedb.StateDB) {
 	}
 }
 
+// errFocusNotFound signals that `session focus` was given an id absent from the
+// current profile. Callers map it to a distinct (exit 2) "not found" code.
+var errFocusNotFound = errors.New("session not found")
+
+// liveSwitcher attempts to move the attached terminal straight into a session's
+// tmux pane (the Ctrl+b N quick-switch path), so a notification click lands you
+// in the session even while the TUI is paused inside another attach. Injected
+// into routeFocus so the attached-vs-list routing is unit-testable without a
+// real tmux server.
+type liveSwitcher interface {
+	// switchInto moves the client attached to inst's tmux server into inst's
+	// pane. Returns switched=true iff a client was attached and moved; false
+	// (no error) when inst has no live pane or no client is attached on its
+	// socket, signalling the caller to fall back to a focus_request row.
+	switchInto(inst *session.Instance) (bool, error)
+}
+
+// tmuxLiveSwitcher is the production liveSwitcher. It mirrors the Ctrl+b N
+// quick-switch: tmux switch-client + an ack-signal write, both of which work
+// while the Bubble Tea TUI is suspended during tea.Exec.
+type tmuxLiveSwitcher struct{}
+
+func (tmuxLiveSwitcher) switchInto(inst *session.Instance) (bool, error) {
+	if inst == nil || !inst.Exists() {
+		return false, nil
+	}
+	ts := inst.GetTmuxSession()
+	if ts == nil || ts.Name == "" {
+		return false, nil
+	}
+	// Query/switch on the target's own socket: switch-client only works when the
+	// attached client and the target session share a tmux server, so a client on
+	// a different socket simply yields switched=false and the focus_request
+	// fallback takes over (matches the Ctrl+b N same-server limitation).
+	return tmux.SwitchAttachedClients(inst.TmuxSocketName, ts.Name, inst.ID)
+}
+
+// clientDetacher detaches the user's currently-attached tmux client when the
+// live switch could not move it. switch-client cannot cross tmux servers, so a
+// notification target on a different socket than the attached session yields
+// switched=false; detaching that client makes the paused TUI resume and consume
+// the focus_request (attaching the target on its own socket) instead of the
+// switch silently waiting for a manual Ctrl+Q. Injected into routeFocus so the
+// cross-socket routing is unit-testable without a real tmux server.
+type clientDetacher interface {
+	// detachClientsOn detaches every real (non-control) client attached on any
+	// of sockets. Returns detached=true iff at least one client was detached.
+	detachClientsOn(sockets []string) (bool, error)
+}
+
+// tmuxClientDetacher is the production clientDetacher.
+type tmuxClientDetacher struct{}
+
+func (tmuxClientDetacher) detachClientsOn(sockets []string) (bool, error) {
+	return tmux.DetachClientsOnSockets(sockets...)
+}
+
+// findFocusInstance returns the instance with the given id, or nil.
+func findFocusInstance(instances []*session.Instance, id string) *session.Instance {
+	for _, inst := range instances {
+		if inst.ID == id {
+			return inst
+		}
+	}
+	return nil
+}
+
+// focusOtherSockets returns the distinct tmux socket names used by instances,
+// excluding exclude (the target's own socket, where the live switch already
+// looked). Order-preserving and deduped. These are the sockets that may host
+// the user's currently-attached client when the target lives elsewhere.
+func focusOtherSockets(instances []*session.Instance, exclude string) []string {
+	seen := map[string]bool{exclude: true}
+	var out []string
+	for _, inst := range instances {
+		s := inst.TmuxSocketName
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// routeFocus drives `session focus <id>`. With --attach it first tries a live
+// switch-while-attached (so the click lands you straight in the session even
+// when the TUI is paused inside another attach); if no client is attached to the
+// target's tmux server it falls back to the foreground focus_request row, which
+// the TUI consumes on its next tick. Without --attach it always writes the
+// (select-only) focus_request. Split out of handleSessionFocus so it is
+// unit-testable without os.Exit; switcher is injected for the same reason.
+func routeFocus(db *statedb.StateDB, instances []*session.Instance, id string, nowNano int64, attach bool, switcher liveSwitcher, detacher clientDetacher) error {
+	if id == "" {
+		return fmt.Errorf("session focus requires an <id>")
+	}
+	inst := findFocusInstance(instances, id)
+	if inst == nil {
+		return fmt.Errorf("%w: %q", errFocusNotFound, id)
+	}
+	if attach && switcher != nil {
+		// The contract reserves (false, nil) for the benign fallback (no live
+		// pane / no client attached on the socket); a non-nil error is a real
+		// tmux failure that must surface, not be silently swallowed into the
+		// fallback path.
+		switched, err := switcher.switchInto(inst)
+		if err != nil {
+			return err
+		}
+		if switched {
+			return nil
+		}
+		// Live switch couldn't move the client: it's attached to a different tmux
+		// server than the target (switch-client can't cross servers). Write the
+		// focus_request FIRST, then detach that client so agent-deck's paused
+		// attach returns and the resumed TUI consumes the row on its next tick —
+		// attaching the target on its own socket, instead of waiting for a manual
+		// Ctrl+Q. When no client is attached elsewhere (e.g. the TUI is already in
+		// the list view), the detach is a harmless no-op and the row is consumed
+		// normally.
+		if detacher != nil {
+			if err := session.WriteFocusRequestAttach(db, id, nowNano, attach); err != nil {
+				return err
+			}
+			// The focus_request is already persisted, so a detach failure still
+			// leaves the row to be consumed on the next tick — but surface it so
+			// the immediate-switch path's failure isn't hidden.
+			if _, err := detacher.detachClientsOn(focusOtherSockets(instances, inst.TmuxSocketName)); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	return session.WriteFocusRequestAttach(db, id, nowNano, attach)
+}
+
+// resolveAndWriteFocus validates id against the loaded instances and, on a
+// match, writes the focus_request row. Retained as the switcher-less path
+// (select-only / no live switch); delegates to routeFocus.
+func resolveAndWriteFocus(db *statedb.StateDB, instances []*session.Instance, id string, nowNano int64, attach bool) error {
+	return routeFocus(db, instances, id, nowNano, attach, nil, nil)
+}
+
+// handleSessionFocus signals the running TUI (same profile) to select <id> on
+// its next poll. Fire-and-forget: no stdout on success. Unknown id exits 2.
+// With --attach, the TUI opens/attaches the session instead of only selecting it.
+func handleSessionFocus(profile string, args []string) {
+	fs := flag.NewFlagSet("session focus", flag.ExitOnError)
+	attach := fs.Bool("attach", false, "Open/attach the session, not just select it")
+	fs.Usage = func() {
+		fmt.Println("Usage: agent-deck session focus <id> [--attach]")
+		fmt.Println()
+		fmt.Println("Signal the running agent-deck TUI (same profile) to reveal and")
+		fmt.Println("select the session with the given instance id on its next refresh.")
+		fmt.Println("With --attach, the TUI opens/attaches the session (as if you")
+		fmt.Println("pressed Enter on it) instead of only moving the cursor.")
+	}
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+
+	id := fs.Arg(0)
+
+	storage, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	db := storage.GetDB()
+	if db == nil {
+		fmt.Fprintln(os.Stderr, "Error: no state database available")
+		os.Exit(1)
+	}
+
+	var switcher liveSwitcher
+	var detacher clientDetacher
+	if *attach {
+		switcher = tmuxLiveSwitcher{}
+		detacher = tmuxClientDetacher{}
+	}
+	if err := routeFocus(db, instances, id, time.Now().UnixNano(), *attach, switcher, detacher); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if errors.Is(err, errFocusNotFound) {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+}
+
 // handleSessionShow shows session details
 func handleSessionShow(profile string, args []string) {
 	fs := flag.NewFlagSet("session show", flag.ExitOnError)
@@ -1485,6 +1948,7 @@ func handleSessionShow(profile string, args []string) {
 	}
 	modelInfo := inst.LaunchModelInfo()
 	addModelInfoJSON(jsonData, modelInfo)
+	addAutoNameJSON(jsonData, inst)
 
 	if inst.Command != "" {
 		jsonData["command"] = inst.Command
@@ -1527,6 +1991,33 @@ func handleSessionShow(profile string, args []string) {
 
 	if tmuxSession := inst.GetTmuxSession(); tmuxSession != nil {
 		jsonData["tmux_session"] = tmuxSession.Name
+	}
+
+	// #1580: surface a spawn-failure diagnostic when the session errored at
+	// startup (bare "error" with no pane). Include the structured record in
+	// --json so tooling can read it too.
+	spawnFailure := inst.SpawnFailure()
+	if spawnFailure != nil {
+		jsonData["spawn_failure"] = map[string]interface{}{
+			"reason":       spawnFailure.Reason,
+			"command":      spawnFailure.Command,
+			"dying_output": spawnFailure.DyingOutput,
+			"elapsed_ms":   spawnFailure.ElapsedMs,
+			"ts":           spawnFailure.Timestamp,
+		}
+	}
+
+	// An auth hold explains a bare "error" that no restart can clear, and tells
+	// automation (conductors, watchdogs reading --json) to stop retrying.
+	authHold := inst.AuthHold()
+	if authHold != nil {
+		jsonData["auth_hold"] = map[string]interface{}{
+			"reason":        authHold.Reason,
+			"remedy":        authHold.Remedy(),
+			"evidence":      authHold.Evidence,
+			"boot_attempts": authHold.BootAttempts,
+			"ts":            authHold.Timestamp,
+		}
 	}
 
 	// Build human-readable output
@@ -1616,6 +2107,21 @@ func handleSessionShow(profile string, args []string) {
 		if tmuxSession != nil {
 			sb.WriteString(fmt.Sprintf("Tmux:    %s\n", tmuxSession.Name))
 		}
+	}
+
+	// #1580: print the spawn-failure block so `session show` on an errored
+	// session explains why it died instead of leaving the user with a bare
+	// "error".
+	if spawnFailure != nil {
+		sb.WriteString("\n")
+		sb.WriteString(spawnFailure.FormatForDisplay())
+	}
+
+	// The auth block goes LAST so it is the final thing on screen: it is the only
+	// one of these diagnostics that names an action the user must take.
+	if authHold != nil {
+		sb.WriteString("\n")
+		sb.WriteString(authHold.FormatForDisplay())
 	}
 
 	out.Print(sb.String(), jsonData)
@@ -1726,6 +2232,11 @@ func handleSessionSet(profile string, args []string) {
 		out.Error(setErr.Error(), ErrCodeInvalidOperation)
 		os.Exit(1)
 		return // unreachable, satisfies staticcheck SA5011
+	}
+	// #1706: SetField canonicalizes a project path (expand + absolutize), so
+	// report what was actually stored rather than the raw argument.
+	if field == session.FieldPath {
+		value = inst.ProjectPath
 	}
 
 	// Copy the conversation into the new account's config dir so the
@@ -1840,9 +2351,8 @@ func findSessionByTmuxAcrossProfiles() (*session.Instance, string) {
 
 // findSessionByTmux tries to find a session by matching tmux session name or working directory
 func findSessionByTmux(instances []*session.Instance) *session.Instance {
-	// Get current tmux session name
-	cmd := exec.Command("tmux", "display-message", "-p", "#{session_name}\t#{pane_current_path}")
-	output, err := cmd.Output()
+	// Get current tmux session name (bounded — see tmuxProbeTimeout)
+	output, err := tmuxProbeBounded("display-message", "-p", "#{session_name}\t#{pane_current_path}")
 	if err != nil {
 		return nil
 	}
@@ -1896,10 +2406,9 @@ func findSessionByTmux(instances []*session.Instance) *session.Instance {
 
 // showTmuxSessionInfo shows information about the current tmux session (unregistered)
 func showTmuxSessionInfo(out *CLIOutput, jsonOutput bool) {
-	// Get tmux session info
-	cmd := exec.Command("tmux", "display-message", "-p",
+	// Get tmux session info (bounded — see tmuxProbeTimeout)
+	output, err := tmuxProbeBounded("display-message", "-p",
 		"#{session_name}\t#{pane_current_path}\t#{session_created}\t#{window_name}")
-	output, err := cmd.Output()
 	if err != nil {
 		out.Error("failed to get tmux session info", ErrCodeNotFound)
 		os.Exit(1)
@@ -2381,6 +2890,44 @@ func handleSessionSetTitleLock(profile string, args []string) {
 	})
 }
 
+// fetchHookDrivenStatus reloads the target from storage and reports the same
+// hook-driven status string that `agent-deck list --json` shows. `session send
+// --defer-if-busy` polls this so its hold gate keys off the turn-finished
+// Stop-hook signal (a true edge) rather than WaitForAgentReady's pane-diff
+// readiness heuristic, which false-positives to idle during tool calls and
+// thinking pauses (#1578).
+//
+// It mirrors handleList's status pipeline exactly: reload -> warm caches +
+// cold-load hook files via RefreshInstancesForCLIStatus -> UpdateStatus. The
+// reload each poll is deliberate: a fresh OS process has no StatusFileWatcher,
+// so the only way to observe the target's newest hook edge is to re-read it
+// from disk.
+func fetchHookDrivenStatus(profile, sessionRef string) (string, error) {
+	_, instances, _, err := loadSessionData(profile)
+	if err != nil {
+		return "", err
+	}
+	inst, errMsg, _ := ResolveSession(sessionRef, instances)
+	if inst == nil {
+		return "", fmt.Errorf("%s", errMsg)
+	}
+	// Cold-load the on-disk hook file into the instance — a fresh CLI process
+	// has no StatusFileWatcher, so the target's newest hook edge only reaches us
+	// by re-reading it from disk each poll.
+	session.RefreshInstancesForCLIStatus([]*session.Instance{inst})
+	// Prefer the FRESH hook-driven signal. It is the true turn-finished edge
+	// (Claude's UserPromptSubmit hook -> "running", Stop hook -> "waiting") and,
+	// unlike UpdateStatus, is not gated on a live tmux handle — exactly the
+	// property #1578 needs so the hold gate keys off "turn finished" rather than
+	// a pane-diff heuristic. Fall back to the full list --json pipeline when no
+	// fresh hook signal exists (non-hook tools, or a stale/absent hook file).
+	if hs, fresh := inst.GetHookStatus(); fresh && hs != "" {
+		return hs, nil
+	}
+	_ = inst.UpdateStatus()
+	return StatusString(inst.Status), nil
+}
+
 // handleSessionSend sends a message to a running session
 // Waits for the agent to be ready before sending (Claude, Gemini, etc.)
 func handleSessionSend(profile string, args []string) {
@@ -2392,6 +2939,9 @@ func handleSessionSend(profile string, args []string) {
 	wait := fs.Bool("wait", false, "Block until agent finishes processing, then print output")
 	stream := fs.Bool("stream", false, "Stream JSONL events (Claude only) to stdout instead of returning a snapshot")
 	draft := fs.Bool("draft", false, "Pre-fill the prompt without submitting (incompatible with --wait/--stream/--no-wait)")
+	messageFile := fs.String("message-file", "", "Read the message from a file ('-' for stdin) instead of a positional argument; avoids shell quoting of long prompts")
+	deferIfBusy := fs.Bool("defer-if-busy", false, "Hold delivery until the target is idle (turn-finished, hook-driven) instead of interrupting a mid-generation turn (incompatible with --no-wait)")
+	deferTimeout := fs.Duration("defer-timeout", 30*time.Minute, "Max time --defer-if-busy holds a busy target before dropping the message with a non-zero exit")
 	timeout := fs.Duration("timeout", 10*time.Minute, "Max time to wait for the agent to become ready and (with --wait) to finish processing")
 	streamIdle := fs.Duration("stream-idle", 10*time.Second, "Max idle time before --stream aborts with error")
 	streamCharBudget := fs.Int("stream-char-budget", 4000, "Char budget for text flush in --stream mode")
@@ -2411,6 +2961,9 @@ func handleSessionSend(profile string, args []string) {
 		fmt.Println("  agent-deck session send my-project \"quick ping\" --no-wait")
 		fmt.Println("  agent-deck session send my-project \"trace progress\" --stream")
 		fmt.Println("  agent-deck session send my-project \"cwd: /path/to/dir\" --draft")
+		fmt.Println("  agent-deck session send my-project --message-file answer.md   # long reply from file")
+		fmt.Println("  git diff | agent-deck session send my-project --message-file -   # message from stdin")
+		fmt.Println("  agent-deck session send parent \"child done\" --defer-if-busy --defer-timeout 30m")
 	}
 
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
@@ -2420,9 +2973,10 @@ func handleSessionSend(profile string, args []string) {
 
 	out := NewCLIOutput(*jsonOutput, *quiet)
 
-	if len(remaining) < 2 {
+	needPositionalMessage := *messageFile == ""
+	if len(remaining) < 1 || (needPositionalMessage && len(remaining) < 2) {
 		fs.Usage()
-		out.Error("session and message are required", ErrCodeInvalidOperation)
+		out.Error("session and message (or --message-file) are required", ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 
@@ -2436,8 +2990,19 @@ func handleSessionSend(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	// #1578: --defer-if-busy holds delivery until the target is turn-finished;
+	// --no-wait fires immediately. They are opposites.
+	if *deferIfBusy && *noWait {
+		out.Error("--defer-if-busy is incompatible with --no-wait", ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+
 	sessionRef := remaining[0]
-	message := strings.Join(remaining[1:], " ")
+	message, err := resolveMessageInput(strings.Join(remaining[1:], " "), *messageFile, os.Stdin)
+	if err != nil {
+		out.Error(err.Error(), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
 
 	// Load sessions
 	_, instances, _, err := loadSessionData(profile)
@@ -2488,6 +3053,20 @@ func handleSessionSend(profile string, args []string) {
 	if tmuxSess == nil {
 		out.Error("could not determine tmux session", ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+
+	// #1578: --defer-if-busy holds delivery until the target is turn-finished.
+	// Runs BEFORE WaitForAgentReady + the composer-draft Ctrl+C guard, so a
+	// mid-generation target is never interrupted. Keys off the hook-driven
+	// status (the same turn-finished signal `list --json` reports), not the
+	// pane-diff readiness heuristic that false-positives idle mid-turn.
+	if *deferIfBusy {
+		if err := send.WaitUntilNotBusy(func() (string, error) {
+			return fetchHookDrivenStatus(profile, sessionRef)
+		}, *deferTimeout, send.DeferPollInterval, time.Sleep); err != nil {
+			out.Error(err.Error(), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
 	}
 
 	// Wait for agent to be ready (unless --no-wait is specified).
@@ -3745,8 +4324,8 @@ func handleSessionCurrent(profileArg string, args []string) {
 
 // getCurrentTmuxSessionName gets the current tmux session name (single subprocess call)
 func getCurrentTmuxSessionName() (string, error) {
-	cmd := exec.Command("tmux", "display-message", "-p", "#{session_name}")
-	output, err := cmd.Output()
+	// Bounded — see tmuxProbeTimeout.
+	output, err := tmuxProbeBounded("display-message", "-p", "#{session_name}")
 	if err != nil {
 		return "", err
 	}
@@ -3835,6 +4414,10 @@ func handleSessionChildren(profile string, args []string) {
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("quiet", false, "Minimal output")
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
+	follow := fs.Bool("follow", false, "Stream child state changes as JSONL (one event per line) until interrupted")
+	interval := fs.Duration("interval", 2*time.Second, "Poll interval for --follow")
+	heartbeat := fs.Duration("heartbeat", 60*time.Second, "Heartbeat event interval for --follow (0 disables)")
+	untilDone := fs.Bool("until-done", false, "With --follow: exit 0 once every child is terminal (done sentinel, error, or stopped)")
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session children [id|title] [options]")
 		fmt.Println()
@@ -3843,6 +4426,15 @@ func handleSessionChildren(profile string, args []string) {
 		fmt.Println()
 		fmt.Println("Options:")
 		fs.PrintDefaults()
+		fmt.Println()
+		fmt.Println("--follow emits JSONL events: snapshot (initial state per child), added,")
+		fmt.Println("status (from/to transition), done (completion sentinel), removed, error,")
+		fmt.Println("plus periodic heartbeat and a final complete line with --until-done.")
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  agent-deck session children --json")
+		fmt.Println("  agent-deck session children --follow                    # live fleet event stream")
+		fmt.Println("  agent-deck session children --follow --until-done      # exits when all children finish")
 	}
 	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
 		os.Exit(1)
@@ -3873,36 +4465,34 @@ func handleSessionChildren(profile string, args []string) {
 		os.Exit(2)
 	}
 
+	if *untilDone && !*follow {
+		out.Error("--until-done requires --follow", ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	// A non-positive interval makes time.Sleep a no-op, turning the poll into a
+	// busy-loop that reopens storage every pass. Reject rather than clamp: a
+	// silently different interval than asked for is its own surprise.
+	if *follow && *interval <= 0 {
+		out.Error("--interval must be positive", ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	if *follow {
+		// The stream is JSONL by contract; --json/-q are irrelevant here.
+		os.Exit(runChildrenFollow(profile, parent.ID, *interval, *heartbeat, *untilDone, os.Stdout))
+	}
+
 	kids := childrenOf(parent.ID, instances)
 	session.RefreshInstancesForCLIStatus(kids)
 
-	type childRow struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		Status      string `json:"status"`
-		DoneStatus  string `json:"done_status,omitempty"`
-		DoneSummary string `json:"done_summary,omitempty"`
-		DoneAt      string `json:"done_at,omitempty"`
-	}
-	rows := make([]childRow, 0, len(kids))
+	rows := buildChildRows(kids)
 	var human strings.Builder
 	fmt.Fprintf(&human, "Children of %s (%s):\n", parent.Title, parent.ID)
-	for _, k := range kids {
-		_ = k.UpdateStatus()
-		row := childRow{ID: k.ID, Title: k.Title, Status: StatusString(k.Status)}
-		if e, ok := session.ReadLedgerEntry(k.ID); ok {
-			row.DoneStatus = e.Status
-			row.DoneSummary = e.Summary
-			if !e.FinishedAt.IsZero() {
-				row.DoneAt = e.FinishedAt.Format(time.RFC3339)
-			}
-		}
-		rows = append(rows, row)
+	for _, row := range rows {
 		done := row.DoneStatus
 		if done == "" {
 			done = "-"
 		}
-		fmt.Fprintf(&human, "  %s  %-20s  %-8s  done=%s  %s\n", k.ID, k.Title, row.Status, done, row.DoneSummary)
+		fmt.Fprintf(&human, "  %s  %-20s  %-8s  done=%s  %s\n", row.ID, row.Title, row.Status, done, row.DoneSummary)
 	}
 	if len(kids) == 0 {
 		human.WriteString("  (no sub-sessions)\n")

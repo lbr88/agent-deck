@@ -492,7 +492,7 @@ func handleGroupShow(profile string, args []string) {
 		} else {
 			b.WriteString("  env:        (none)\n")
 		}
-		fmt.Fprintf(&b, "  skills:     %s\n", orNone(strings.Join(res.Skills, ", ")))
+		fmt.Fprintf(&b, "  plugins:    %s\n", orNone(strings.Join(res.Plugins, ", ")))
 		fmt.Fprintf(&b, "  mcps:       %s\n", orNone(strings.Join(res.MCPs, ", ")))
 	}
 
@@ -888,6 +888,13 @@ func handleGroupDelete(profile string, args []string) {
 		}
 		// Re-sync the tree
 		groupTree.SyncWithInstances(groupTree.GetAllInstances())
+	}
+
+	// SaveGroups is additive (never prunes), so the deleted group's rows must be
+	// removed explicitly or the group resurrects on the next reload.
+	if err := storage.DeleteGroupSubtree(groupPath); err != nil {
+		out.Error(fmt.Sprintf("failed to delete group rows: %v", err), ErrCodeNotFound)
+		os.Exit(1)
 	}
 
 	// Save
@@ -1434,6 +1441,14 @@ func handleGroupChange(profile string, args []string) {
 	newPath := baseName
 	if destPath != "" {
 		newPath = destPath + "/" + baseName
+	}
+
+	// A move re-paths the group and its subgroups; the old source path rows must
+	// be deleted explicitly (additive SaveGroups won't prune them) before the
+	// save re-adds the new paths, or the group lingers under its old path.
+	if err := storage.DeleteGroupSubtree(sourcePath); err != nil {
+		out.Error(fmt.Sprintf("failed to delete old group rows: %v", err), ErrCodeNotFound)
+		os.Exit(1)
 	}
 
 	// Persist.

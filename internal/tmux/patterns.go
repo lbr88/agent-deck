@@ -97,13 +97,38 @@ func DefaultRawPatterns(toolName string) *RawPatterns {
 				`re:(?m)^\s*>\s*$`,
 			},
 		}
+	case "codewhale":
+		// codewhale CLI (deepseek-v4-pro TUI, #1577). The codex preset's
+		// patterns never match the deepseek TUI, so a codewhale worker driven
+		// by a conductor was always misread as idle and `session send --wait`
+		// timed out. Busy is authoritative in the detector (checked before
+		// prompt), so the always-visible composer placeholder "Write a task
+		// or use /." cannot mask a working session.
+		//
+		// Captured live:
+		//   busy footer:  "... (waiting for deepseek deepseek-v4-pro, 2s/300s idle timeout)"
+		//                 "... · working (2s)"
+		//   idle footer:  no busy marker; composer placeholder visible
+		return &RawPatterns{
+			BusyPatterns:   []string{"waiting for deepseek", "working (", "idle timeout"},
+			PromptPatterns: []string{"Write a task or use"},
+		}
 	case "pi":
 		return &RawPatterns{
 			BusyPatterns: []string{
 				"ctrl+c to interrupt",
 				"esc to interrupt",
+				// Subagent activity: pi writes task markers to the pane
+				// when subagents are actively running. These patterns are
+				// specific enough to NOT match the idle status bar or
+				// package-update banners.
+				"delegate_task",
+				`re:(?m)^\[subagent\]`,
+				`re:(?m)^\[running\]`,
+				`re:(?m)^\s*→\s`,
 			},
 			PromptPatterns: []string{`re:(?m)^\s*pi>\s*`},
+			SpinnerChars:   []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		}
 	case "copilot":
 		// GitHub Copilot CLI (the standalone `copilot` binary, Issue #556).

@@ -149,6 +149,24 @@ func mergeToolDataExtrasWithoutCodexManaged(oldToolData, newToolData json.RawMes
 	return MergeToolDataExtras(stripCodexManagedExtras(oldToolData), newToolData)
 }
 
+func ensureExplicitCodexBindingKey(data json.RawMessage) json.RawMessage {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(data, &values) != nil {
+		return data
+	}
+	if values == nil {
+		values = make(map[string]json.RawMessage)
+	}
+	if _, ok := values["codex_session_id"]; !ok {
+		values["codex_session_id"] = json.RawMessage(`""`)
+	}
+	out, err := json.Marshal(values)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
 func copyCodexBinding(authoritative, incoming map[string]any, revision int64) {
 	for _, key := range []string{"codex_session_id", "codex_detected_at"} {
 		if value, ok := authoritative[key]; ok {

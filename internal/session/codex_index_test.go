@@ -342,6 +342,89 @@ func TestCodexSessionNameInReadsNativeThreadTitle(t *testing.T) {
 	}
 }
 
+func TestCodexSessionNameInModernSchemaPrefersExplicitNameOverPromptTitle(t *testing.T) {
+	home := t.TempDir()
+	id := "77777777-7777-7777-7777-777777777778"
+	now := time.Now()
+	writeCodexStateThread(t, home, id, "the full first user prompt that must not replace an Agent Deck rename", "preview", "/repo", now.UnixMilli())
+	addCodexStateThreadNameColumn(t, home, id, "")
+	if err := AppendCodexSessionIndexName(home, id, "short explicit rename", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CodexSessionNameIn(home, id)
+	if err != nil {
+		t.Fatalf("CodexSessionNameIn: %v", err)
+	}
+	if got != "short explicit rename" {
+		t.Fatalf("CodexSessionNameIn = %q, want explicit rename instead of prompt title", got)
+	}
+}
+
+func TestCodexSessionNameInModernSchemaPrefersNativeNameOverOlderIndex(t *testing.T) {
+	home := t.TempDir()
+	id := "77777777-7777-7777-7777-777777777781"
+	now := time.Now()
+	writeCodexStateThread(t, home, id, "the full first user prompt", "preview", "/repo", now.UnixMilli())
+	addCodexStateThreadNameColumn(t, home, id, "latest native rename")
+	if err := AppendCodexSessionIndexName(home, id, "older explicit rename", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := CodexSessionNameIn(home, id)
+	if err != nil {
+		t.Fatalf("CodexSessionNameIn: %v", err)
+	}
+	if got != "latest native rename" {
+		t.Fatalf("CodexSessionNameIn = %q, want native name", got)
+	}
+}
+
+func TestListCodexIndexModernSchemaPrefersExplicitNameOverNewerPromptTitle(t *testing.T) {
+	home := t.TempDir()
+	id := "77777777-7777-7777-7777-777777777779"
+	now := time.Now()
+	writeCodexStateThread(t, home, id, "the full first user prompt", "preview", "/repo", now.UnixMilli())
+	addCodexStateThreadNameColumn(t, home, id, "")
+	if err := AppendCodexSessionIndexName(home, id, "short explicit rename", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := ListCodexIndex(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ThreadName != "short explicit rename" {
+		t.Fatalf("entries = %#v, want explicit rename to outrank newer prompt title", entries)
+	}
+}
+
+func TestSyncCodexSessionNameInModernSchemaWritesNameWithoutReplacingPrompt(t *testing.T) {
+	home := t.TempDir()
+	id := "77777777-7777-7777-7777-777777777780"
+	now := time.Now()
+	const prompt = "the original first user prompt"
+	writeCodexStateThread(t, home, id, prompt, "preview", "/repo", now.Add(-time.Hour).UnixMilli())
+	addCodexStateThreadNameColumn(t, home, id, "")
+
+	if err := SyncCodexSessionNameIn(home, id, "short explicit rename", now); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var title, name string
+	if err := db.QueryRow(`SELECT title, name FROM threads WHERE id = ?`, id).Scan(&title, &name); err != nil {
+		t.Fatal(err)
+	}
+	if title != prompt || name != "short explicit rename" {
+		t.Fatalf("state thread title/name = %q/%q, want %q/%q", title, name, prompt, "short explicit rename")
+	}
+}
+
 func TestReconcileTitleFromCodexNoopWhenTitleLocked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -484,5 +567,20 @@ func writeCodexStateThread(t *testing.T, home, id, title, preview, cwd string, u
 	`, id, title, preview, cwd, updatedAtMS/1000, updatedAtMS, updatedAtMS/1000, updatedAtMS)
 	if err != nil {
 		t.Fatalf("insert codex thread: %v", err)
+	}
+}
+
+func addCodexStateThreadNameColumn(t *testing.T, home, id, name string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(home, "state_5.sqlite"))
+	if err != nil {
+		t.Fatalf("open codex state sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ALTER TABLE threads ADD COLUMN name TEXT`); err != nil {
+		t.Fatalf("add codex thread name column: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE threads SET name = ? WHERE id = ?`, name, id); err != nil {
+		t.Fatalf("set codex thread name: %v", err)
 	}
 }

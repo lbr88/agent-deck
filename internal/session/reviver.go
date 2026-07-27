@@ -45,6 +45,14 @@ type ReviveOutcome struct {
 	Class      RevivalClass
 	Revived    bool
 	Err        error
+	// CircuitOpen is true when the futility circuit breaker skipped this
+	// instance's revive this sweep because prior revives never stabilized
+	// (a wedged tmux server that only a manual restart recovers, #1579).
+	CircuitOpen bool
+	// AuthHeld is true when the revive was skipped because the session's agent
+	// cannot authenticate (see auth_hold.go). Distinct from CircuitOpen: this is
+	// not futility to back off from, it is a condition only a human can clear.
+	AuthHeld bool
 }
 
 // Reviver walks storage and re-establishes dead control pipes for instances
@@ -64,6 +72,14 @@ type Reviver struct {
 	ReviveAction func(*Instance) error
 	Stagger      time.Duration
 	Log          *slog.Logger
+	// Breaker bounds futile reconnect storms on a wedged tmux server (#1579).
+	// nil disables the breaker entirely — exact legacy behavior, relied on by
+	// unit tests that construct Reviver{} directly.
+	Breaker *ReviveBreaker
+	// AuthHeld reports whether an instance is held out of automatic recovery
+	// because its agent cannot authenticate (see auth_hold.go). nil disables the
+	// check — legacy behavior for unit tests that construct Reviver{} directly.
+	AuthHeld func(*Instance) (bool, string)
 }
 
 // NewReviver returns a Reviver wired to real tmux + PipeManager primitives.
@@ -76,6 +92,13 @@ func NewReviver() *Reviver {
 		ReviveAction: defaultReviveAction,
 		Stagger:      500 * time.Millisecond,
 		Log:          sessionLog,
+		// Process-global breaker: the TUI builds a fresh Reviver every 60s
+		// sweep (internal/ui/home.go), so per-sweep state would never
+		// accumulate. The breaker must outlive the Reviver to detect a
+		// storm across sweeps. CLI one-shots run in a short-lived process,
+		// so their global breaker starts empty and always probes.
+		Breaker:  globalReviveBreaker,
+		AuthHeld: defaultBootAuthHeld,
 	}
 }
 
@@ -95,13 +118,55 @@ func NewReviver() *Reviver {
 // is fixed via Storage.PersistRevivedInstances.
 func (r *Reviver) Classify(inst *Instance) RevivalClass {
 	name := instanceTmuxName(inst)
-	if !r.TmuxExists(name, inst.TmuxSocketName) {
-		return ClassDead
+	tmuxAlive := r.TmuxExists(name, inst.TmuxSocketName)
+	// Read the pipe whenever the server is up, even when the stored status alone
+	// already settles the verdict: the READING is the evidence #1705 asked for, and
+	// a log line that omits it cannot answer "was the session actually dead?" after
+	// the fact. IsConnected is an in-memory map lookup, so this costs nothing.
+	pipeAlive := false
+	if tmuxAlive && r.PipeAlive != nil {
+		pipeAlive = r.PipeAlive(name)
 	}
-	if inst.Status == StatusError || !r.PipeAlive(name) {
-		return ClassErrored
+
+	class := ClassAlive
+	switch {
+	case !tmuxAlive:
+		class = ClassDead
+	case inst.Status == StatusError || !pipeAlive:
+		class = ClassErrored
 	}
-	return ClassAlive
+	r.logClassify(inst, name, tmuxAlive, pipeAlive, class)
+	return class
+}
+
+// logClassify records the readings behind a classification, not just its outcome.
+//
+// Issue #1705 was a live conductor restarted as if it were dead, and the
+// investigation stalled because only the OUTCOME was recoverable afterwards — the
+// readings that produced it were never written down anywhere an operator could
+// retrieve. So every non-alive verdict states its evidence: tmux liveness, the
+// control-pipe reading, the stored status it was judged against, and when. Alive
+// verdicts stay at debug level; they are the overwhelming majority and carry no
+// diagnostic value.
+func (r *Reviver) logClassify(inst *Instance, name string, tmuxAlive, pipeAlive bool, class RevivalClass) {
+	if r.Log == nil {
+		return
+	}
+	attrs := []any{
+		slog.String("title", inst.Title),
+		slog.String("instance_id", inst.ID),
+		slog.String("tmux_session", name),
+		slog.Bool("tmux_alive", tmuxAlive),
+		slog.Bool("pipe_alive", pipeAlive),
+		slog.String("stored_status", string(inst.Status)),
+		slog.String("class", class.String()),
+		slog.Time("sampled_at", time.Now()),
+	}
+	if class == ClassAlive {
+		r.Log.Debug("reviver_classify", attrs...)
+		return
+	}
+	r.Log.Info("reviver_classify", attrs...)
 }
 
 // ReviveAll walks instances, classifies each, and triggers ReviveAction for
@@ -121,6 +186,9 @@ func (r *Reviver) Classify(inst *Instance) RevivalClass {
 // runReviveAll / PersistRevivedInstances — MUST be revisited so those mutations
 // are not silently dropped.
 func (r *Reviver) ReviveAll(instances []*Instance) []ReviveOutcome {
+	if r.Breaker != nil {
+		r.Breaker.Prune()
+	}
 	outcomes := make([]ReviveOutcome, 0, len(instances))
 	firstRevive := true
 	for _, inst := range instances {
@@ -148,7 +216,43 @@ func (r *Reviver) reviveOneInternal(inst *Instance, firstRevive *bool) ReviveOut
 		Title:      inst.Title,
 		Class:      class,
 	}
+
+	// Feed the classification to the breaker every sweep (not just for
+	// errored instances) so ClassAlive can reset a session's futility state
+	// and so futility from a prior sweep's revive is judged before we decide
+	// whether to attempt another one.
+	attempt := true
+	if r.Breaker != nil {
+		attempt = r.Breaker.OnClassify(inst.ID, inst.Title, class)
+	}
+
 	if class != ClassErrored {
+		return out
+	}
+
+	// An auth-held session is not revivable by machine. Healing its status back
+	// to running (which is all defaultReviveAction can do for a session whose
+	// agent has exited) would ERASE the one honest signal the user needs — the
+	// auth-401 substate — and hand the fleet back a green light it has not
+	// earned. Skip, and leave the hold for a human to clear.
+	if r.AuthHeld != nil {
+		if held, remedy := r.AuthHeld(inst); held {
+			out.AuthHeld = true
+			if r.Log != nil {
+				r.Log.Warn("reviver_auth_held_skip",
+					slog.String("title", inst.Title),
+					slog.String("instance_id", inst.ID),
+					slog.String("remedy", remedy))
+			}
+			return out
+		}
+	}
+
+	// Circuit open and cooling down: skip the doomed reconnect. This is the
+	// storm brake — on a wedged tmux server the breaker keeps us from
+	// respawning the same dead pipes every sweep (#1579).
+	if !attempt {
+		out.CircuitOpen = true
 		return out
 	}
 
@@ -159,12 +263,21 @@ func (r *Reviver) reviveOneInternal(inst *Instance, firstRevive *bool) ReviveOut
 
 	if err := r.ReviveAction(inst); err != nil {
 		out.Err = err
+		if r.Breaker != nil {
+			// A failed action is immediately futile — count it toward the trip.
+			r.Breaker.AfterRevive(inst.ID, inst.Title, err)
+		}
 		if r.Log != nil {
 			r.Log.Warn("reviver_action_failed",
 				slog.String("title", inst.Title),
 				slog.String("error", err.Error()))
 		}
 		return out
+	}
+	if r.Breaker != nil {
+		// Action "succeeded"; mark pending so the next sweep can tell whether
+		// the session actually stabilized or is still errored (futile).
+		r.Breaker.AfterRevive(inst.ID, inst.Title, nil)
 	}
 	out.Revived = true
 	if r.Log != nil {

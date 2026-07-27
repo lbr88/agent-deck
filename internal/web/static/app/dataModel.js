@@ -69,6 +69,8 @@ function projectSession(item) {
     worktreeBranch: s.worktreeBranch || '',
     sandbox: !!s.sandbox,
     sandboxContainer: s.sandboxContainer || '',
+    lastAccessedAt: s.lastAccessedAt || '',
+    createdAt: s.createdAt || '',
     parent: null,
     pendingNeeds: 0,
     watcherType: null,

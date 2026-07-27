@@ -108,6 +108,7 @@ func TestNewDialog_PopupArrows_NavigateReliably_RegressionFor896(t *testing.T) {
 	// the #1020 fix in newdialog.go. See [[issue1020_path_selector_ux_test]].
 	d.pathInput.Focus()
 	d.pathSoftSelected = false
+	d.pathInput.SetValue(t.TempDir() + "/missing")
 
 	// Explicitly open the picker before using arrow-key navigation.
 	d, _ = d.Update(tea.KeyMsg{Type: tea.KeyEnter})

@@ -35,6 +35,26 @@ or launching from outside that session — pass `--parent <session-id-or-title>`
 Spell out the long form: **never use the short `-p` to set a parent** (see the
 `-p` pitfall in Notes).
 
+## Before you fan out
+
+- **Check for shared singletons.** N sessions on the same project can't truly run
+  in parallel if they serialize on one resource — a single dev DB, a bound port,
+  one dev-server lock file. If they'd share one, either give each child isolated
+  resources (own DB name + port) or run **one** coherent session instead of a
+  fleet.
+- **Worktree children need deps installed first.** A freshly created git worktree
+  has no `node_modules` / vendored deps. Make the **first instruction** in the
+  child's `-m` prompt install them — and for a locked monorepo, install *from the
+  frozen lockfile, never regenerate it* (e.g. `pnpm install --frozen-lockfile`).
+  Otherwise the child's first test/build/e2e fails confusingly.
+- **Long prompts: pass via a file.** For a big multi-line task, write it to a
+  file and pass `--message-file task.md` (or `--message-file -` to read stdin)
+  instead of `-m`. The file is read directly by agent-deck, so backticks, `$`,
+  and quotes never round-trip through the shell. Also works on
+  `session start` and `session send` (there it replaces the positional
+  message). On older builds without the flag, fall back to
+  `-m "$(cat task.md)"`.
+
 ## The loop
 
 ### 1. Fan out (one `launch` per child; loop it)
@@ -67,7 +87,9 @@ Useful flags:
   instead of the auto-detected one. One step, no follow-up needed. **Long form
   only** — see the `-p` pitfall in Notes.
 - `--no-assert-done` — skip the completion-sentinel instruction.
-- `--no-parent` — launch flat instead of nested (you lose completion routing).
+- `--no-parent` — launch a standalone top-level session you supervise directly,
+  not nested under you (you lose completion routing). **Set `-g` explicitly** for
+  these — see "Independent (un-parented) sessions" below.
 
 ### 2. Keep working
 
@@ -88,6 +110,39 @@ disturbing the conductor or other readers.
 
 A child with a `done_status` has finished and asserted its result.
 
+**Prefer push over polling when your harness supports it.** Instead of
+re-running the check yourself, let the fleet notify you:
+
+```bash
+# One-shot "wake me when the whole fleet is finished" — run this in the
+# BACKGROUND (e.g. Claude Code's run_in_background Bash): it streams JSONL
+# events and exits 0 once every child is terminal (done sentinel, error,
+# or stopped). The harness notifies you when it exits.
+agent-deck session children --follow --until-done
+
+# Live event stream for a long-running fleet — attach a stream watcher
+# (e.g. Claude Code's Monitor tool) to this; each line is one event:
+agent-deck session children --follow
+```
+
+`--follow` emits one JSON object per line: `snapshot` (initial state per
+child), `added`, `status` (from/to transition — including `running → waiting`,
+so you see a child stall on a question), `done` (completion sentinel, ok or
+fail), `removed`, `error`, plus a periodic `heartbeat` (default 60s,
+`--heartbeat 0` disables) so silence always means "nothing changed", never
+"the watcher died". `--interval` tunes the poll cadence (default 2s). Failure
+states are on the stream too — filter for `done` alone and you'll miss
+crashed children; key off `.event` instead.
+
+On older builds without `--follow`, fall back to a background until-loop:
+
+```bash
+until agent-deck session children --json | jq -e 'all(.children[]; .done_status != null)' >/dev/null; do sleep 15; done
+```
+
+(Cloud-side schedulers — e.g. Claude Code routines — run on remote infra and
+cannot reach your local tmux/state.db; fleet supervision stays local.)
+
 ### 4. Unblock a child that's waiting on you
 
 A child in `waiting` status has stopped and is asking for input (a question, a
@@ -100,6 +155,9 @@ with `--no-transition-notify`. To answer it:
 agent-deck session output <child-id> --json
 # Send the answer (child keeps running afterward):
 agent-deck session send <child-id> "<your answer>"
+
+# Codex numbered approval prompt: send one decision key, not composer text:
+agent-deck session approve <child-id> once
 ```
 
 `session send` flags: `--wait` (block until it finishes the turn, then print
@@ -139,6 +197,39 @@ agent-deck session send lint-a "Yes, drop the deprecated shim — don't keep a f
 agent-deck session output lint-a --json
 ```
 
+## Independent (un-parented) sessions
+
+Sometimes the user wants standalone sessions they supervise **directly** — not
+children of the conductor. Launch those with `--no-parent`. They run flat: no
+nesting in the TUI, and no completion routing back to your inbox.
+
+**The group trap.** A *parented* worktree child auto-inherits the parent's group
+— that's why the parented-fleet rule is "never pass `-g`." With `--no-parent`
+there is no parent to inherit from, so a worktree session falls back to its
+**cwd-derived group: the worktree's branch leaf** (e.g. a stray `issue-896`
+group sitting *next to* your real group instead of with its siblings).
+
+So the rule **inverts** for independent sessions: *pass the group explicitly.*
+`$AGENTDECK_RESOLVED_GROUP` holds the launching session's group.
+
+```bash
+agent-deck launch <path> -w <branch> --no-parent -g "$AGENTDECK_RESOLVED_GROUP" -c claude -m "..."
+```
+
+Or repair an already-launched stray, no restart needed:
+
+```bash
+agent-deck group move <child-id> "$AGENTDECK_RESOLVED_GROUP"
+agent-deck group delete <stray-group>        # once it's empty
+```
+
+**Verify the group** after any `--no-parent` worktree launch (`ls --json` is
+large; filter to the one session):
+
+```bash
+agent-deck ls --json | jq -r '.[] | select(.title|test("<name>")) | "\(.title)\t\(.group)"'
+```
+
 ## Supervision tools the parent can use
 
 All read-only / on-demand — none of them block your session:
@@ -146,9 +237,18 @@ All read-only / on-demand — none of them block your session:
 - `agent-deck session children [id] --json` — **the default monitor.** Live
   status + last completion per child. Non-destructive (never clears the inbox),
   so poll it as often as you like. Start here every heartbeat.
+- `agent-deck session children --follow [--until-done]` — **the push monitor.**
+  Streams JSONL child events (snapshot/added/status/done/removed/error +
+  heartbeat) until interrupted; with `--until-done` it exits 0 once every child
+  is terminal. Run it in the background for a completion wake-up, or attach a
+  stream watcher for live events. Read-only like the plain form.
 - `agent-deck session output <id> --json` — a child's latest full response.
 - `agent-deck session send <id> "<msg>" [--wait|--stream|--no-wait|--draft]` —
   send a follow-up / answer a `waiting` child.
+- `agent-deck session approve <id> [once|always|session|N]` — resolve one
+  visibly active Codex approval menu. Do not use `session send <id> "1"`:
+  Codex consumes the digit as a decision key, while `session send` adds a
+  trailing Enter that can land in the resumed turn.
 - `agent-deck status -q` — global count of sessions currently `waiting`; a cheap
   coarse heartbeat across everything, not just your children.
 - `agent-deck inbox drain --json <your-session-id>` — **consumes** the pushed
@@ -160,6 +260,15 @@ All read-only / on-demand — none of them block your session:
 There is no always-on background watcher started for you — "monitored by
 default" means transition/completion events **queue** in your inbox; you still
 choose when to look (poll `session children`, or `inbox drain`).
+
+**Automatic turn-start snapshot (Claude conductors, newer builds).** A Claude
+parent session gets a compact fleet snapshot injected as context on every
+prompt submit and session start — child counts plus actionable bullets for
+`waiting` (with the exact `session output`/`session send` commands) and
+completed children. This is *state*, complementing the Stop-edge inbox drain
+(*events*): it survives conductor restarts and works even if events were
+drained elsewhere. Leaf sessions see nothing. Opt a session out by launching
+it with `AGENTDECK_NO_CHILDREN_CONTEXT=1` in its environment.
 
 ## Notes
 
@@ -175,7 +284,9 @@ choose when to look (poll `session children`, or `inbox drain`).
   fleet child — it overrides inheritance and detaches the child into its own
   group. If a fleet did scatter (a stray group, or per-branch groups), move them
   back without restarting: `agent-deck group move <child-id> <parent-group>`,
-  then `agent-deck group delete <stray-group>` once it's empty.
+  then `agent-deck group delete <stray-group>` once it's empty. (This "never pass
+  `-g`" rule is for *parented* children; for `--no-parent` standalone sessions it
+  inverts — you *must* set `-g`. See "Independent (un-parented) sessions".)
 - **The `-p` pitfall — use `--parent`, never `-p`, for a parent.** `-p` is the
   *global* `--profile` shorthand, parsed before the subcommand. On older builds it
   swallows your intended parent id as a profile name and routes the child into a

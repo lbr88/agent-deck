@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -303,6 +304,12 @@ func initColorProfile() {
 }
 
 func runAgentDeckMain() {
+	// Make bare `tmux` invocations resolve even when launched from a minimal
+	// environment (notably a `terminal-notifier -execute` notification click,
+	// whose launchd PATH omits Homebrew's /opt/homebrew/bin). Must run before any
+	// tmux probe below. No-op when tmux is already on PATH.
+	ensureTmuxOnPath()
+
 	// Extract global -p/--profile flag before subcommand dispatch
 	profile, args := extractProfileFlag(os.Args[1:])
 	if profile != "" {
@@ -363,6 +370,9 @@ func runAgentDeckMain() {
 			return
 		case "session":
 			handleSession(profile, args[1:])
+			return
+		case "fleet":
+			handleFleet(profile, args[1:])
 			return
 		case "mcp":
 			handleMCP(profile, args[1:])
@@ -606,6 +616,7 @@ func runAgentDeckMain() {
 		}
 		if db := statedb.GetGlobal(); db != nil {
 			_ = db.ResignPrimary()
+			_ = db.ReleaseAllClaims()
 			_ = db.UnregisterInstance()
 		}
 		os.Exit(0)
@@ -956,6 +967,33 @@ func runAgentDeckMain() {
 	ui.EnableModifyOtherKeys(os.Stdout)
 	defer ui.DisableModifyOtherKeys(os.Stdout)
 
+	// Check for atuin pty-proxy incompatibility (#1558).
+	// Atuin pty-proxy intercepts PTY I/O and breaks Bubble Tea's TUI rendering.
+	// The alternate screen, mouse tracking, and raw-mode interactions all fail
+	// because os.Stdin/os.Stdout are proxied pipes, not direct terminal FDs.
+	if tmux.IsAtuinPTYProxy() {
+		fmt.Fprint(os.Stderr, "WARNING: Agent Deck's TUI is incompatible with atuin pty-proxy.\n"+
+			"The TUI may appear blank or fail to render.\n"+
+			"\n"+
+			"To fix this, replace the pty-proxy init with the normal init in your shell config:\n"+
+			"  - zsh:   replace 'eval \"$(atuin pty-proxy init zsh)\"' with 'eval \"$(atuin init zsh)\"' in .zshrc\n"+
+			"  - bash:  replace 'eval \"$(atuin pty-proxy init bash)\"' with 'eval \"$(atuin init bash)\"' in .bashrc\n"+
+			"  - fish:  replace 'atuin pty-proxy init fish | source' with 'atuin init fish | source' in config.fish\n"+
+			"\n"+
+			"Atuin pty-proxy is only needed for the atuin TUI overlay feature,\n"+
+			"and is not required for normal atuin shell history functionality.\n")
+	}
+
+	// Reap orphaned control-mode clients left behind by prior crashed /
+	// SIGKILL'd / OOM-killed TUIs before this process starts connecting its
+	// own pipes. killStaleControlClients only sweeps per-session on Connect(),
+	// so orphans for sessions this TUI never reopens would otherwise pile up
+	// until they exhaust the pty table (observed: 176 orphaned `tmux -C`
+	// clients vs the macOS kern.tty.ptmx_max=511 cap, blocking all new
+	// terminals). This server-wide sweep clears the whole backlog once at
+	// startup; live sibling TUIs (allow_multiple=true) are preserved.
+	tmux.SweepStaleControlClients(tmux.DefaultSocketName())
+
 	p := tea.NewProgram(
 		homeModel,
 		tea.WithAltScreen(),
@@ -1143,7 +1181,7 @@ func reorderArgsForFlagParsing(args []string) []string {
 		"t": true, "title": true,
 		"g": true, "group": true,
 		"c": true, "cmd": true,
-		"m": true, "message": true,
+		"m": true, "message": true, "message-file": true,
 		"p": true, "parent": true,
 		"mcp":            true,
 		"channel":        true,
@@ -1303,6 +1341,13 @@ func resolveGroupPathForAdd(groupTree *session.GroupTree, groupSelector string) 
 	return groupSelector
 }
 
+// shouldLockTitle is the #1615-class chokepoint deciding whether a new CLI
+// session's title is locked against Claude's folder-name sync. An explicit
+// user title locks, as do the explicit lock flags.
+func shouldLockTitle(userProvidedTitle, titleLockFlag, noTitleSyncFlag bool) bool {
+	return userProvidedTitle || titleLockFlag || noTitleSyncFlag
+}
+
 // handleAdd adds a new session from CLI
 func handleAdd(profile string, args []string) {
 	fs := flag.NewFlagSet("add", flag.ExitOnError)
@@ -1331,6 +1376,7 @@ func handleAdd(profile string, args []string) {
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("quiet", false, "Minimal output")
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
+	attach := fs.Bool("attach", false, "Start and attach to the session immediately after creating it (requires an interactive terminal; not supported with --ssh)")
 
 	// Worktree flags
 	worktreeBranch := fs.String("w", "", "Create session in git worktree for branch")
@@ -1341,7 +1387,7 @@ func handleAdd(profile string, args []string) {
 
 	// MCP flag - can be specified multiple times
 	var mcpFlags []string
-	fs.Func("mcp", "MCP to attach (can specify multiple times)", func(s string) error {
+	fs.Func("mcp", "MCP to attach (can specify multiple times; Codex writes $CODEX_HOME/config.toml)", func(s string) error {
 		mcpFlags = append(mcpFlags, s)
 		return nil
 	})
@@ -1427,6 +1473,7 @@ func handleAdd(profile string, args []string) {
 		fmt.Println("  agent-deck -p work add               # Add to 'work' profile")
 		fmt.Println("  agent-deck add -t \"Sub-task\" --parent \"Main Project\"  # Create sub-session")
 		fmt.Println("  agent-deck add -t \"Research\" -c claude --mcp memory --mcp sequential-thinking /tmp/x")
+		fmt.Println("  agent-deck add -c codex --mcp memory .  # writes to Codex config.toml")
 		fmt.Println("  agent-deck add -t \"Bot\" -c claude --channel plugin:telegram@user/repo .  # subscribe to plugin channel")
 		fmt.Println("  agent-deck add -c opencode --wrapper \"nvim +'terminal {command}' +'startinsert'\" .")
 		fmt.Println("  agent-deck add -c \"codex --dangerously-bypass-approvals-and-sandbox\" .")
@@ -1654,7 +1701,11 @@ func handleAdd(profile string, args []string) {
 
 			// Create worktree atomically (git handles existence checks).
 			// This avoids a TOCTOU race from separate check-then-create steps.
-			setupErr, err := createWorktreeWithSetup(backend, worktreePath, wtBranch, os.Stdout, os.Stderr, session.GetWorktreeSettings().SetupTimeout())
+			// Sparse state is inherited from `path` (the directory the user
+			// pointed at), never from backend.RepoDir() — see #1708.
+			setupErr, err := createWorktreeWithSetup(backend, worktreePath, wtBranch,
+				git.SparseInheritOptions(wtSettings.InheritSparseCheckout(), path),
+				os.Stdout, os.Stderr, session.GetWorktreeSettings().SetupTimeout())
 			if err != nil {
 				if isWorktreeAlreadyExistsError(err) {
 					fmt.Fprintf(os.Stderr, "Error: worktree already exists at %s\n", worktreePath)
@@ -1735,8 +1786,11 @@ func handleAdd(profile string, args []string) {
 		newInstance.NoTransitionNotify = true
 	}
 
-	// #697: title-lock blocks Claude's session-name sync. Either flag triggers it.
-	if *titleLock || *noTitleSync {
+	// #697/#1615: title-lock blocks Claude's session-name sync. An explicit
+	// user title (-t/--title) locks too — otherwise Claude's folder-name sync
+	// silently clobbers it (the #1615 class), matching the TUI dialog and
+	// `launch` paths.
+	if shouldLockTitle(userProvidedTitle, *titleLock, *noTitleSync) {
 		newInstance.TitleLocked = true
 	}
 
@@ -1851,6 +1905,13 @@ func handleAdd(profile string, args []string) {
 		os.Exit(1)
 	}
 
+	// Materialize the declarative per-group/per-conductor skill+mcp loadout
+	// at create time (ProjectPath, group, and tool are final here), so the
+	// floor exists even before first start. Start/Restart re-assert.
+	for _, w := range session.ApplyConfiguredLoadout(newInstance) {
+		fmt.Fprintf(os.Stderr, "Warning: loadout: %s\n", w)
+	}
+
 	// Add to instances
 	instances = append(instances, newInstance)
 
@@ -1883,8 +1944,8 @@ func handleAdd(profile string, args []string) {
 			}
 		}
 
-		// Write MCPs to .mcp.json
-		if err := session.WriteMCPJsonFromConfig(path, mcpFlags); err != nil {
+		// Write MCPs to the selected tool's MCP store.
+		if err := newInstance.WriteLocalMCPConfig(mcpFlags); err != nil {
 			fmt.Printf("Error: failed to write MCPs: %v\n", err)
 			os.Exit(1)
 		}
@@ -1892,6 +1953,40 @@ func handleAdd(profile string, args []string) {
 
 	quietMode := *quiet || *quietShort
 	out := NewCLIOutput(*jsonOutput, quietMode)
+
+	// --attach: create → start → attach, so `add --attach` "instantly opens"
+	// the new session in one step. Refused loudly (never silently) under
+	// --json or without an interactive terminal; the session is left created
+	// and started in those cases. Remote (ssh) sessions use a different attach
+	// path and are out of scope here.
+	if *attach {
+		if *jsonOutput {
+			out.Error("--attach cannot be combined with --json; session was created", ErrCodeInvalidOperation)
+			os.Exit(3)
+		}
+		if *sshHost != "" {
+			out.Error("--attach is not supported with --ssh (remote sessions); session was created", ErrCodeInvalidOperation)
+			os.Exit(3)
+		}
+		if err := newInstance.Start(); err != nil {
+			out.Error(fmt.Sprintf("failed to start session: %v", err), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
+		newInstance.PostStartSync(3 * time.Second)
+		if err := storage.SaveWithGroups(instances, groupTree); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to save session state: %v\n", err)
+			os.Exit(1)
+		}
+		if err := attachInstanceInteractive(newInstance); err != nil {
+			if errors.Is(err, errAttachNoTTY) {
+				fmt.Fprintf(os.Stderr, "Error: %v; session was created and started\n", err)
+				os.Exit(3)
+			}
+			fmt.Fprintf(os.Stderr, "Error: failed to attach: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Build human-readable output
 	var humanLines []string
@@ -2079,6 +2174,8 @@ func handleList(profile string, args []string) {
 			Channels      []string  `json:"channels,omitempty"`
 			ExtraArgs     []string  `json:"extra_args,omitempty"`
 			Color         string    `json:"color,omitempty"` // issue #391
+			Archived      bool      `json:"archived"`
+			ArchivedAt    time.Time `json:"archived_at,omitempty"`
 		}
 		// Warm tmux pane-title cache + load hook statuses so the CLI
 		// reports the same Status the TUI and /api/menu do (issue #610).
@@ -2102,6 +2199,8 @@ func handleList(profile string, args []string) {
 				Channels:      inst.Channels,
 				ExtraArgs:     inst.ExtraArgs,
 				Color:         inst.Color,
+				Archived:      inst.IsArchived(),
+				ArchivedAt:    inst.ArchivedAt,
 			}
 			if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
 				sj.TmuxSession = tmuxSess.Name
@@ -2296,6 +2395,12 @@ func handleRemove(profile string, args []string) {
 	removedID := inst.ID
 	removedTitle := inst.Title
 
+	// Snapshot service-unit ownership BEFORE teardown (issue #1721): the
+	// pid of the tmux server generation this session belongs to is only
+	// observable while the session is still live, and it is what proves
+	// the unit we may stop later is the one we actually retired.
+	serviceUnitOwnership := inst.ServiceUnitOwnership()
+
 	// Always attempt to kill the tmux session, even if Exists() returns false.
 	// The saved status may be stale (e.g., "error" in DB but tmux session still alive).
 	// KillAndWait is safe to call on non-existent sessions (returns error which we handle).
@@ -2316,7 +2421,12 @@ func handleRemove(profile string, args []string) {
 	// stop + reset-failed the unit here so `agent-deck remove` is truly
 	// terminal. No-op on non-service-mode sessions and on non-systemd
 	// hosts.
-	_ = inst.StopServiceUnit()
+	//
+	// Gated on proven exclusive ownership (issue #1721): the unit
+	// supervises a tmux SERVER, which on the default socket is shared by
+	// every sibling session, so an unconditional stop could kill sessions
+	// this removal was never allowed to touch.
+	_ = inst.RetireServiceUnit(serviceUnitOwnership)
 
 	// Clean up worktree directory if this is a worktree session
 	if inst.IsWorktree() {
@@ -2959,6 +3069,15 @@ func handleUpdate(args []string) {
 		os.Exit(1)
 	}
 
+	// #1759: a release is visible on GitHub before its binaries finish
+	// uploading. CheckForUpdate degrades to the newest installable release and
+	// reports the in-flight one here, so say that plainly instead of either
+	// erroring out or implying the user is already current.
+	if info.PublishingVersion != "" {
+		fmt.Printf("\nℹ v%s was just released but its binaries are not attached yet.\n", info.PublishingVersion)
+		fmt.Println("  Re-run `agent-deck update` in a few minutes to get it.")
+	}
+
 	if !info.Available {
 		fmt.Println("✓ You're running the latest version!")
 		return
@@ -3332,6 +3451,7 @@ func printHelp() {
 	fmt.Println("  rename, mv       Rename a session")
 	fmt.Println("  status           Show session status summary")
 	fmt.Println("  session          Manage session lifecycle")
+	fmt.Println("  fleet            Detect and recover from a fleet-wide session death")
 	fmt.Println("  mcp              Manage MCP servers")
 	fmt.Println("  skill            Manage project skills")
 	fmt.Println("  codex-hooks      Manage Codex notify hook integration")
@@ -3361,6 +3481,10 @@ func printHelp() {
 	fmt.Println("  session fork <id>         Fork Claude or Pi session with context")
 	fmt.Println("  session attach <id>       Attach to session interactively")
 	fmt.Println("  session show [id]         Show session details")
+	fmt.Println()
+	fmt.Println("Fleet Recovery Commands:")
+	fmt.Println("  fleet status              Report sessions whose panes are gone (read-only)")
+	fmt.Println("  fleet recover             Plan a sequential recovery sweep (add --yes to run it)")
 	fmt.Println()
 	fmt.Println("MCP Commands:")
 	fmt.Println("  mcp list                  List available MCPs from config.toml")
@@ -3449,6 +3573,15 @@ func printHelp() {
 	fmt.Println("Environment Variables:")
 	fmt.Println("  AGENTDECK_PROFILE    Default profile to use")
 	fmt.Println("  AGENTDECK_COLOR      Color mode: truecolor, 256, 16, none")
+	fmt.Println()
+	fmt.Println("Configuration:")
+	if configPath, err := session.GetUserConfigPath(); err == nil {
+		fmt.Printf("  Config file: %s\n", configPath)
+	} else {
+		fmt.Println("  Config file: $XDG_CONFIG_HOME/agent-deck/config.toml (default ~/.config/agent-deck/config.toml)")
+	}
+	fmt.Println("  Since v1.9.49 config lives under the XDG base dirs, not ~/.agent-deck.")
+	fmt.Println("  Run 'agent-deck migrate-paths' to copy legacy ~/.agent-deck files across.")
 	fmt.Println()
 	fmt.Println("Keyboard shortcuts (in TUI):")
 	fmt.Println("  n          New session")

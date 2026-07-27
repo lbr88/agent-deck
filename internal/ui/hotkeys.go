@@ -33,8 +33,10 @@ const (
 	hotkeyQuickFork        = "quick_fork"
 	hotkeyForkWithOptions  = "fork_with_options"
 	hotkeyCopyOutput       = "copy_output"
+	hotkeyCopyPane         = "copy_pane"
 	hotkeySendOutput       = "send_output"
 	hotkeyExecShell        = "exec_shell"
+	hotkeyOpenShellHere    = "open_shell_here"
 	hotkeyEditNotes        = "edit_notes"
 	hotkeyEditPaths        = "edit_paths"
 	hotkeyEditSession      = "edit_session"
@@ -57,7 +59,19 @@ const (
 	// suggested Ctrl+S collides with Claude Code (stash prompt) and XOFF
 	// flow-control. Users opt in by binding [hotkeys].switch_session.
 	hotkeySwitchSession = "switch_session" // canonical "ctrl+s" (opt-in)
+	// Scrollback pager. While attached to a session from the deck (Enter), the
+	// deck owns the viewport so tmux's own copy-mode/scrollback is unreachable
+	// (#1491). This trigger, intercepted in the attach loop, opens an in-view
+	// scrollable pager rendered from the pane's history. Unlike other hotkeys
+	// its value is not a home-screen key: it is "pageup" (default), a
+	// "ctrl+<letter>" chord, or "" (disabled). Resolved by
+	// ResolvedScrollbackTrigger, kept out of the home-screen dispatch maps.
+	hotkeyScrollback = "scrollback"
 )
+
+// defaultScrollbackTrigger is the out-of-the-box scrollback trigger: a bare
+// PageUp, exactly the key the #1491 reporter pressed expecting to scroll.
+const defaultScrollbackTrigger = "pageup"
 
 var hotkeyActionOrder = []string{
 	hotkeyQuit,
@@ -85,8 +99,10 @@ var hotkeyActionOrder = []string{
 	hotkeyQuickFork,
 	hotkeyForkWithOptions,
 	hotkeyCopyOutput,
+	hotkeyCopyPane,
 	hotkeySendOutput,
 	hotkeyExecShell,
+	hotkeyOpenShellHere,
 	hotkeyEditNotes,
 	hotkeyEditPaths,
 	hotkeyEditSession,
@@ -129,8 +145,10 @@ var defaultHotkeyBindings = map[string]string{
 	hotkeyQuickFork:        "f",
 	hotkeyForkWithOptions:  "F",
 	hotkeyCopyOutput:       "c",
+	hotkeyCopyPane:         "V",
 	hotkeySendOutput:       "x",
 	hotkeyExecShell:        "E",
+	hotkeyOpenShellHere:    "H",
 	hotkeyEditNotes:        "e",
 	hotkeyEditPaths:        "p",
 	hotkeyEditSession:      "P",
@@ -475,4 +493,62 @@ func ctrlByteFromBinding(binding string) byte {
 func ResolvedSwitchByte(overrides map[string]string) byte {
 	bindings := resolveHotkeys(overrides)
 	return ctrlByteFromBinding(actionHotkey(bindings, hotkeySwitchSession))
+}
+
+// ScrollbackTrigger describes how the in-attach scrollback pager is opened.
+// The zero value means scrollback is disabled.
+type ScrollbackTrigger struct {
+	// KeyByte is a ctrl+<letter> control byte that opens the pager, or 0.
+	KeyByte byte
+	// OnPageUp reports whether a bare PageUp opens the pager.
+	OnPageUp bool
+}
+
+// Enabled reports whether any trigger is configured.
+func (t ScrollbackTrigger) Enabled() bool {
+	return t.KeyByte != 0 || t.OnPageUp
+}
+
+// Label returns a short human-readable label for the configured trigger
+// (e.g. "PageUp", "Ctrl+G"), or "" when disabled.
+func (t ScrollbackTrigger) Label() string {
+	switch {
+	case t.OnPageUp:
+		return "PageUp"
+	case t.KeyByte != 0:
+		return DetachByteLabel(t.KeyByte)
+	default:
+		return ""
+	}
+}
+
+// ResolvedScrollbackTrigger resolves the in-attach scrollback trigger from the
+// hotkey overrides. The [hotkeys].scrollback value is one of:
+//   - "pageup"       — bare PageUp opens the pager (the default),
+//   - "ctrl+<letter>" — that chord opens the pager,
+//   - ""             — scrollback disabled.
+//
+// An unrecognized value falls back to the PageUp default rather than silently
+// disabling the feature. It is resolved directly from overrides (not through
+// resolveHotkeys) because its value is not a home-screen key and must stay out
+// of the home-screen dispatch lookup.
+func ResolvedScrollbackTrigger(overrides map[string]string) ScrollbackTrigger {
+	val := defaultScrollbackTrigger
+	for action, key := range overrides {
+		if strings.TrimSpace(strings.ToLower(action)) == hotkeyScrollback {
+			val = strings.TrimSpace(strings.ToLower(key))
+			break
+		}
+	}
+	switch val {
+	case "":
+		return ScrollbackTrigger{}
+	case "pageup":
+		return ScrollbackTrigger{OnPageUp: true}
+	default:
+		if b := ctrlByteFromBinding(val); b != 0 {
+			return ScrollbackTrigger{KeyByte: b}
+		}
+		return ScrollbackTrigger{OnPageUp: true}
+	}
 }

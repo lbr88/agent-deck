@@ -100,6 +100,7 @@ type CreateSessionRequest struct {
 	AdditionalPaths []string `json:"additional_paths,omitempty"`
 	GroupPath       string   `json:"group_path,omitempty"`
 	ModelID         string   `json:"model_id,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 }
 
 type ForkSessionRequest struct {
@@ -1617,7 +1618,15 @@ func prepareHubForkWorktree(inst *session.Instance, req ForkSessionRequest, fork
 		return hubForkWorktree{}, fmt.Errorf("failed to create worktree parent directory: %w", err)
 	}
 	var buf bytes.Buffer
-	setupErr, err := vcsbackend.CreateWorktreeWithSetup(backend, worktreePath, branch, &buf, &buf, session.GetWorktreeSettings().SetupTimeout())
+	setupErr, err := vcsbackend.CreateWorktreeWithSetup(
+		backend,
+		worktreePath,
+		branch,
+		git.WorktreeCreateOptions{},
+		&buf,
+		&buf,
+		session.GetWorktreeSettings().SetupTimeout(),
+	)
 	if err != nil {
 		return hubForkWorktree{}, fmt.Errorf("worktree creation failed: %w", err)
 	}
@@ -1858,6 +1867,11 @@ func (b LocalActionBackend) Create(ctx context.Context, req CreateSessionRequest
 	inst.Command = command
 	if strings.TrimSpace(req.ModelID) != "" {
 		if err := inst.ApplyLaunchModel(req.ModelID); err != nil {
+			return "", err
+		}
+	}
+	if strings.TrimSpace(req.ReasoningEffort) != "" {
+		if err := inst.ApplyLaunchReasoningEffort(req.ReasoningEffort); err != nil {
 			return "", err
 		}
 	}
@@ -2415,6 +2429,11 @@ func (b LocalActionBackend) RenameGroup(ctx context.Context, req GroupRenameRequ
 	if err := storage.SaveWithGroups(groupTree.GetAllInstances(), groupTree); err != nil {
 		return GroupRenameResponse{}, err
 	}
+	if oldPath != newPath {
+		if err := storage.DeleteGroupSubtree(oldPath); err != nil {
+			return GroupRenameResponse{}, err
+		}
+	}
 	return GroupRenameResponse{OldPath: oldPath, Path: newPath, Name: group.Name}, nil
 }
 
@@ -2490,6 +2509,9 @@ func (b LocalActionBackend) DeleteGroup(ctx context.Context, req GroupDeleteRequ
 	if err := storage.SaveWithGroups(groupTree.GetAllInstances(), groupTree); err != nil {
 		return GroupDeleteResponse{}, err
 	}
+	if err := storage.DeleteGroupSubtree(groupPath); err != nil {
+		return GroupDeleteResponse{}, err
+	}
 	return GroupDeleteResponse{Path: groupPath, SessionsMoved: len(moved), MovedTo: session.DefaultGroupPath}, nil
 }
 
@@ -2521,6 +2543,11 @@ func (b LocalActionBackend) ReparentGroup(ctx context.Context, req GroupReparent
 	newPath := reparentedHubGroupPath(sourcePath, destPath)
 	if err := storage.SaveWithGroups(groupTree.GetAllInstances(), groupTree); err != nil {
 		return GroupReparentResponse{}, err
+	}
+	if sourcePath != newPath {
+		if err := storage.DeleteGroupSubtree(sourcePath); err != nil {
+			return GroupReparentResponse{}, err
+		}
 	}
 	return GroupReparentResponse{OldPath: sourcePath, Path: newPath, DestParentPath: destPath}, nil
 }

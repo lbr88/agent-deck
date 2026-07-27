@@ -669,19 +669,32 @@ func handleWorktreeFinish(profile string, args []string) {
 	// Step 5: Remove session from agent-deck.
 	//
 	// #1396: this must use the targeted RemoveSessionAndVerify path (the same
-	// one `session remove` uses), NOT saveSessionData/SaveWithGroups. When the
-	// finished worktree is the LAST session in the registry, `remaining` is
-	// empty and SaveWithGroups → SaveInstances([]) trips the S1 empty-sweep
-	// data-loss guard (ErrRefusingEmptySweep) — but only AFTER the irreversible
-	// merge/remove-worktree/delete-branch steps have already run, leaving an
-	// orphaned row pointing at a deleted worktree. RemoveSessionAndVerify
-	// issues a targeted DELETE + SaveGroupsOnly, so the last-session delete
-	// succeeds without ever calling SaveInstances([]).
+	// one `session remove` uses), NOT saveSessionData/SaveWithGroups.
+	// Historically SaveWithGroups(remaining) with an empty `remaining` tripped
+	// the S1 empty-sweep guard AFTER the irreversible git steps, orphaning the
+	// row; since #1550 SaveWithGroups is upsert-only and would not delete the
+	// row at all. Either way, removal requires the targeted DELETE.
 	remaining := dropInstance(instances, inst.ID)
 	groupTree := session.NewGroupTreeWithGroups(remaining, groups)
 	if err := storage.RemoveSessionAndVerify(inst.ID, remaining, groupTree); err != nil {
 		out.Error(fmt.Sprintf("failed to save session data: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
+	}
+
+	// Issue #1576: sweep transition-notifier state for the removed session,
+	// mirroring the #910 cleanup on `agent-deck rm` / `session remove`.
+	// Without this, `worktree finish` leaves orphan records in
+	// runtime/transition-notify-state.json and stale inbox JSONL lines that
+	// keep re-firing [EVENT] deliveries to the parent conductor. Best-effort:
+	// failures warn but never block the finish (the SQLite removal above is
+	// the user-visible contract).
+	if swept, err := session.SweepInboxesForChildSession(inst.ID); err != nil && !*jsonOutput {
+		fmt.Fprintf(os.Stderr, "warn: inbox sweep for %s failed: %v\n", inst.ID, err)
+	} else if swept > 0 && !*jsonOutput {
+		fmt.Fprintf(os.Stderr, "swept %d stale inbox event(s) for removed session\n", swept)
+	}
+	if _, err := session.RemoveNotifyStateRecord(inst.ID); err != nil && !*jsonOutput {
+		fmt.Fprintf(os.Stderr, "warn: notify-state sweep for %s failed: %v\n", inst.ID, err)
 	}
 
 	if *jsonOutput {

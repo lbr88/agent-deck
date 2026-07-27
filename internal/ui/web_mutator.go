@@ -111,12 +111,19 @@ func (m *WebMutator) beginHeadlessTx() (unlock func(), err error) {
 }
 
 // CreateSession creates and starts a new session, persisting it to storage.
-func (m *WebMutator) CreateSession(title, tool, projectPath, groupPath, modelID string) (string, error) {
+func (m *WebMutator) CreateSession(title, tool, projectPath, groupPath, modelID, reasoningEffort string) (string, error) {
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
 		return "", err
 	}
 	defer unlock()
+	// #1706: project_path is identity and must be absolute — the request may
+	// carry a relative path, which tmux would resolve against the tmux server's
+	// cwd rather than this process's.
+	projectPath, err = session.ResolveProjectPath(projectPath)
+	if err != nil {
+		return "", err
+	}
 	var inst *session.Instance
 	if groupPath != "" {
 		inst = session.NewInstanceWithGroupAndTool(title, projectPath, groupPath, tool)
@@ -129,6 +136,11 @@ func (m *WebMutator) CreateSession(title, tool, projectPath, groupPath, modelID 
 
 	if modelID = strings.TrimSpace(modelID); modelID != "" {
 		if err := inst.ApplyLaunchModel(modelID); err != nil {
+			return "", err
+		}
+	}
+	if reasoningEffort = strings.TrimSpace(reasoningEffort); reasoningEffort != "" {
+		if err := inst.ApplyLaunchReasoningEffort(reasoningEffort); err != nil {
 			return "", err
 		}
 	}
@@ -198,6 +210,7 @@ func (m *WebMutator) CreateSessionWithOptions(req web.CreateSessionRequest) (str
 			AdditionalPaths: append([]string(nil), req.AdditionalPaths...),
 			GroupPath:       req.GroupPath,
 			ModelID:         req.ModelID,
+			ReasoningEffort: req.ReasoningEffort,
 		}
 		if hubReq.ProjectPath == "" {
 			hubReq.ProjectPath = "."
@@ -217,7 +230,7 @@ func (m *WebMutator) CreateSessionWithOptions(req web.CreateSessionRequest) (str
 		return web.HubSessionWebID(req.HubNodeID, result.SessionID), nil
 	}
 	if len(req.AdditionalPaths) == 0 {
-		return m.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+		return m.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID, req.ReasoningEffort)
 	}
 	unlock, err := m.beginHeadlessTx()
 	if err != nil {
@@ -261,6 +274,11 @@ func (m *WebMutator) CreateSessionWithOptions(req web.CreateSessionRequest) (str
 	}
 	if msg.instance == nil {
 		return "", fmt.Errorf("create session returned no session")
+	}
+	if strings.TrimSpace(req.ReasoningEffort) != "" {
+		if err := msg.instance.ApplyLaunchReasoningEffort(req.ReasoningEffort); err != nil {
+			return "", err
+		}
 	}
 	m.finalizeCreatedSession(msg.instance)
 	return msg.instance.ID, nil
@@ -1161,7 +1179,15 @@ func (m *WebMutator) UpdateSession(id string, updates map[string]string) ([]stri
 			m.h.instancesMu.Unlock()
 			return nil, false, nil, err
 		}
-		if oldValue == value && field != session.FieldCodexSessionID {
+		// #1706: SetField canonicalizes a project path, so a request carrying
+		// another spelling of the stored path is a no-op — compare what was
+		// actually stored, not the raw request value, or it would be reported
+		// as changed and restart-required.
+		newValue := value
+		if field == session.FieldPath {
+			newValue = inst.ProjectPath
+		}
+		if oldValue == newValue && field != session.FieldCodexSessionID {
 			continue
 		}
 		changed = append(changed, field)
@@ -2135,13 +2161,23 @@ func (m *WebMutator) RenameGroup(groupPath, newName string) error {
 		return err
 	}
 	defer unlock()
-	m.h.groupTree.RenameGroup(groupPath, newName)
+	if err := m.h.groupTree.RenameGroup(groupPath, newName); err != nil {
+		return err
+	}
 
 	storage, err := session.NewStorageWithProfile(m.h.profile)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer storage.Close()
+
+	// SaveGroups is additive (never prunes), so the old path's rows must be
+	// deleted explicitly before the save re-adds the renamed paths — otherwise
+	// the group reappears under its old name on the next reload. Done before the
+	// save so a no-op rename (same name) is correctly re-added.
+	if err := storage.DeleteGroupSubtree(groupPath); err != nil {
+		return fmt.Errorf("delete old group rows: %w", err)
+	}
 
 	m.h.instancesMu.RLock()
 	instances := make([]*session.Instance, len(m.h.instances))
@@ -2430,14 +2466,20 @@ func (m *WebMutator) FinishWorktree(id string, opts web.WorktreeFinishOptions) (
 	}
 	m.h.instancesMu.RUnlock()
 	// #1396: use the targeted RemoveSessionAndVerify path, NOT
-	// SaveWithGroups(existing, ...). When the finished worktree is the LAST
-	// session, `existing` is empty and SaveWithGroups → SaveInstances([]) trips
-	// the S1 empty-sweep data-loss guard AFTER the irreversible git steps,
-	// orphaning the row. The targeted DELETE + SaveGroupsOnly path persists the
-	// last-session removal without ever calling SaveInstances([]).
+	// SaveWithGroups(existing, ...). Historically an empty `existing` tripped
+	// the S1 empty-sweep guard AFTER the irreversible git steps, orphaning the
+	// row; since #1550 SaveWithGroups is upsert-only and would not delete the
+	// row at all. Either way, removal requires the targeted DELETE.
 	if sErr := storage.RemoveSessionAndVerify(id, existing, m.h.groupTree); sErr != nil {
 		return web.WorktreeFinishResult{}, fmt.Errorf("save session data: %w", sErr)
 	}
+
+	// Issue #1576: sweep transition-notifier state (inbox JSONL lines +
+	// runtime/transition-notify-state.json dedup record) for the removed
+	// session, mirroring the #910 cleanup on `agent-deck rm`. Best-effort —
+	// never fails the finish.
+	_, _ = session.SweepInboxesForChildSession(id)
+	_, _ = session.RemoveNotifyStateRecord(id)
 
 	mergedInto := targetBranch
 	if opts.NoMerge {
@@ -2488,6 +2530,12 @@ func (m *WebMutator) DeleteGroup(groupPath string) error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer storage.Close()
+
+	// SaveGroups is additive (never prunes), so the deleted group's rows must be
+	// removed explicitly or the group resurrects on the next reload.
+	if err := storage.DeleteGroupSubtree(groupPath); err != nil {
+		return fmt.Errorf("delete group rows: %w", err)
+	}
 
 	m.h.instancesMu.RLock()
 	instances := make([]*session.Instance, len(m.h.instances))

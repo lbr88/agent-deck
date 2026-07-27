@@ -2,9 +2,12 @@ package tmux
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/childenv"
@@ -84,6 +87,46 @@ func attachTERMNeedsFallback(term string) bool {
 		return false
 	}
 }
+
+// tmuxSendKeysTimeoutDefault bounds a SINGLE `tmux send-keys` subprocess.
+//
+// The raw key-delivery primitives (sendKeysToTarget, sendEnterRawToTarget,
+// SendNamedKey, ensureInsertModeOnTarget, SendCtrlC/SendCtrlU) historically ran
+// cmd.Run() with NO deadline. Against a pane whose program is transiently not
+// draining its input pty, `tmux send-keys` blocks inside Run() indefinitely.
+//
+// WaitDelay (tmuxSubprocessWaitDelay) does NOT save us here: it only bounds the
+// stdio-drain race AFTER the process exits or its context is canceled, and a
+// never-exiting send-keys never reaches that point. When an OUTER bound finally
+// fires — the --no-wait wake-nudge's 5s context, or a daemon poll cycle — it
+// kills the `agent-deck` process but the blocked `tmux send-keys` GRANDCHILD is
+// reparented to launchd/init and hangs forever. Observed in production as 9h-old
+// `tmux send-keys` zombies, one of which was a launchd heartbeat that held its
+// launchd slot and killed that conductor's heartbeat entirely.
+//
+// 3s is far more than any healthy send-keys (<50ms) yet bounds the wedge so the
+// caller fails fast and the durable pull model redelivers on the next turn.
+const tmuxSendKeysTimeoutDefault = 3 * time.Second
+
+// tmuxSendKeysTimeout is the live send-keys deadline. It is a var (seeded from
+// the const above) ONLY so tests can shrink it to keep the timeout suite fast
+// and deterministic; production never mutates it.
+var tmuxSendKeysTimeout = tmuxSendKeysTimeoutDefault
+
+// sendKeysReapGrace bounds how long runSendKeysBounded waits for a SIGKILL'd
+// process group to be reaped before returning anyway. A process wedged in
+// uninterruptible (D-state) sleep cannot be killed; the buffered wait channel
+// lets the reaper goroutine exit on its own later, so this grace guarantees the
+// caller is never blocked past tmuxSendKeysTimeout + sendKeysReapGrace.
+const sendKeysReapGrace = 2 * time.Second
+
+// errSendKeysTimeout is the benign sentinel returned when a send-keys exec is
+// SIGKILL'd for exceeding tmuxSendKeysTimeout. It wraps context.DeadlineExceeded
+// so callers can classify it with errors.Is(err, context.DeadlineExceeded). The
+// wake-nudge wiring treats it like any dropped nudge (the durable record drains
+// on the parent's next turn); the send-verify retry loop treats it as a failed
+// attempt and retries within its budget — neither hard-fails or panics.
+var errSendKeysTimeout = fmt.Errorf("tmux send-keys exceeded %s deadline: %w", tmuxSendKeysTimeoutDefault, context.DeadlineExceeded)
 
 // defaultSocketName is the process-wide socket used by package-level tmux
 // probes (version checks, list-all-sessions, duplicate-session reaping)
@@ -182,9 +225,13 @@ func tmuxArgs(socketName string, args ...string) []string {
 // `exec.Command("tmux", args...)`, preserving the contract of every
 // pre-v1.7.50 call site that was rewritten in #697.
 func tmuxExec(socketName string, args ...string) *exec.Cmd {
-	// #nosec G204 -- "tmux" is a fixed binary; args are constructed by
-	// agent-deck call sites (subcommand + internal -L socket plumbing),
-	// never from external input.
+	// Refuse, before the subprocess exists, to point a test binary at the
+	// user's live default server. See default_socket_guard.go.
+	assertTmuxSpawnIsolated(socketName, args)
+	// #nosec G204,G702 -- "tmux" is a fixed binary and every dynamic value is
+	// passed as a distinct argv element, never through a shell. Call sites may
+	// supply user-selected paths, but those cannot alter the executable or argv
+	// boundaries.
 	cmd := exec.Command("tmux", tmuxArgs(socketName, args...)...)
 	cmd.WaitDelay = tmuxSubprocessWaitDelay
 	return cmd
@@ -195,6 +242,7 @@ func tmuxExec(socketName string, args ...string) *exec.Cmd {
 // timeout (e.g. SetEnvironment at internal/tmux/tmux.go:1412); this keeps
 // the -L plumbing centralised for them too.
 func tmuxExecContext(ctx context.Context, socketName string, args ...string) *exec.Cmd {
+	assertTmuxSpawnIsolated(socketName, args)
 	cmd := exec.CommandContext(ctx, "tmux", tmuxArgs(socketName, args...)...)
 	cmd.WaitDelay = tmuxSubprocessWaitDelay
 	return cmd
@@ -215,6 +263,184 @@ func (s *Session) tmuxCmd(args ...string) *exec.Cmd {
 // tmuxCmdContext mirrors tmuxCmd for the context-aware call sites.
 func (s *Session) tmuxCmdContext(ctx context.Context, args ...string) *exec.Cmd {
 	return tmuxExecContext(ctx, s.SocketName, args...)
+}
+
+// runSendKeysBounded runs a pre-built `tmux send-keys` command under
+// tmuxSendKeysTimeout, in its OWN process group, SIGKILL-ing the WHOLE group on
+// timeout so a wedged send-keys — and any grandchild it forked — is reaped
+// instead of being orphaned to launchd/init. This is the deadline + group-kill
+// that the historical bare cmd.Run() lacked (see tmuxSendKeysTimeoutDefault).
+//
+// The command is built by the caller (via the keySenderExec seam or tmuxCmd) so
+// the existing argv-recording test seams keep working unchanged; this wrapper
+// only owns the lifecycle. Mirrors the Setpgid + negative-pid SIGKILL pattern
+// already used by controlpipe.go / softKillProcessGroup.
+//
+// Returns nil on clean exit, the process's own error on non-timeout failure
+// (preserving the previous cmd.Run() contract), or errSendKeysTimeout (which
+// wraps context.DeadlineExceeded) when the deadline fired.
+func runSendKeysBounded(cmd *exec.Cmd) error {
+	if cmd == nil {
+		return nil
+	}
+	// Own process group so the timeout can SIGKILL the entire subtree, not just
+	// the immediate send-keys child.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1) // buffered: the waiter can always send & exit
+	go func() { done <- cmd.Wait() }()
+
+	timer := time.NewTimer(tmuxSendKeysTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		// The process may have completed in the scheduling window between the
+		// timer firing and this branch being selected. Drain non-blockingly
+		// first: if it already finished, return its result rather than
+		// SIGKILL'ing a group whose leader PID may be reaped (and reused).
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+		killSendKeysGroup(cmd)
+		// Best-effort reap so we don't leak a zombie, but bounded: a process
+		// wedged in uninterruptible sleep must not make us hang past the grace.
+		select {
+		case <-done:
+		case <-time.After(sendKeysReapGrace):
+		}
+		return errSendKeysTimeout
+	}
+}
+
+// killSendKeysGroup SIGKILLs the process group led by cmd's process. Setpgid
+// (set in runSendKeysBounded before Start) made the child a group leader, so the
+// negative-pid signal reaps the child plus any grandchild it forked.
+func killSendKeysGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
+
+// tmuxPollTimeout bounds the short, read-only tmux queries and option-set
+// commands agent-deck fires on a cadence: status-bar refreshes, pane-path and
+// dead-state probes, and client enumeration. These commands target a server
+// that may be wedged, and a tmux client whose target session was destroyed
+// mid-exchange can spin on its poll loop at 100% CPU instead of exiting
+// (observed on tmux 3.0a). Bare tmuxExec(...).Run()/.Output() has no deadline,
+// so the client hangs forever; if the owning TUI later dies the kernel
+// reparents the spinning client to init/systemd and nothing reaps it — the
+// exact orphan-busy-loop class that leaks whole CPU cores. Wrapping each poll
+// in a context lets exec.CommandContext SIGKILL a stuck client. 3s is ~60x the
+// typical <50ms runtime and mirrors hasSessionProbeTimeout.
+var tmuxPollTimeout = 3 * time.Second
+
+// runBoundedOutput runs a short, read-only tmux query under tmuxPollTimeout and
+// returns its stdout. It is the timeout-guarded replacement for the bare
+// tmuxExec(socket, args...).Output() pattern at status/poll call sites.
+func runBoundedOutput(socketName string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
+	defer cancel()
+	return tmuxExecContext(ctx, socketName, args...).Output()
+}
+
+// runBoundedRun runs a short tmux command (typically a status set-option batch)
+// under tmuxPollTimeout, discarding stdout. Timeout-guarded replacement for the
+// bare tmuxExec(socket, args...).Run() / s.tmuxCmd(args...).Run() status sites.
+func runBoundedRun(socketName string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxPollTimeout)
+	defer cancel()
+	return tmuxExecContext(ctx, socketName, args...).Run()
+}
+
+// runBoundedOutput is the per-Session convenience wrapper, targeting the
+// session's own socket (see tmuxCmd for why the socket must not drift).
+func (s *Session) runBoundedOutput(args ...string) ([]byte, error) {
+	return runBoundedOutput(s.SocketName, args...)
+}
+
+// runBoundedRun is the per-Session convenience wrapper for status/option
+// commands that produce no output.
+func (s *Session) runBoundedRun(args ...string) error {
+	return runBoundedRun(s.SocketName, args...)
+}
+
+// tmuxMutationTimeout bounds the state-CHANGING tmux commands: kill-session,
+// switch-client, detach-client. The fd leak that motivates every deadline in
+// this file is a property of the tmux CLIENT, not of the subcommand it carries,
+// so a mutation client wedges exactly like a poll client — and these run on the
+// same cadences (the notification-bar sweep issues one switch/detach per
+// attached client; kill-session runs on every teardown).
+//
+// It is deliberately longer than tmuxPollTimeout. The asymmetry is in what a
+// FALSE timeout costs: a read that gives up too early is re-issued by the next
+// poll a second later, while a kill-session abandoned early can leave a session
+// the user asked to be gone lingering until the next sweep. Both directions are
+// tolerated at the call sites — Kill/KillAndWait re-probe Exists() and treat
+// "gone" as success, SwitchAttachedClients falls back to a focus_request,
+// DetachClientsOnSockets leaves the TUI attached where it was — so the failure
+// mode is a no-op, never a corrupted half-state.
+var tmuxMutationTimeout = 5 * time.Second
+
+// errTmuxTimeout marks a command we abandoned at its deadline, as opposed to
+// one tmux answered with a failure. Callers need the distinction: "we gave up"
+// is a benign, retryable non-event that should fall through to a slower path,
+// while "tmux said no" is a real error that must surface. Without it every
+// timeout arrives as an opaque `signal: killed` ExitError and gets treated as
+// the latter.
+var errTmuxTimeout = errors.New("tmux command exceeded its deadline")
+
+// annotateDeadline wraps a failed run with errTmuxTimeout when the command's
+// context deadline had fired, preserving the original error for logs. The
+// deadline only matters for a run that FAILED: a command can complete
+// successfully just as its deadline expires, and that is a success.
+func annotateDeadline(ctxErr, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", errTmuxTimeout, err)
+	}
+	return err
+}
+
+// runBoundedMutation runs a state-changing tmux command under
+// tmuxMutationTimeout. Timeout-guarded replacement for the bare
+// tmuxExec(socket, args...).Run() / s.tmuxCmd(args...).Run() mutation sites.
+// A deadline failure comes back wrapped in errTmuxTimeout.
+func runBoundedMutation(socketName string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxMutationTimeout)
+	defer cancel()
+	err := tmuxExecContext(ctx, socketName, args...).Run()
+	return annotateDeadline(ctx.Err(), err)
+}
+
+// runBoundedMutation is the per-Session convenience wrapper, targeting the
+// session's own socket (see tmuxCmd for why the socket must not drift).
+func (s *Session) runBoundedMutation(args ...string) error {
+	return runBoundedMutation(s.SocketName, args...)
+}
+
+// OutputBounded is the public counterpart to runBoundedOutput, for cadence
+// queries fired from outside internal/tmux (internal/session pane-PID probes,
+// CLI helpers). Prefer it over Exec(...).Output() for anything on a timer:
+// Exec has no deadline, and a tmux client that has leaked its fd table spins
+// at 100% CPU forever rather than exiting, so an unbounded .Output() never
+// returns. See tmuxPollTimeout.
+func OutputBounded(socketName string, args ...string) ([]byte, error) {
+	return runBoundedOutput(socketName, args...)
 }
 
 // Exec is the public package counterpart to tmuxExec. Call sites outside
@@ -247,5 +473,9 @@ func ExecContext(ctx context.Context, socketName string, args ...string) *exec.C
 // Empty / whitespace-only socket name returns the input args unchanged, so
 // pre-v1.7.50 call sites see byte-identical argv.
 func buildInnerTmuxArgs(socketName string, args ...string) []string {
+	// This argv is always spawned (directly, or spliced into a systemd-run
+	// argv), so it needs the same refusal as the exec factories — the layer of
+	// indirection is the only difference. See default_socket_guard.go.
+	assertTmuxSpawnIsolated(socketName, args)
 	return tmuxArgs(socketName, args...)
 }

@@ -78,6 +78,13 @@ type hookStatusFile struct {
 	// (issue #1186 flush race). The daemon re-scans this path on its poll
 	// loop; the synchronous Stop hook (#1225) must not wait out the flush.
 	TranscriptPath string `json:"transcript_path,omitempty"`
+	// Cwd is the working directory the hook payload reported for this event.
+	// Issue #1729: the session-binding path uses it as same-session evidence —
+	// a candidate session id whose cwd is provably outside the instance's
+	// declared paths (e.g. a headless `claude -p` worker at $TMPDIR that
+	// inherited AGENTDECK_INSTANCE_ID) must never bind. omitempty keeps legacy
+	// files byte-identical when the agent sends no cwd.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 // normalizeHookEventKey folds hook event names from Claude (PascalCase), Cursor
@@ -205,9 +212,9 @@ func handleHookHandler() {
 	}
 
 	if isStopHookEvent(payload.HookEventName) {
-		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, detectDoneSentinel(data))
+		writeHookStatusWithScan(instanceID, status, sessionID, payload.HookEventName, payload.Cwd, detectDoneSentinel(data))
 	} else {
-		writeHookStatus(instanceID, status, sessionID, payload.HookEventName)
+		writeHookStatus(instanceID, status, sessionID, payload.HookEventName, payload.Cwd)
 	}
 
 	// #572: Sync agent-deck title from Claude Code's --name / /rename value.
@@ -215,6 +222,10 @@ func handleHookHandler() {
 	// no-op when no name is set (sessions started without --name keep the
 	// existing agent-deck adjective-noun title).
 	applyClaudeTitleSync(instanceID, sessionID)
+
+	// Propagate Claude Code's /cd working-directory change (v2.1.169+) so the
+	// TUI/web display and transcript lookups track the current cwd.
+	applyClaudeCwdSync(instanceID, payload.Cwd)
 
 	// Write cost event if this hook contains usage data
 	logCostDebug("hook event=%s instance=%s status=%s", payload.HookEventName, instanceID, status)
@@ -230,6 +241,20 @@ func handleHookHandler() {
 	// unchanged.
 	if normalizeHookEventKey(payload.HookEventName) == "permissionrequest" && parentIsDSP() {
 		fmt.Println(`{"hookSpecificOutput":{"hookEventName":"PermissionRequest","permissionDecision":"allow"}}`)
+	}
+
+	// Conductor fleet snapshot: on the Claude turn-start edges (UserPromptSubmit,
+	// SessionStart), a parent session gets a compact children-status snapshot
+	// injected as additionalContext. State, not events — complements the #1225
+	// Stop-edge drain below, which delivers queued deltas. No-op for sessions
+	// without children; AGENTDECK_NO_CHILDREN_CONTEXT=1 opts a session out.
+	if ctxEvent := claudeContextEventName(payload.HookEventName); ctxEvent != "" &&
+		os.Getenv("AGENTDECK_NO_CHILDREN_CONTEXT") != "1" {
+		if summary := buildChildrenContextSummary(instanceID); summary != "" {
+			if out := childrenContextJSON(ctxEvent, summary); out != "" {
+				fmt.Println(out)
+			}
+		}
 	}
 
 	// Issue #1225: on the Stop edge (the turn boundary), a parent drains its
@@ -273,24 +298,24 @@ func parentIsDSP() bool {
 // writeHookStatus writes a hook status file atomically for one instance.
 // The optional done argument carries a completion sentinel (issue #1186);
 // when supplied its status/summary are persisted alongside the hook status.
-func writeHookStatus(instanceID, status, sessionID, event string, done ...session.DoneSignal) {
+func writeHookStatus(instanceID, status, sessionID, event, cwd string, done ...session.DoneSignal) {
 	scan := doneScanResult{}
 	if len(done) > 0 {
 		scan.signal = &done[0]
 	}
-	writeHookStatusWithScan(instanceID, status, sessionID, event, scan)
+	writeHookStatusWithScan(instanceID, status, sessionID, event, cwd, scan)
 }
 
 // writeHookStatusWithScan is writeHookStatus plus the full Stop-edge scan
 // outcome: a parsed sentinel persists as done_status/done_summary; an
 // unflushed tail persists as transcript_path so the daemon can finish the
 // scan (issue #1186 flush race).
-func writeHookStatusWithScan(instanceID, status, sessionID, event string, scan doneScanResult) {
-	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, scan, nil)
+func writeHookStatusWithScan(instanceID, status, sessionID, event, cwd string, scan doneScanResult) {
+	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, cwd, scan, nil)
 }
 
 func writeCodexHookStatus(instanceID, status, sessionID, event string) {
-	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, doneScanResult{},
+	writeHookStatusWithScanValidated(instanceID, status, sessionID, event, "", doneScanResult{},
 		func(instanceID, candidateID string) bool {
 			codexHome := session.GetCodexHomeDir()
 			if session.CodexHookCandidateRejectedByBindingFloor(instanceID, candidateID, codexHome) {
@@ -306,7 +331,7 @@ func writeCodexHookStatus(instanceID, status, sessionID, event string) {
 // writeHookStatusWithScanValidated runs validate while holding the shared
 // per-instance hook lock, before either the sticky anchor or JSON is replaced.
 func writeHookStatusWithScanValidated(
-	instanceID, status, sessionID, event string,
+	instanceID, status, sessionID, event, cwd string,
 	scan doneScanResult,
 	validate func(instanceID, sessionID string) bool,
 ) {
@@ -357,6 +382,7 @@ func writeHookStatusWithScanValidated(
 		SessionID: sessionID,
 		Event:     event,
 		Timestamp: time.Now().Unix(),
+		Cwd:       strings.TrimSpace(cwd),
 	}
 	if scan.signal != nil {
 		statusFile.DoneStatus = scan.signal.Status

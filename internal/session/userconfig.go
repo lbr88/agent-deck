@@ -145,6 +145,9 @@ type UserConfig struct {
 	// Kiro defines Kiro CLI integration settings
 	Kiro KiroSettings `toml:"kiro,omitempty"`
 
+	// Cursor defines Cursor Agent CLI integration settings (Issue #1672)
+	Cursor CursorSettings `toml:"cursor,omitempty"`
+
 	// Copilot defines GitHub Copilot CLI integration settings (Issue #556)
 	Copilot CopilotSettings `toml:"copilot,omitempty"`
 
@@ -243,6 +246,9 @@ type UserConfig struct {
 	// Stage 1 (v1.9.67) is observe-only: it logs what it WOULD do, takes no
 	// action. See SelfHealSettings.
 	SelfHeal SelfHealSettings `toml:"selfheal,omitempty"`
+
+	// Performance holds opt-in resource tuning for multi-instance setups.
+	Performance PerformanceSettings `toml:"performance,omitempty"`
 }
 
 // SelfHealSettings controls the self-heal supervision policy (SELF-HEAL-DESIGN.md
@@ -322,6 +328,27 @@ func (s SelfHealSettings) IsSessionOptedOut(id, title string) bool {
 	return false
 }
 
+// PerformanceSettings tunes background-work sharing between concurrent
+// agent-deck instances.
+type PerformanceSettings struct {
+	// ClaimPolling enables per-session ownership claims in state.db: each
+	// session is actively polled by exactly one instance; others render its
+	// status from the DB. Default false (every instance polls everything,
+	// today's behavior).
+	//
+	//	[performance]
+	//	claim_polling = true
+	ClaimPolling *bool `toml:"claim_polling,omitempty"`
+}
+
+// ClaimPollingEnabled reports whether claim-based polling is enabled.
+func (c *UserConfig) ClaimPollingEnabled() bool {
+	if c == nil || c.Performance.ClaimPolling == nil {
+		return false
+	}
+	return *c.Performance.ClaimPolling
+}
+
 // UISettings controls TUI layout proportions.
 // See issue #1092.
 type UISettings struct {
@@ -331,11 +358,26 @@ type UISettings struct {
 	// Adjustable at runtime via < and > keybindings (5% step).
 	PreviewPct int `toml:"preview_pct,omitzero"`
 
+	// PreviewOrientation controls where the PREVIEW pane sits relative to
+	// the SESSIONS list on wide terminals (>= 80 cols). "right" (default)
+	// keeps the historical side-by-side split; "below" stacks PREVIEW under
+	// SESSIONS (useful on tall/portrait monitors). Narrow terminals always
+	// stack regardless. Toggle at runtime with the `O` keybinding.
+	PreviewOrientation string `toml:"preview_orientation,omitempty"`
+
 	// ITermOpenAs controls whether Shift+Enter pops the focused session
 	// into a new iTerm2 *tab* or a new iTerm2 *window* on macOS. Valid
 	// values: "tab", "window". Empty defaults to "tab" (iTerm's natural
 	// UX). Issue #1100, follow-up to #1098 — credit @ddorman-dn.
 	ITermOpenAs string `toml:"iterm_open_as,omitempty"`
+	// ShellSplit controls the terminal used by the open_shell_here hotkey.
+	// Valid values:
+	//   "iterm"  — always open an iTerm2 vertical split pane (macOS only)
+	//   "tmux"   — always open a new tmux window
+	//   ""       — auto: use iTerm2 split when LC_TERMINAL=iTerm2 or
+	//              TERM_PROGRAM=iTerm.app, otherwise tmux
+	// Default: "" (auto). Issue #1470.
+	ShellSplit string `toml:"shell_split,omitempty"`
 	// RemoteLatencyRefreshSecs sets how often the TUI re-measures the
 	// round-trip latency to each configured remote (issue #1103). Valid
 	// range: 2-300. Default: matches [system_stats].refresh_seconds (5s)
@@ -395,6 +437,15 @@ type UISettings struct {
 	// (`new_session_enter_advances = false` → restores the legacy Enter-submits
 	// behavior). Set `= true` (or leave unset) to keep the new default.
 	NewSessionEnterAdvances *bool `toml:"new_session_enter_advances"`
+
+	// AttachOnCreate controls whether creating a session in the TUI (the `n`
+	// new-session dialog) immediately attaches to the new session's pane
+	// instead of only moving the cursor to it. Default false: creating a
+	// session selects it (today's behavior) and the user presses Enter to
+	// attach. Set `= true` to "instantly open" each new session. CLI
+	// `add`/`session start` are unaffected by this flag — they attach only
+	// with an explicit `--attach`.
+	AttachOnCreate bool `toml:"attach_on_create,omitempty"`
 }
 
 // normalizeUIHiddenTools lowercases, dedupes, and drops unknown entries from
@@ -461,6 +512,21 @@ const (
 	ITermOpenAsTab     = "tab"
 	ITermOpenAsWindow  = "window"
 	DefaultITermOpenAs = ITermOpenAsTab
+)
+
+// ShellSplit modes for the open_shell_here hotkey (issue #1470).
+const (
+	ShellSplitITerm = "iterm"
+	ShellSplitTmux  = "tmux"
+)
+
+// Preview-pane orientation modes for wide terminals (>= 80 cols).
+// "right" is the historical side-by-side split; "below" stacks the
+// PREVIEW pane under the SESSIONS list (portrait-monitor friendly).
+const (
+	PreviewOrientationRight   = "right"
+	PreviewOrientationBelow   = "below"
+	DefaultPreviewOrientation = PreviewOrientationRight
 )
 
 // Footer hint-bar styles. See UISettings.Footer.
@@ -536,6 +602,32 @@ func (u UISettings) GetITermOpenAs() string {
 	return DefaultITermOpenAs
 }
 
+// GetShellSplit returns the configured shell-split mode. Unknown or empty
+// values return "" (auto-detect). Matching is case-insensitive.
+func (u UISettings) GetShellSplit() string {
+	switch strings.ToLower(strings.TrimSpace(u.ShellSplit)) {
+	case ShellSplitITerm:
+		return ShellSplitITerm
+	case ShellSplitTmux:
+		return ShellSplitTmux
+	}
+	return ""
+}
+
+// GetPreviewOrientation returns the configured preview-pane orientation
+// for wide terminals. Unknown or empty values fall through to the default
+// ("right"). Matching is case-insensitive so users can write "Below" or
+// "RIGHT" in TOML.
+func (u UISettings) GetPreviewOrientation() string {
+	switch strings.ToLower(strings.TrimSpace(u.PreviewOrientation)) {
+	case PreviewOrientationBelow:
+		return PreviewOrientationBelow
+	case PreviewOrientationRight:
+		return PreviewOrientationRight
+	}
+	return DefaultPreviewOrientation
+}
+
 // Remote session-list poll cadence bounds (issue #1170). The default is
 // deliberately tighter than the historical hardcoded 30s so new remote
 // sessions surface promptly; the min keeps a floor on SSH frequency.
@@ -574,6 +666,12 @@ func (u UISettings) GetNewSessionEnterAdvances() bool {
 		return true // Default: ON (Enter advances; Ctrl+S submits).
 	}
 	return *u.NewSessionEnterAdvances
+}
+
+// GetAttachOnCreate reports whether the TUI should attach to a newly created
+// session immediately instead of only selecting it. Default false.
+func (u UISettings) GetAttachOnCreate() bool {
+	return u.AttachOnCreate
 }
 
 // GetRemoteLatencyRefreshSecs returns the remote latency refresh interval
@@ -754,12 +852,16 @@ type GroupClaudeSettings struct {
 	Env map[string]string `toml:"env,omitempty"`
 
 	// Skills lists declarative skill-loadout entries ("<source>/<name>")
-	// to attach to sessions in this group. Reserved schema home for the
-	// loadout follow-up; surfaced by `group show --resolved`.
+	// attached to sessions in this group at create and re-asserted on
+	// every start (ApplyConfiguredLoadout — attach-only floor semantics).
 	Skills []string `toml:"skills,omitempty"`
 
-	// MCPs lists [mcps.X] catalog names to attach to sessions in this
-	// group. Reserved schema home for the loadout follow-up.
+	// Plugins lists [plugins.X] catalog keys unioned into Instance.Plugins.
+	// Catalog resolution remains the single plugin enablement path.
+	Plugins []string `toml:"plugins,omitempty"`
+
+	// MCPs lists [mcps.X] catalog names appended to the local .mcp.json
+	// of sessions in this group. Same floor semantics as Skills.
 	MCPs []string `toml:"mcps,omitempty"`
 }
 
@@ -813,12 +915,15 @@ type ConductorClaudeSettings struct {
 	// AFTER the group env map (conductor wins per key on conflict).
 	Env map[string]string `toml:"env,omitempty"`
 
-	// Skills lists declarative skill-loadout entries ("<source>/<name>").
-	// Reserved schema home for the loadout follow-up.
+	// Skills lists declarative skill-loadout entries ("<source>/<name>")
+	// unioned on top of the group floor for this conductor's sessions.
 	Skills []string `toml:"skills,omitempty"`
 
-	// MCPs lists [mcps.X] catalog names. Reserved schema home for the
-	// loadout follow-up.
+	// Plugins lists [plugins.X] catalog keys unioned on top of the group floor.
+	Plugins []string `toml:"plugins,omitempty"`
+
+	// MCPs lists [mcps.X] catalog names unioned on top of the group
+	// floor. Same semantics as Skills.
 	MCPs []string `toml:"mcps,omitempty"`
 }
 
@@ -1503,9 +1608,15 @@ func (c *UserConfig) GetGroupClaudeSkills(groupPath string) []string {
 	return c.unionGroupClaudeList(groupPath, func(s GroupClaudeSettings) []string { return s.Skills })
 }
 
+// GetGroupClaudePlugins returns the union of catalog plugin keys along the
+// group ancestor chain, deduplicated and root-first.
+func (c *UserConfig) GetGroupClaudePlugins(groupPath string) []string {
+	return c.unionGroupClaudeList(groupPath, func(s GroupClaudeSettings) []string { return s.Plugins })
+}
+
 // GetGroupClaudeMCPs returns the union of [mcps.X] catalog names along the
 // group ancestor chain, deduplicated, root-first. Same floor semantics as
-// GetGroupClaudeSkills.
+// GetGroupClaudePlugins.
 func (c *UserConfig) GetGroupClaudeMCPs(groupPath string) []string {
 	return c.unionGroupClaudeList(groupPath, func(s GroupClaudeSettings) []string { return s.MCPs })
 }
@@ -1637,12 +1748,21 @@ func (c *UserConfig) GetConductorClaudeSkills(name string) []string {
 		return nil
 	}
 	// Defensive copy — see GetConductorClaudeEnv. Callers must not mutate the
-	// cached slice; GetGroupClaudeSkills likewise returns a fresh union slice.
+	// cached slice; the group skill getter likewise returns a fresh union slice.
+	return append([]string(nil), src...)
+}
+
+// GetConductorClaudePlugins returns conductor-specific catalog plugin keys.
+func (c *UserConfig) GetConductorClaudePlugins(name string) []string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return nil
+	}
+	src := c.Conductors[name].Claude.Plugins
 	return append([]string(nil), src...)
 }
 
 // GetConductorClaudeMCPs returns the conductor-specific [mcps.X] catalog
-// names, if configured. Same floor semantics as GetConductorClaudeSkills.
+// names, if configured. Same floor semantics as GetConductorClaudePlugins.
 func (c *UserConfig) GetConductorClaudeMCPs(name string) []string {
 	if c == nil || name == "" || c.Conductors == nil {
 		return nil
@@ -1736,6 +1856,14 @@ type OpenCodeSettings struct {
 	// Command overrides the default binary/invocation for OpenCode sessions.
 	// Supports flags (e.g., "opencode --custom-flag"). Default: "opencode"
 	Command string `toml:"command,omitempty"`
+
+	// DisableSSEStatus turns off SSE-based status tracking (issue #1614).
+	// By default agent-deck launches OpenCode with an explicit --port so its
+	// /event SSE stream can drive real-time status (green while busy, yellow
+	// when waiting) instead of tmux content sniffing. Set true if your
+	// OpenCode version predates the top-level --port flag or you don't want
+	// a localhost event server bound per session.
+	DisableSSEStatus bool `toml:"disable_sse_status,omitempty"`
 }
 
 // CodexSettings defines Codex CLI configuration
@@ -1789,6 +1917,26 @@ func (c *UserConfig) GetProfileCodexConfigDir(profile string) string {
 		return ""
 	}
 	return ExpandPath(profileCfg.Codex.ConfigDir)
+}
+
+// CursorSettings defines Cursor Agent CLI integration configuration (Issue #1672).
+type CursorSettings struct {
+	// HooksEnabled enables Cursor Agent CLI hooks for real-time status detection.
+	// When enabled, agent-deck silently injects lifecycle hooks into
+	// ~/.cursor/hooks.json on TUI startup whenever the cursor binary is on PATH.
+	// Set false to durably opt out of that auto-install; `agent-deck
+	// cursor-hooks uninstall` persists this automatically so the uninstall
+	// survives TUI restarts. Mirrors [claude] hooks_enabled.
+	// Default: true (nil = use default true, set false to disable)
+	HooksEnabled *bool `toml:"hooks_enabled,omitempty"`
+}
+
+// GetHooksEnabled returns whether Cursor Agent hooks are enabled, defaulting to true
+func (c *CursorSettings) GetHooksEnabled() bool {
+	if c.HooksEnabled == nil {
+		return true
+	}
+	return *c.HooksEnabled
 }
 
 // CopilotSettings defines GitHub Copilot CLI configuration (Issue #556).
@@ -1897,6 +2045,27 @@ type WorktreeSettings struct {
 	// systemd, docker). Reporter @Clindbergh flagged the v1.7.65 behaviour
 	// (`0 = default`) as counter-convention in the PR review for #727.
 	SetupTimeoutSeconds *int `toml:"setup_timeout_seconds,omitempty"`
+
+	// SparseCheckout controls whether a new worktree inherits the invoking
+	// worktree's sparse-checkout configuration (issue #1708):
+	//   ""/"off" (default) → today's behavior: plain `git worktree add`
+	//   "inherit"          → capture the source worktree's mode + patterns and
+	//                        create with --no-checkout, so a sparse monorepo
+	//                        never materializes the full tree first
+	// Unknown values are treated as "off" so a typo can never change checkout
+	// behavior. String (not bool) to leave room for future modes.
+	SparseCheckout string `toml:"sparse_checkout,omitempty"`
+}
+
+// WorktreeSparseCheckoutInherit is the only value of [worktree] sparse_checkout
+// that turns inheritance on (#1708).
+const WorktreeSparseCheckoutInherit = "inherit"
+
+// InheritSparseCheckout reports whether worktree creation should inherit the
+// invoking worktree's sparse-checkout state. Matching is case- and
+// whitespace-insensitive; every other value (including "off" and typos) is false.
+func (w WorktreeSettings) InheritSparseCheckout() bool {
+	return strings.EqualFold(strings.TrimSpace(w.SparseCheckout), WorktreeSparseCheckoutInherit)
 }
 
 // DefaultWorktreeSetupTimeout is the fallback used when no explicit value is
@@ -3390,6 +3559,15 @@ func MergeToolPatterns(toolName string) *tmux.RawPatterns {
 		return nil
 	}
 
+	// #1577: a custom tool with no built-in defaults of its own inherits the
+	// preset it declares via `compatible_with`. This only fires when the tool
+	// name has no built-in patterns (defaults == nil), so every built-in tool
+	// is byte-identical in behavior. Explicit replace/extra fields on the
+	// ToolDef still override below.
+	if defaults == nil && toolDef != nil && strings.TrimSpace(toolDef.CompatibleWith) != "" {
+		defaults = tmux.DefaultRawPatterns(toolDef.CompatibleWith)
+	}
+
 	// Build overrides from ToolDef's replace fields (BusyPatterns, PromptPatterns, SpinnerChars)
 	var overrides *tmux.RawPatterns
 	if toolDef != nil && (toolDef.BusyPatterns != nil || toolDef.PromptPatterns != nil || toolDef.SpinnerChars != nil) {
@@ -3909,6 +4087,22 @@ func CreateExampleConfig() error {
 #                             # cycle forward (Ctrl+A to go back); it auto-
 #                             # attaches ~1s after you stop, Enter attaches now,
 #                             # Esc cancels. Same key opens it from the list.
+# Scrollback pager (issue #1491). The deck's Enter-attach renders the session in
+# tmux control mode, where the deck owns the viewport and tmux's own copy-mode /
+# mouse-wheel scrollback is unreachable. This trigger opens an in-view scrollable
+# pager over the pane's history so you can reach the start of a long session
+# without leaving agent-deck. Inside: Up/Down/j/k, PgUp/PgDn, g=start, G=live end,
+# wheel scrolls, Esc re-attaches, Ctrl+Q returns to the list.
+#   "pageup"  (default) a bare PageUp opens the pager; modified PageUp passes
+#             through to the attached program. When the attached app is in the
+#             alternate screen (a full-screen TUI such as Claude fullscreen),
+#             bare PageUp also passes through so the app's own scrollback works —
+#             the pager would be empty there (alt-screen keeps no tmux history).
+#   "ctrl+<letter>"  a control chord opens it (use if a pager/editor inside the
+#             session needs PageUp). A chord that collides with detach/switch is
+#             dropped.
+#   ""        disables the feature.
+# scrollback = "pageup"
 
 # Instance behavior (optional)
 # [instances]
@@ -3954,6 +4148,9 @@ func CreateExampleConfig() error {
 # default_model = "anthropic/claude-sonnet-4-5-20250929"
 # Default agent for new sessions
 # default_agent = ""
+# Disable SSE-based status tracking (issue #1614). When disabled, OpenCode is
+# launched without --port and status falls back to tmux content sniffing.
+# disable_sse_status = true
 
 # Codex CLI integration
 # [codex]

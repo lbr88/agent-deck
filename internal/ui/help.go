@@ -169,6 +169,7 @@ func (h *HelpOverlay) View() string {
 	reorderUpKeys := "+ / K / Shift+↑"
 	reorderDownKeys := "- / J / Shift+↓"
 	indentKeys := "Shift+→/←"
+	pinKeys := ","
 	searchKey := h.key(hotkeySearch, "/")
 	settingsKey := h.key(hotkeySettings, "S")
 	helpKey := h.key(hotkeyHelp, "?")
@@ -188,12 +189,17 @@ func (h *HelpOverlay) View() string {
 	groupViewKey := h.key(hotkeyCycleGroupView, "t")
 	// Opt-in: empty when switch_session is unbound, so the filter drops the row.
 	switchKey := h.key(hotkeySwitchSession, "")
+	// In-attach scrollback pager (#1491). Its trigger is resolved directly (it is
+	// not a home-screen key); empty label when disabled drops the row.
+	scrollbackKey := ResolvedScrollbackTrigger(session.GetHotkeyOverrides()).Label()
 	unreadKey := h.key(hotkeyMarkUnread, "u")
 	quickApproveKey := h.key(hotkeyQuickApprove, "a")
 	promptSessionKey := h.key(hotkeyPromptSession, "o")
 	copyKey := h.key(hotkeyCopyOutput, "c")
+	copyPaneKey := h.key(hotkeyCopyPane, "V")
 	sendKey := h.key(hotkeySendOutput, "x")
 	execShellKey := h.key(hotkeyExecShell, "E")
+	openShellHereKey := h.key(hotkeyOpenShellHere, "h")
 	notesKey := h.key(hotkeyEditNotes, "e")
 	if cfg, _ := session.LoadUserConfig(); cfg != nil && !cfg.GetShowNotes() {
 		notesKey = ""
@@ -259,19 +265,23 @@ func (h *HelpOverlay) View() string {
 				{skillsKey, "Skills Manager"},
 				{"$", "Cost Dashboard"},
 				{previewKey, "Toggle preview mode (output/stats/both)"},
-				{"< / >", "Shrink / grow preview pane by 5% (issue #1092)"},
+				{"O", "Toggle preview orientation (right / below — portrait monitors)"},
+				{"< / >", "Shrink / grow preview pane by 5% (drag divider with mouse; vertical in below-orientation)"},
 				{unreadKey, "Mark unread"},
 				{quickApproveKey, "Quick approve (send '1' to Claude)"},
 				{promptSessionKey, "Prompt session (send a one-line prompt without attaching)"},
 				{reorderUpKeys, "Reorder up (auto-promote at edge)"},
 				{reorderDownKeys, "Reorder down (auto-promote at edge)"},
 				{indentKeys, "Indent / outdent (in group)"},
+				{pinKeys, "Pin (cycle off→top→bottom→off)"},
 				{forkKeys, "Fork session (Claude/Pi)"},
 				{copyKey, "Copy output to clipboard"},
 				{"C", "Copy preview info (Repo / Path / Branch)"},
 				{"Y", "Copy a code block from output"},
+				{copyPaneKey, "Copy visible terminal text, including links"},
 				{sendKey, "Send output to session"},
 				{execShellKey, "Exec shell in sandbox container"},
+				{openShellHereKey, "Open shell in session's worktree (split pane / tmux)"},
 				{editPathsKey, "Edit multi-repo paths"},
 				{editSessionKey, "Edit session settings (title/color/...)"},
 				{"P h", "Handover session to another tool"},
@@ -321,6 +331,7 @@ func (h *HelpOverlay) View() string {
 				{importKey, "Import sessions"},
 				{"Ctrl+Q", "Detach from session"},
 				{switchKey, "Switch session (here or attached)"},
+				{scrollbackKey, "Scrollback pager (while attached)"},
 				{quitKey, "Quit"},
 				{helpKey, "This help"},
 			},

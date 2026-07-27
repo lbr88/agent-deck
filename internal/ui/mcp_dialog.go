@@ -45,7 +45,7 @@ type MCPItem struct {
 	HasServerCfg bool   // True if HTTP MCP has [mcps.X.server] config
 }
 
-// MCPDialog handles MCP management for Claude, Gemini, and Cursor Agent CLI sessions.
+// MCPDialog handles MCP management for Claude, Gemini, Codex, and Cursor Agent CLI sessions.
 // Hermes uses its own ~/.hermes/config.yaml `mcp_servers:` schema (user-scoped,
 // YAML) which is not compatible with Claude's project-scoped .mcp.json — it is
 // excluded from the MCP trigger in home.go (see ToolSupportsMCPManager).
@@ -55,7 +55,7 @@ type MCPDialog struct {
 	height      int
 	projectPath string
 	sessionID   string // ID of the session being managed (for restart)
-	tool        string // "claude" or "gemini"
+	tool        string
 
 	// Current scope and column
 	scope  MCPScope
@@ -173,9 +173,12 @@ func (m *MCPDialog) Show(projectPath string, sessionID string, tool string) erro
 	m.userAttached = nil
 	m.userAvailable = nil
 
-	if tool == "gemini" {
-		// Gemini: Only global MCPs from settings.json
+	if tool == "gemini" || session.IsCodexCompatible(tool) {
+		// Gemini/Codex: only global MCPs from the tool's user config.
 		mcpInfo := session.GetGeminiMCPInfo(projectPath)
+		if session.IsCodexCompatible(tool) {
+			mcpInfo = session.GetCodexMCPInfo("")
+		}
 		globalAttachedNames := make(map[string]bool)
 		for _, name := range mcpInfo.Global {
 			globalAttachedNames[name] = true
@@ -340,8 +343,8 @@ func (m *MCPDialog) Show(projectPath string, sessionID string, tool string) erro
 
 	m.visible = true
 	m.projectPath = projectPath
-	// Gemini only has global scope; Cursor uses LOCAL+GLOBAL (no USER); Claude uses all three
-	if tool == "gemini" {
+	// Gemini/Codex only have global scope; Cursor uses LOCAL+GLOBAL (no USER); Claude uses all three
+	if tool == "gemini" || session.IsCodexCompatible(tool) {
 		m.scope = MCPScopeGlobal
 	} else if tool == "cursor" {
 		switch session.GetMCPDefaultScope() {
@@ -669,7 +672,7 @@ func (m *MCPDialog) typeJump(r rune) {
 	}
 }
 
-// Apply saves the changes to LOCAL (.mcp.json), GLOBAL (Claude/Gemini config), and USER (~/.claude.json)
+// Apply saves the changes to the active tool's local, global, or user MCP store.
 func (m *MCPDialog) Apply() error {
 	mcpDialogLog.Debug("mcp_apply_start",
 		slog.String("tool", m.tool),
@@ -678,20 +681,20 @@ func (m *MCPDialog) Apply() error {
 		slog.Bool("user_changed", m.userChanged),
 		slog.String("project_path", m.projectPath))
 
-	if m.tool == "gemini" {
-		// Gemini: Only global scope, write to settings.json
+	if m.tool == "gemini" || session.IsCodexCompatible(m.tool) {
+		// Gemini/Codex: only global scope, write to the tool's user config.
 		if m.globalChanged {
 			enabledNames := make([]string, len(m.globalAttached))
 			for i, item := range m.globalAttached {
 				enabledNames[i] = item.Name
 			}
 
-			if err := session.WriteGeminiMCPSettings(enabledNames); err != nil {
+			if err := session.WriteGlobalMCPConfigForTool(m.tool, enabledNames); err != nil {
 				m.err = err
 				return err
 			}
 
-			session.ClearMCPCache(m.projectPath)
+			session.InvalidateProjectMCPIntegrationsCache(m.projectPath)
 		}
 		return nil
 	}
@@ -794,9 +797,9 @@ func (m *MCPDialog) Update(msg tea.KeyMsg) (*MCPDialog, tea.Cmd) {
 	switch msg.String() {
 	case "tab":
 		// Switch scope: LOCAL -> GLOBAL -> USER -> LOCAL (Claude only)
-		// Gemini only has global scope, so Tab does nothing
+		// Gemini/Codex only have global scope, so Tab does nothing
 		// Cursor: LOCAL <-> GLOBAL only
-		if m.tool == "gemini" {
+		if m.tool == "gemini" || session.IsCodexCompatible(m.tool) {
 			// no-op
 		} else if m.tool == "cursor" {
 			switch m.scope {
@@ -860,20 +863,22 @@ func (m *MCPDialog) View() string {
 
 	// Title varies by tool
 	title := "MCP Manager"
-	switch m.tool {
-	case "gemini":
+	switch {
+	case m.tool == "gemini":
 		title = "MCP Manager (Gemini)"
-	case "cursor":
+	case session.IsCodexCompatible(m.tool):
+		title = "MCP Manager (Codex)"
+	case m.tool == "cursor":
 		title = "MCP Manager (Cursor)"
 	}
 
-	// Scope tabs - Gemini only global; Cursor LOCAL+GLOBAL; Claude all three
+	// Scope tabs - Gemini/Codex only global; Cursor LOCAL+GLOBAL; Claude all three
 	var tabs string
-	switch m.tool {
-	case "gemini":
+	switch {
+	case m.tool == "gemini" || session.IsCodexCompatible(m.tool):
 		globalTab := lipgloss.NewStyle().Bold(true).Foreground(ColorAccent).Render("[GLOBAL]")
 		tabs = "──────────────── " + globalTab + " ────────────────"
-	case "cursor":
+	case m.tool == "cursor":
 		localTab := "LOCAL"
 		globalTab := "GLOBAL"
 		localStyle := lipgloss.NewStyle().Foreground(ColorTextDim)
@@ -949,10 +954,12 @@ func (m *MCPDialog) View() string {
 
 	// Scope description
 	var scopeDesc string
-	switch m.tool {
-	case "gemini":
+	switch {
+	case m.tool == "gemini":
 		scopeDesc = DimStyle.Render("Writes to: ~/.gemini/settings.json")
-	case "cursor":
+	case session.IsCodexCompatible(m.tool):
+		scopeDesc = DimStyle.Render("Writes to: ~/.codex/config.toml")
+	case m.tool == "cursor":
 		switch m.scope {
 		case MCPScopeLocal:
 			if !session.GetManageMCPJson() {
@@ -989,10 +996,10 @@ func (m *MCPDialog) View() string {
 	// Hint with consistent styling
 	hintStyle := lipgloss.NewStyle().Foreground(ColorComment)
 	var hint string
-	switch m.tool {
-	case "gemini":
+	switch {
+	case m.tool == "gemini" || session.IsCodexCompatible(m.tool):
 		hint = hintStyle.Render("←→ column │ Type jump │ Space move │ Enter apply │ Esc cancel")
-	case "cursor":
+	case m.tool == "cursor":
 		hint = hintStyle.Render("Tab scope │ ←→ column │ Type jump │ Space move │ Enter apply │ Esc cancel")
 	default:
 		hint = hintStyle.Render("Tab scope │ ←→ column │ Type jump │ Space move │ Enter apply │ Esc cancel")

@@ -9,8 +9,8 @@ jobs:
   golangci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version: '1.25.12' }
       # Bumped v6 → v9 in #1054 alongside the Go 1.25.10 toolchain bump: the
       # v6-era cached golangci-lint binary (v1.64.8) was built with Go 1.24,
@@ -20,5 +20,5 @@ jobs:
       # the same PR — SQL parameterization annotated, pprof timeouts added,
       # G115/G117/G118/G122/G306/G703/G704 false positives carry // #nosec
       # explanations, testutil/eval paths excluded via .golangci.yml.
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with: { version: latest, args: --timeout=5m }

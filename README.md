@@ -23,6 +23,20 @@
 
 https://github.com/user-attachments/assets/e4f55917-435c-45ba-92cc-89737d0d1401
 
+## Maintainers & contributors wanted
+
+agent-deck is actively maintained by [Ashesh](https://github.com/asheshgoplani), and it welcomes both contributors and co-maintainers. PRs here don't sit: every incoming PR is validated (applied, built, tested) within about a day, and good ones merge in the next release batch. Recent releases have shipped dozens of community fixes.
+
+Beyond one-off PRs, we're looking for 1-2 regular co-maintainers: people who want to own an area (a tool integration, the TUI, the web view, CI) and help triage and review. The validation pipeline does the heavy lifting; maintainers steer.
+
+To get started:
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) for how the review pipeline works.
+- Start at the pinned issue: [Looking for contributors — start here (#1650)](https://github.com/asheshgoplani/agent-deck/issues/1650).
+- The [agent-deck-contributor skill](.github/skills/agent-deck-contributor) walks an AI agent (or you) through building, testing, and shaping a clean PR.
+
+If you've had a couple of PRs land here and want to help steer, say so on #1650 or open an issue titled "maintainer: your area". We'd love the help.
+
 ## Installation
 
 **Works on:** macOS, Linux, Windows (WSL)
@@ -282,6 +296,19 @@ default_location = "subdirectory"  # "sibling" (default), "subdirectory", or a c
 
 `sibling` creates worktrees next to the repo (`repo-branch`). `subdirectory` creates them inside it (`repo/.worktrees/branch`). A custom path like `~/worktrees` or `/tmp/worktrees` creates repo-namespaced worktrees at `<path>/<repo_name>/<branch>`. The `--location` flag overrides the config per session.
 
+#### Sparse Checkout (large monorepos)
+
+If the session you create the worktree from uses [sparse checkout](https://git-scm.com/docs/git-sparse-checkout), a new worktree normally checks out the *whole* repository first — minutes of I/O on a monorepo with hundreds of thousands of files. Opt into inheriting the sparse configuration instead:
+
+```toml
+[worktree]
+sparse_checkout = "inherit"   # "off" (default) keeps git's normal checkout
+```
+
+With `inherit`, agent-deck reads the sparse mode (cone / non-cone, sparse index) and patterns from the worktree you invoked from, creates the new worktree with `--no-checkout`, and materializes it directly with those patterns — the excluded tree is never written. `.worktreeinclude` and `.agent-deck/worktree-setup.sh` still run afterwards, so the setup script sees the same sparse paths the source session has.
+
+A non-sparse source, or `off`/unset, keeps today's behavior exactly. Inheritance replays the patterns through `git sparse-checkout set` and pins the sparse-index setting explicitly, so it needs git 2.32 or newer; the default (`off`) has no version requirement.
+
 #### Copying Gitignored Files (`.worktreeinclude`)
 
 Gitignored files (`.env`, `.mcp.json`, etc.) aren't copied into new worktrees by default.
@@ -456,6 +483,7 @@ Create a new session for another supported tool with `agent-deck session handove
 Done with a session but not ready to delete it? Archive it. Archiving stops the tmux process and hides the session from the default list — the conversation, metadata, worktree, and parent linkage are all preserved.
 
 - `A` archives the selected session; `Shift+U` restores it to the active list **without** auto-starting the process
+- `R` on an archived session restores it to the active list and restarts its process
 - `^` filters the TUI to archived sessions; the web UI has a dedicated **Archived** tab
 - Search and filters work across archived sessions
 - Deleting (`d`) is the destructive cousin — it removes the session from the registry (with a 30-second `Ctrl+Z` undo window)
@@ -672,7 +700,7 @@ Agent Deck works with any terminal-based AI tool:
 | **Claude Code** | Full (status, MCP, fork, resume) |
 | **Gemini CLI** | Full (status, MCP, resume) |
 | **OpenCode** | Status detection, organization, fork |
-| **Codex** | Status detection, organization, conductor, import, fork |
+| **Codex** | Status detection, MCP, organization, conductor, import, fork |
 | **Copilot** | Organization, launch |
 | **Crush** (charmbracelet/crush) | Status detection, organization, launch |
 | **Cursor** (terminal) | Status detection, organization |

@@ -662,6 +662,9 @@ func TestCreateSessionDialogUsesModelIDCatalog(t *testing.T) {
 		"gpt-5.4-mini",
 		"gpt-5.3-codex",
 		"o3-pro",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-fable-5",
 		"claude-sonnet-4-6",
 		"claude-opus-4-8",
 		"claude-opus-4-7",
@@ -670,6 +673,9 @@ func TestCreateSessionDialogUsesModelIDCatalog(t *testing.T) {
 		"gemini-3-flash-preview",
 		"gemini-2.5-flash-lite",
 		"openai/gpt-5.5",
+		"anthropic/claude-opus-5",
+		"anthropic/claude-sonnet-5",
+		"anthropic/claude-fable-5",
 		"anthropic/claude-sonnet-4-6",
 		"anthropic/claude-opus-4-8",
 		"Custom model ID",
@@ -706,6 +712,25 @@ func TestCreateSessionDialogUsesTargetPathSuggestions(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("CreateSessionDialog.js missing %q; web create path selector must autocomplete local and selected hub-node paths", want)
+		}
+	}
+}
+
+func TestCreateSessionDialogUsesToolSpecificReasoningEffortCatalog(t *testing.T) {
+	data, err := embeddedStaticFiles.ReadFile("static/app/CreateSessionDialog.js")
+	if err != nil {
+		t.Fatalf("read CreateSessionDialog.js: %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"REASONING EFFORT",
+		"reasoningEffort",
+		"minimal",
+		"xhigh",
+		"max",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("CreateSessionDialog.js missing expected content %q", want)
 		}
 	}
 }

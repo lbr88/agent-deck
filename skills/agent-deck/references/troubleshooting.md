@@ -15,6 +15,27 @@ Common issues and solutions for agent-deck.
 
 ## Common Issues
 
+### Cannot Select or Copy Terminal Text
+
+On the agent-deck home screen, select a local session and press `V` to copy its
+current visible terminal text, including links, as plain text.
+
+When attached to a session, tmux mouse mode owns normal drag gestures. Hold
+Option while dragging in iTerm2. Hold Shift while dragging in most Linux
+terminals and Windows Terminal, including WSL2. This bypasses application mouse
+reporting and lets the terminal perform native selection.
+
+If your terminal has no selection bypass, disable mouse mode for new and
+reconnected sessions:
+
+```toml
+[tmux]
+mouse = false
+```
+
+This restores native drag selection, but disables tmux mouse scrolling, pane
+resizing, and mouse copy mode.
+
 ### Flags Ignored
 
 **Problem:** Flags after positional arguments are silently ignored.
@@ -46,7 +67,7 @@ If null, restart session and interact with Claude.
 ### Conductor Keeps Asking for Permissions
 
 If a conductor repeatedly pauses on permission prompts, set Claude permission mode
-explicitly in `~/.agent-deck/config.toml` and restart the conductor session:
+explicitly in `$XDG_CONFIG_HOME/agent-deck/config.toml` (default `~/.config/agent-deck/config.toml`) and restart the conductor session:
 
 ```toml
 [claude]
@@ -70,6 +91,34 @@ If you use multiple profiles, set the same under the profile override:
 allow_dangerous_mode = true
 ```
 
+### Atuin Pty-Proxy Incompatibility
+
+**Problem:** TUI shows a blank screen or fails to render when `eval "$(atuin pty-proxy init zsh)"` is in `.zshrc`.
+
+**Cause:** Atuin pty-proxy acts as a PTY MITM between the terminal and the shell. Agent Deck's Bubble Tea TUI requires direct terminal access for alternate screen mode, mouse tracking, and raw-mode I/O. These all break when stdin/stdout are proxied pipes.
+
+**Fix:** Replace the pty-proxy init line with standard atuin init:
+
+```bash
+# REMOVE this line:
+eval "$(atuin pty-proxy init zsh)"
+
+# REPLACE with this:
+eval "$(atuin init zsh)"
+```
+
+For bash:
+```bash
+eval "$(atuin init bash)"
+```
+
+For fish:
+```fish
+atuin init fish | source
+```
+
+Atuin pty-proxy is only needed for the atuin TUI overlay feature and is not required for normal shell history functionality. Agent Deck works fine with standard `atuin init`.
+
 ### High CPU Usage
 
 **With many sessions:** Normal if batched updates. Check:
@@ -81,7 +130,7 @@ agent-deck status  # Should show ~0.5% CPU when idle
 
 ### Log Files Too Large
 
-Add to `~/.agent-deck/config.toml`:
+Add to `$XDG_CONFIG_HOME/agent-deck/config.toml` (default `~/.config/agent-deck/config.toml`):
 ```toml
 [logs]
 max_size_mb = 1
@@ -152,7 +201,7 @@ agent-deck status --json
 agent-deck session show <session-name> --json
 
 # Config (sanitized - removes secrets)
-cat ~/.agent-deck/config.toml | grep -v "KEY\|TOKEN\|SECRET\|PASSWORD"
+cat ~/.config/agent-deck/config.toml | grep -v "KEY\|TOKEN\|SECRET\|PASSWORD"  # (legacy: ~/.agent-deck/config.toml)
 
 # Recent logs (if error occurred)
 tail -100 ~/.agent-deck/logs/agentdeck_<session>_*.log 2>/dev/null
@@ -236,6 +285,35 @@ Use this template:
 - Join [Discord](https://discord.gg/e4xSs6NBN8) for quick help and community support
 
 ## Recovery
+
+### Every Session Died At Once
+
+Symptom: the whole deck flips to red (or the panes are simply gone) after a tmux
+server was killed, the host rebooted, or an auth failure cascaded through the
+fleet.
+
+```bash
+agent-deck fleet status          # read-only: what is actually down?
+agent-deck fleet recover         # dry run: the plan, in order, with waits
+agent-deck fleet recover --yes   # run it
+```
+
+`fleet recover` restarts the down sessions **one at a time** with ~5s between
+boots and verifies each boot before starting the next. Do not replace it with a
+loop that restarts everything at once: simultaneous agent boots are what fork a
+shared rotating OAuth refresh token, which turns a recoverable outage into a
+fleet-wide 401.
+
+The sweep stops on its own if three restarts fail in a row, or if sessions come
+up showing an auth-failure banner (re-authenticate first, then re-run). Sessions
+you stopped or archived are never touched.
+
+If the panes are still ALIVE and only agent-deck thinks they are broken (a
+killed control pipe, e.g. after an SSH logout), the cheaper fix is:
+
+```bash
+agent-deck session revive --all
+```
 
 ### Session Metadata Lost
 

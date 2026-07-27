@@ -93,12 +93,29 @@ func ListCodexIndex(codexHome string) ([]CodexIndexEntry, error) {
 	if err := readCodexJSONIndex(codexHome, latest); err != nil {
 		return nil, err
 	}
-	stateEntries, err := listCodexStateThreads(codexHome)
+	explicitJSONNames := make(map[string]string, len(latest))
+	for id, entry := range latest {
+		if name := strings.TrimSpace(entry.ThreadName); name != "" {
+			explicitJSONNames[id] = name
+		}
+	}
+	stateEntries, stateExplicitNames, err := listCodexStateThreads(codexHome)
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range stateEntries {
 		mergeCodexIndexEntry(latest, entry)
+	}
+	// Modern Codex separates the auto-generated first-prompt title from the
+	// explicit thread name. A newer state-row timestamp must not let the prompt
+	// replace an older explicit /rename from session_index.jsonl.
+	for id, name := range explicitJSONNames {
+		if stateExplicitNames[id] {
+			continue
+		}
+		entry := latest[id]
+		entry.ThreadName = name
+		latest[id] = entry
 	}
 	// Codex's SQLite/index files also contain internal workers and approval
 	// guardians. They are not user-facing resumable threads and must never be
@@ -162,55 +179,82 @@ func readCodexJSONIndex(codexHome string, latest map[string]CodexIndexEntry) err
 	return nil
 }
 
-func listCodexStateThreads(codexHome string) ([]CodexIndexEntry, error) {
+func listCodexStateThreads(codexHome string) ([]CodexIndexEntry, map[string]bool, error) {
 	path := filepath.Join(codexHome, "state_5.sqlite")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`
-		SELECT id, title, preview, cwd, updated_at, updated_at_ms, recency_at, recency_at_ms
-		FROM threads
-		WHERE COALESCE(archived, 0) = 0
-	`)
+	hasName, err := codexStateHasThreadNameColumn(db)
 	if err != nil {
 		if isMissingCodexStateSchema(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
+	}
+	nameColumn := "NULL"
+	if hasName {
+		nameColumn = "name"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT id, title, %s, preview, cwd, updated_at, updated_at_ms, recency_at, recency_at_ms
+		FROM threads
+		WHERE COALESCE(archived, 0) = 0
+	`, nameColumn))
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	var entries []CodexIndexEntry
+	explicitNames := make(map[string]bool)
 	for rows.Next() {
-		var id, title, preview, cwd sql.NullString
+		var id, title, name, preview, cwd sql.NullString
 		var updatedAt, updatedAtMS, recencyAt, recencyAtMS sql.NullInt64
-		if err := rows.Scan(&id, &title, &preview, &cwd, &updatedAt, &updatedAtMS, &recencyAt, &recencyAtMS); err != nil {
-			return nil, err
+		if err := rows.Scan(&id, &title, &name, &preview, &cwd, &updatedAt, &updatedAtMS, &recencyAt, &recencyAtMS); err != nil {
+			return nil, nil, err
 		}
 		sessionID := strings.ToLower(strings.TrimSpace(id.String))
 		if !isCodexSessionUUID(sessionID) {
 			continue
 		}
+		explicitName := strings.TrimSpace(name.String)
+		if explicitName != "" || !hasName {
+			explicitNames[sessionID] = true
+		}
 		entries = append(entries, CodexIndexEntry{
 			ID:         sessionID,
-			ThreadName: firstNonEmpty(title.String, preview.String),
+			ThreadName: firstNonEmpty(explicitName, title.String, preview.String),
 			Path:       cwd.String,
 			UpdatedAt:  codexStateThreadTime(recencyAtMS, updatedAtMS, recencyAt, updatedAt),
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return entries, nil
+	return entries, explicitNames, nil
+}
+
+func codexStateHasThreadNameColumn(db *sql.DB) (bool, error) {
+	rows, err := db.Query(`SELECT name FROM threads LIMIT 0`)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such column") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, rows.Close()
 }
 
 func codexSQLiteReadOnlyDSN(path string) string {
@@ -629,10 +673,10 @@ func SyncCodexSessionNameIn(codexHome, sessionID, title string, now time.Time) e
 	return updateCodexStateThreadTitle(codexHome, sessionID, title)
 }
 
-// CodexSessionNameIn returns the title Codex currently stores for sessionID.
-// The native SQLite thread row is authoritative for current Codex versions;
-// session_index.jsonl is intentionally not consulted because Agent Deck's own
-// older append records can otherwise mask a newer in-Codex /rename.
+// CodexSessionNameIn returns the explicit name Codex currently stores for
+// sessionID. Modern Codex keeps the auto-generated first-prompt title separate
+// from the optional user name; the prompt must never replace an Agent Deck
+// rename. Legacy schemas used title for the explicit name.
 func CodexSessionNameIn(codexHome, sessionID string) (string, error) {
 	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
 	if sessionID == "" {
@@ -647,7 +691,7 @@ func CodexSessionNameIn(codexHome, sessionID string) (string, error) {
 
 	path := filepath.Join(codexHome, "state_5.sqlite")
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return codexJSONSessionName(codexHome, sessionID)
 	} else if err != nil {
 		return "", err
 	}
@@ -658,18 +702,43 @@ func CodexSessionNameIn(codexHome, sessionID string) (string, error) {
 	}
 	defer db.Close()
 
-	var title sql.NullString
-	err = db.QueryRow(`SELECT title FROM threads WHERE id = ?`, sessionID).Scan(&title)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	hasName, err := codexStateHasThreadNameColumn(db)
 	if err != nil {
 		if isMissingCodexStateSchema(err) {
-			return "", nil
+			return codexJSONSessionName(codexHome, sessionID)
 		}
 		return "", err
 	}
-	return strings.TrimSpace(title.String), nil
+	column := "title"
+	if hasName {
+		column = "name"
+	}
+	var name sql.NullString
+	err = db.QueryRow(`SELECT `+column+` FROM threads WHERE id = ?`, sessionID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return codexJSONSessionName(codexHome, sessionID)
+	}
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return codexJSONSessionName(codexHome, sessionID)
+		}
+		return "", err
+	}
+	if name := strings.TrimSpace(name.String); name != "" {
+		return name, nil
+	}
+	if hasName {
+		return codexJSONSessionName(codexHome, sessionID)
+	}
+	return "", nil
+}
+
+func codexJSONSessionName(codexHome, sessionID string) (string, error) {
+	latest := make(map[string]CodexIndexEntry)
+	if err := readCodexJSONIndex(codexHome, latest); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(latest[sessionID].ThreadName), nil
 }
 
 func updateCodexStateThreadTitle(codexHome, sessionID, title string) error {
@@ -698,7 +767,18 @@ func updateCodexStateThreadTitle(codexHome, sessionID, title string) error {
 	}
 	defer db.Close()
 
-	_, err = db.Exec(`UPDATE threads SET title = ? WHERE id = ?`, title, sessionID)
+	hasName, err := codexStateHasThreadNameColumn(db)
+	if err != nil {
+		if isMissingCodexStateSchema(err) {
+			return nil
+		}
+		return err
+	}
+	column := "title"
+	if hasName {
+		column = "name"
+	}
+	_, err = db.Exec(`UPDATE threads SET `+column+` = ? WHERE id = ?`, title, sessionID)
 	if err != nil {
 		if isMissingCodexStateSchema(err) {
 			return nil

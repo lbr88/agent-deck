@@ -73,6 +73,10 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "mutations not available")
 			return
 		}
+		if err := session.ValidateLaunchReasoningEffort(req.Tool, req.ReasoningEffort); err != nil {
+			writeAPIError(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error())
+			return
+		}
 		var sessionID string
 		var err error
 		hubCreate := false
@@ -87,10 +91,10 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 			if strings.TrimSpace(req.ProjectPath) == "" {
 				req.ProjectPath = "."
 			}
-			if len(req.AdditionalPaths) > 0 {
+			if len(req.AdditionalPaths) > 0 || strings.TrimSpace(req.ReasoningEffort) != "" {
 				optionsCreator, ok := s.mutator.(SessionOptionsMutator)
 				if !ok {
-					writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "multi-repo session creation not available")
+					writeAPIError(w, http.StatusServiceUnavailable, ErrCodeNotImplemented, "session creation options not available")
 					return
 				}
 				sessionID, err = optionsCreator.CreateSessionWithOptions(req)
@@ -106,7 +110,7 @@ func (s *Server) handleSessionsCollection(w http.ResponseWriter, r *http.Request
 				}
 				sessionID, err = optionsCreator.CreateSessionWithOptions(req)
 			} else {
-				sessionID, err = s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID)
+				sessionID, err = s.mutator.CreateSession(req.Title, req.Tool, req.ProjectPath, req.GroupPath, req.ModelID, req.ReasoningEffort)
 			}
 		}
 		if err != nil {
