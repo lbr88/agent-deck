@@ -148,6 +148,21 @@ func SyncCodexSessionNameForCommand(command, codexHome, sessionID, title string,
 		return fmt.Errorf("refusing to rename internal Codex subagent thread %q", sessionID)
 	}
 
+	// Current Codex schemas distinguish the automatic first-prompt title from
+	// the explicit user name. The app-server thread/name/set method in affected
+	// Codex builds still writes title, destroying that distinction, so write the
+	// dedicated name column directly when it is available.
+	hasExplicitName, err := codexStateUsesExplicitThreadName(codexHome)
+	if err != nil {
+		return err
+	}
+	if hasExplicitName {
+		if err := updateCodexStateThreadTitle(codexHome, sessionID, title); err != nil {
+			return err
+		}
+		return AppendCodexSessionIndexName(codexHome, sessionID, title, now)
+	}
+
 	nativeErr := setCodexThreadNameNative(command, codexHome, sessionID, title)
 	if nativeErr != nil {
 		if fallbackErr := updateCodexStateThreadTitle(codexHome, sessionID, title); fallbackErr != nil {

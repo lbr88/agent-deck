@@ -257,6 +257,27 @@ func codexStateHasThreadNameColumn(db *sql.DB) (bool, error) {
 	return true, rows.Close()
 }
 
+func codexStateUsesExplicitThreadName(codexHome string) (bool, error) {
+	path := filepath.Join(codexHome, "state_5.sqlite")
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+
+	db, err := sql.Open("sqlite", codexSQLiteReadOnlyDSN(path))
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	hasName, err := codexStateHasThreadNameColumn(db)
+	if err != nil && isMissingCodexStateSchema(err) {
+		return false, nil
+	}
+	return hasName, err
+}
+
 func codexSQLiteReadOnlyDSN(path string) string {
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()

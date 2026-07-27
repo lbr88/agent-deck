@@ -1,7 +1,10 @@
 package session
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +12,43 @@ import (
 
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
+
+func TestSyncCodexSessionNameForCommandModernSchemaDoesNotClobberPromptTitle(t *testing.T) {
+	home := t.TempDir()
+	id := "12121212-1212-1212-1212-121212121212"
+	prompt := "the full first user prompt must remain the automatic Codex title"
+	now := time.Now()
+	writeCodexStateThread(t, home, id, prompt, "preview", "/repo", now.UnixMilli())
+	addCodexStateThreadNameColumn(t, home, id, "")
+
+	originalCommandContext := codexAppServerCommandContext
+	nativeCalled := false
+	codexAppServerCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		nativeCalled = true
+		return exec.CommandContext(ctx, "false")
+	}
+	t.Cleanup(func() { codexAppServerCommandContext = originalCommandContext })
+
+	if err := SyncCodexSessionNameForCommand("codex", home, id, "short explicit rename", now); err != nil {
+		t.Fatalf("SyncCodexSessionNameForCommand: %v", err)
+	}
+	if nativeCalled {
+		t.Fatal("modern Codex schema must not use thread/name/set because it clobbers the automatic prompt title")
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(home, "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var title, name string
+	if err := db.QueryRow(`SELECT title, name FROM threads WHERE id = ?`, id).Scan(&title, &name); err != nil {
+		t.Fatal(err)
+	}
+	if title != prompt || name != "short explicit rename" {
+		t.Fatalf("state thread title/name = %q/%q, want %q/%q", title, name, prompt, "short explicit rename")
+	}
+}
 
 func TestUpdateStatusReconcilesCodexTitleWithoutLiveTmux(t *testing.T) {
 	home := t.TempDir()
