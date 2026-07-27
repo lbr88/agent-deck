@@ -163,7 +163,7 @@ export function CreateSessionDialog() {
   // preserved by placing this guard AFTER all useState calls.
   if (!mutationsEnabledSignal.value) return null
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault()
     setError(null)
     setSubmitting(true)
