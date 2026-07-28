@@ -86,6 +86,30 @@ func (s *pipeLiveSet) setAttached(names ...string) {
 	s.mu.Unlock()
 }
 
+// retain removes tmux targets that no longer belong to a live instance.
+// Restart fallback replaces the tmux target while preserving the Agent Deck
+// session ID; leaving the old name in this set keeps PipeManager's reconnect
+// watcher retrying the dead target even after reconciliation disconnected it.
+func (s *pipeLiveSet) retain(live map[string]string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	filter := func(names []string) []string {
+		out := names[:0]
+		for _, name := range names {
+			if _, ok := live[name]; ok {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	s.lru = filter(s.lru)
+	s.attached = filter(s.attached)
+}
+
 // want reports whether name should hold a live pipe.
 func (s *pipeLiveSet) want(name string) bool {
 	if s == nil || name == "" {
@@ -142,6 +166,7 @@ func (s *pipeLiveSet) members() []string {
 func desiredLivePipes(ls *pipeLiveSet, focused string, attached []string, socketByName map[string]string) []string {
 	ls.touch(focused)
 	ls.setAttached(attached...)
+	ls.retain(socketByName)
 	members := ls.members()
 	desired := make([]string, 0, len(members))
 	for _, name := range members {

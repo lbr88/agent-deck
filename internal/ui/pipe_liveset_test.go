@@ -180,6 +180,9 @@ func TestDesiredLivePipes_DropsNamesWithNoInstance(t *testing.T) {
 			t.Fatalf("a session with no live instance must be filtered out, got %v", desired)
 		}
 	}
+	if ls.want("deleted") {
+		t.Fatal("a replaced tmux target must also be removed from the reconnect want gate")
+	}
 }
 
 func TestOwnedSocketFilter(t *testing.T) {

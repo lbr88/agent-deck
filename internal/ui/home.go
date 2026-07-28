@@ -363,7 +363,13 @@ type Home struct {
 	previewCacheTime  map[string]time.Time // previewKey -> when cached (for expiration)
 	previewCacheMu    sync.RWMutex         // Protects previewCache for thread-safety
 	previewFetchingID string               // ID currently being fetched (prevents duplicate fetches)
-	previewRefreshTTL time.Duration        // Selected local preview cache TTL from [ui].preview_refresh_ms
+	// previewFetchingGeneration identifies the request currently represented by
+	// previewFetchingID. Restart invalidation advances previewGeneration so a
+	// late empty capture from the killed tmux target cannot clear or overwrite
+	// the replacement target's request.
+	previewFetchingGeneration uint64
+	previewGeneration         atomic.Uint64
+	previewRefreshTTL         time.Duration // Selected local preview cache TTL from [ui].preview_refresh_ms
 
 	// Preview debouncing (PERFORMANCE: prevents subprocess spawn on every keystroke)
 	// During rapid navigation, we delay preview fetch by 150ms to let navigation settle
@@ -1401,6 +1407,7 @@ type previewFetchedMsg struct {
 	previewKey string // cache key: sessionID or sessionID:windowIndex
 	content    string
 	err        error
+	generation uint64
 }
 
 // previewDebounceMsg signals debounce period elapsed for preview fetch
@@ -4851,10 +4858,34 @@ func (h *Home) reviverTick() tea.Cmd {
 // invalidatePreviewCache removes a session's preview from the cache
 // Called when session is deleted, renamed, or moved to ensure stale data is not displayed
 func (h *Home) invalidatePreviewCache(sessionID string) {
+	h.previewGeneration.Add(1)
 	h.previewCacheMu.Lock()
 	delete(h.previewCache, sessionID)
 	delete(h.previewCacheTime, sessionID)
+	if h.previewFetchingID == sessionID {
+		h.previewFetchingID = ""
+		h.previewFetchingGeneration = 0
+	}
 	h.previewCacheMu.Unlock()
+}
+
+// beginPreviewFetch records a request for key at the current preview
+// generation. It returns false only when the same key already has a request in
+// flight for that generation. A request from before a restart never blocks the
+// replacement target's first capture.
+func (h *Home) beginPreviewFetch(key string) bool {
+	if key == "" {
+		return false
+	}
+	generation := h.previewGeneration.Load()
+	h.previewCacheMu.Lock()
+	defer h.previewCacheMu.Unlock()
+	if h.previewFetchingID == key && h.previewFetchingGeneration == generation {
+		return false
+	}
+	h.previewFetchingID = key
+	h.previewFetchingGeneration = generation
+	return true
 }
 
 // pruneAnalyticsCache removes stale entries from analytics and log activity caches.
@@ -5096,6 +5127,7 @@ func (h *Home) fetchPreview(inst *session.Instance, key string, windowIndex int)
 	if inst == nil {
 		return nil
 	}
+	generation := h.previewGeneration.Load()
 	return func() tea.Msg {
 		var content string
 		var err error
@@ -5108,6 +5140,7 @@ func (h *Home) fetchPreview(inst *session.Instance, key string, windowIndex int)
 			previewKey: key,
 			content:    content,
 			err:        err,
+			generation: generation,
 		}
 	}
 }
@@ -5157,15 +5190,16 @@ func (h *Home) fetchHubPreviewDebounced(nodeID, sessionID string) tea.Cmd {
 }
 
 func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
+	generation := h.previewGeneration.Load()
 	return func() tea.Msg {
 		config, err := session.LoadUserConfig()
 		if err != nil || config == nil || config.Remotes == nil {
-			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("failed to load remote config")}
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("failed to load remote config"), generation: generation}
 		}
 
 		rc, ok := config.Remotes[remoteName]
 		if !ok {
-			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("remote '%s' not found", remoteName)}
+			return previewFetchedMsg{previewKey: key, err: fmt.Errorf("remote '%s' not found", remoteName), generation: generation}
 		}
 
 		runner := session.NewSSHRunner(remoteName, rc)
@@ -5185,20 +5219,21 @@ func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
 			}
 		}
 		content = truncateRemotePreviewContent(content)
-		return previewFetchedMsg{previewKey: key, content: content, err: fetchErr}
+		return previewFetchedMsg{previewKey: key, content: content, err: fetchErr, generation: generation}
 	}
 }
 
 func (h *Home) fetchHubPreview(nodeID, sessionID, key string) tea.Cmd {
+	generation := h.previewGeneration.Load()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(h.ctx, 15*time.Second)
 		defer cancel()
 		content, err := h.hubPreviewContent(ctx, nodeID, sessionID)
 		if err != nil {
-			return previewFetchedMsg{previewKey: key, err: err}
+			return previewFetchedMsg{previewKey: key, err: err, generation: generation}
 		}
 		content = truncateRemotePreviewContent(content)
-		return previewFetchedMsg{previewKey: key, content: content}
+		return previewFetchedMsg{previewKey: key, content: content, generation: generation}
 	}
 }
 
@@ -6867,13 +6902,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if inst == nil || key == "" {
 			return h, nil
 		}
-		h.previewCacheMu.Lock()
-		alreadyFetching := h.previewFetchingID == key
-		if !alreadyFetching {
-			h.previewFetchingID = key
-		}
-		h.previewCacheMu.Unlock()
-		if alreadyFetching {
+		if !h.beginPreviewFetch(key) {
 			return h, nil
 		}
 		return h, h.fetchPreview(inst, key, winIdx)
@@ -7168,9 +7197,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Trigger immediate preview fetch for initial selection (mutex-protected)
 			if selected := h.getSelectedSession(); selected != nil {
-				h.previewCacheMu.Lock()
-				h.previewFetchingID = selected.ID
-				h.previewCacheMu.Unlock()
+				h.beginPreviewFetch(selected.ID)
 				// Batch preview fetch with any OpenCode detection commands
 				allCmds := append(detectionCmds, h.fetchPreview(selected, selected.ID, -1))
 				return h, tea.Batch(allCmds...)
@@ -7630,6 +7657,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case sessionRestartedMsg:
+		var restartedPreview tea.Cmd
 		if msg.err != nil {
 			// Restart failed - clear resuming animation immediately so user can retry.
 			delete(h.resumingSessions, msg.sessionID)
@@ -7640,15 +7668,18 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			// Find the instance and refresh its MCP state (O(1) lookup)
+			h.invalidatePreviewCache(msg.sessionID)
 			if inst := h.getInstanceByID(msg.sessionID); inst != nil {
 				// Refresh the loaded MCPs to match the new config
 				inst.CaptureLoadedMCPs()
+				if h.beginPreviewFetch(msg.sessionID) {
+					restartedPreview = h.fetchPreview(inst, msg.sessionID, -1)
+				}
 			}
 			// Run dedup in-memory before saving, mirroring sessionCreatedMsg pattern (line ~2864)
 			h.instancesMu.Lock()
 			session.UpdateClaudeSessionsWithDedup(h.instances)
 			h.instancesMu.Unlock()
-			h.invalidatePreviewCache(msg.sessionID)
 			if msg.unarchived {
 				h.cachedStatusCounts.valid.Store(false)
 				h.rebuildFlatItems()
@@ -7665,7 +7696,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Clear animation so ENTER can attach immediately.
 		delete(h.resumingSessions, msg.sessionID)
-		return h, nil
+		return h, restartedPreview
 
 	case mcpRestartedMsg:
 		if msg.err != nil {
@@ -8322,13 +8353,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.hubNodeID != "" {
 			var cmds []tea.Cmd
 
-			h.previewCacheMu.Lock()
-			needsPreviewFetch := h.previewFetchingID != msg.previewKey
-			if needsPreviewFetch {
-				h.previewFetchingID = msg.previewKey
-			}
-			h.previewCacheMu.Unlock()
-			if needsPreviewFetch {
+			if h.beginPreviewFetch(msg.previewKey) {
 				cmds = append(cmds, h.fetchHubPreview(msg.hubNodeID, msg.sessionID, msg.previewKey))
 			}
 
@@ -8342,13 +8367,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmds []tea.Cmd
 
 			// Preview fetch
-			h.previewCacheMu.Lock()
-			needsPreviewFetch := h.previewFetchingID != msg.previewKey
-			if needsPreviewFetch {
-				h.previewFetchingID = msg.previewKey
-			}
-			h.previewCacheMu.Unlock()
-			if needsPreviewFetch {
+			if h.beginPreviewFetch(msg.previewKey) {
 				cmds = append(cmds, h.fetchRemotePreview(msg.remoteName, msg.sessionID, msg.previewKey))
 			}
 
@@ -8367,13 +8386,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmds []tea.Cmd
 
 			// Preview fetch
-			h.previewCacheMu.Lock()
-			needsPreviewFetch := h.previewFetchingID != msg.previewKey
-			if needsPreviewFetch {
-				h.previewFetchingID = msg.previewKey
-			}
-			h.previewCacheMu.Unlock()
-			if needsPreviewFetch {
+			if h.beginPreviewFetch(msg.previewKey) {
 				cmds = append(cmds, h.fetchPreview(inst, msg.previewKey, msg.windowIndex))
 			}
 
@@ -8456,11 +8469,28 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case previewFetchedMsg:
+		// Ignore captures started before the latest invalidation. Restart can
+		// replace the tmux target while a capture of the old target is still in
+		// flight; accepting that late empty response makes the live replacement
+		// look like "(terminal is empty)".
+		currentGeneration := h.previewGeneration.Load()
+		h.previewCacheMu.Lock()
+		if msg.generation != currentGeneration {
+			if h.previewFetchingID == msg.previewKey &&
+				h.previewFetchingGeneration == msg.generation {
+				h.previewFetchingID = ""
+				h.previewFetchingGeneration = 0
+			}
+			h.previewCacheMu.Unlock()
+			return h, nil
+		}
+		if h.previewFetchingID == msg.previewKey &&
+			h.previewFetchingGeneration == msg.generation {
+			h.previewFetchingID = ""
+			h.previewFetchingGeneration = 0
+		}
 		// Async preview content received - always advance the TTL so failures
 		// and empty responses don't trigger a fetch on every tick.
-		// Protect both previewFetchingID and previewCache with the same mutex
-		h.previewCacheMu.Lock()
-		h.previewFetchingID = ""
 		h.previewCacheTime[msg.previewKey] = time.Now()
 		if msg.err == nil {
 			h.previewCache[msg.previewKey] = msg.content
@@ -8900,34 +8930,32 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		now := time.Now()
 		selectedInst, selectedKey, selectedWinIdx := h.selectedPreviewTarget()
 		if selectedInst != nil && !h.shouldSuppressPreviewRefresh(now) {
-			h.previewCacheMu.Lock()
+			h.previewCacheMu.RLock()
 			cacheExpired := h.selectedPreviewCacheExpired(selectedKey, now)
-			// Only fetch if cache is stale/missing AND not currently fetching this item
-			if cacheExpired && h.previewFetchingID != selectedKey {
-				h.previewFetchingID = selectedKey
+			h.previewCacheMu.RUnlock()
+			// Only fetch if cache is stale/missing AND not currently fetching
+			// this item in the current generation.
+			if cacheExpired && h.beginPreviewFetch(selectedKey) {
 				previewCmd = h.fetchPreview(selectedInst, selectedKey, selectedWinIdx)
 			}
-			h.previewCacheMu.Unlock()
 		} else {
 			nodeID, hubSessionID, hubKey, ok := h.selectedHubPreviewTarget()
 			if ok {
-				h.previewCacheMu.Lock()
+				h.previewCacheMu.RLock()
 				cachedTime, hasCached := h.previewCacheTime[hubKey]
 				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
-				if cacheExpired && h.previewFetchingID != hubKey {
-					h.previewFetchingID = hubKey
+				h.previewCacheMu.RUnlock()
+				if cacheExpired && h.beginPreviewFetch(hubKey) {
 					previewCmd = h.fetchHubPreview(nodeID, hubSessionID, hubKey)
 				}
-				h.previewCacheMu.Unlock()
 			} else if remoteName, remoteSessionID, remoteKey, ok := h.selectedRemotePreviewTarget(); ok {
-				h.previewCacheMu.Lock()
+				h.previewCacheMu.RLock()
 				cachedTime, hasCached := h.previewCacheTime[remoteKey]
 				cacheExpired := !hasCached || time.Since(cachedTime) > remotePreviewCacheTTL
-				if cacheExpired && h.previewFetchingID != remoteKey {
-					h.previewFetchingID = remoteKey
+				h.previewCacheMu.RUnlock()
+				if cacheExpired && h.beginPreviewFetch(remoteKey) {
 					previewCmd = h.fetchRemotePreview(remoteName, remoteSessionID, remoteKey)
 				}
-				h.previewCacheMu.Unlock()
 			}
 		}
 		cmds := []tea.Cmd{h.tick(), previewCmd, remoteFetchCmd, remoteLatencyCmd}

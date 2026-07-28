@@ -2737,6 +2737,38 @@ func TestPreviewFetchedMsgUpdatesCacheTimeOnError(t *testing.T) {
 	}
 }
 
+func TestRestartPreviewInvalidationRejectsLateEmptyResult(t *testing.T) {
+	home := NewHome()
+	key := "restarted-session"
+	home.previewFetchingID = key
+	home.previewCache[key] = "conversation before restart"
+
+	home.invalidatePreviewCache(key)
+	if home.previewFetchingID != "" {
+		t.Fatalf("restart invalidation left stale fetch %q marked in flight", home.previewFetchingID)
+	}
+
+	model, _ := home.Update(previewFetchedMsg{previewKey: key, content: ""})
+	updated := model.(*Home)
+	if content, ok := updated.previewCache[key]; ok {
+		t.Fatalf("late result from killed tmux target repopulated preview cache: %q", content)
+	}
+
+	if !updated.beginPreviewFetch(key) {
+		t.Fatal("replacement tmux target was blocked by the invalidated request")
+	}
+	replacementGeneration := updated.previewGeneration.Load()
+	model, _ = updated.Update(previewFetchedMsg{
+		previewKey: key,
+		content:    "conversation after restart",
+		generation: replacementGeneration,
+	})
+	updated = model.(*Home)
+	if content := updated.previewCache[key]; content != "conversation after restart" {
+		t.Fatalf("replacement tmux target preview = %q, want fresh conversation", content)
+	}
+}
+
 func TestRenderHelpBarTiny(t *testing.T) {
 	home := NewHome()
 	home.width = 45 // Tiny mode (<50 cols)
