@@ -88,6 +88,31 @@ func TestReviver_AliveSession_NotRevived(t *testing.T) {
 	}
 }
 
+func TestReviver_IntentionallyEvictedPipe_NotRevived(t *testing.T) {
+	inst := newReviverTestInstance("evicted-live-1", StatusWaiting)
+
+	spyCalls := 0
+	r := &Reviver{
+		TmuxExists: func(name, _ string) bool { return true },
+		PipeAlive:  func(name string) bool { return false },
+		PipeWanted: func(name string) bool { return false },
+		ReviveAction: func(i *Instance) error {
+			spyCalls++
+			return nil
+		},
+		Stagger: 0,
+	}
+
+	outcomes := r.ReviveAll([]*Instance{inst})
+
+	if spyCalls != 0 {
+		t.Fatalf("an intentionally evicted preview pipe must not be revived; got %d calls", spyCalls)
+	}
+	if len(outcomes) != 1 || outcomes[0].Class != ClassAlive {
+		t.Fatalf("live tmux with an intentionally evicted pipe = %+v, want ClassAlive", outcomes)
+	}
+}
+
 func TestReviver_DeletedInstance_NotRevived(t *testing.T) {
 	// Tombstone semantics: a removed instance is absent from the storage-
 	// returned slice. Passing an empty slice must produce no outcomes and

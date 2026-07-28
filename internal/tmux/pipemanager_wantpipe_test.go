@@ -28,6 +28,13 @@ func TestPipeManager_WantPipeGatesConnect(t *testing.T) {
 	defer pm.Close()
 	pm.SetWantPipe(func(name string) bool { return name == allowed })
 
+	if !pm.Wants(allowed) {
+		t.Fatal("allowed session must be reported as wanted")
+	}
+	if pm.Wants(denied) {
+		t.Fatal("intentionally evicted session must be reported as not wanted")
+	}
+
 	if err := pm.Connect(allowed, ""); err != nil {
 		t.Fatalf("connect allowed: %v", err)
 	}

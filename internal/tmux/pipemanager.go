@@ -363,6 +363,15 @@ func (pm *PipeManager) wants(sessionName string) bool {
 	return fn == nil || fn(sessionName)
 }
 
+// Wants reports whether sessionName belongs to the manager's current live set.
+// A manager without a predicate wants every session for legacy callers.
+func (pm *PipeManager) Wants(sessionName string) bool {
+	if pm == nil {
+		return true
+	}
+	return pm.wants(sessionName)
+}
+
 // ConnectedSessions returns the names of sessions with an alive pipe.
 func (pm *PipeManager) ConnectedSessions() []string {
 	pm.mu.RLock()
