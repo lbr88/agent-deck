@@ -357,6 +357,7 @@ type Home struct {
 	reloadVersion          uint64     // Incremented on each reload to prevent stale background saves
 	reloadMu               sync.Mutex // Protects reloadVersion, isReloading, and lastLoadMtime for thread-safe access
 	lastLoadMtime          time.Time  // File mtime when we last loaded (for external change detection)
+	pendingSessionReload   *loadSessionsMsg
 
 	// Preview cache (async fetching - View() must be pure, no blocking I/O)
 	previewCache      map[string]string    // previewKey -> cached preview content
@@ -373,8 +374,13 @@ type Home struct {
 
 	// Preview debouncing (PERFORMANCE: prevents subprocess spawn on every keystroke)
 	// During rapid navigation, we delay preview fetch by 150ms to let navigation settle
-	pendingPreviewKey string     // Preview key waiting for debounced fetch
-	previewDebounceMu sync.Mutex // Protects pendingPreviewKey
+	pendingPreviewKey        string // Preview key waiting for debounced fetch
+	pendingPreviewRequest    previewDebounceMsg
+	pendingPreviewGeneration uint64
+	previewDebounceRequested time.Time
+	previewDebounceWake      chan struct{}
+	previewDebounceActive    bool
+	previewDebounceMu        sync.Mutex // Protects preview debounce state
 
 	// Round-robin status updates (Priority 1A optimization)
 	// Instead of updating ALL sessions every tick, we update batches of 5-10 sessions
@@ -496,6 +502,7 @@ type Home struct {
 	// Navigation tracking (PERFORMANCE: suspend background updates during rapid navigation)
 	lastNavigationTime time.Time // When user last navigated (up/down/j/k)
 	isNavigating       bool      // True if user is rapidly navigating
+	pendingListRebuild bool      // Async state changed while navigation kept the row order frozen
 	lastAttachReturn   time.Time // When we returned from tea.Exec attach/detach
 	navigationHotUntil atomic.Int64
 	// Snapshot of status/tool used by render path to avoid per-row lock contention.
@@ -1413,11 +1420,12 @@ type previewFetchedMsg struct {
 // previewDebounceMsg signals debounce period elapsed for preview fetch
 // PERFORMANCE: Delays preview fetch during rapid navigation
 type previewDebounceMsg struct {
-	previewKey  string // cache key
-	sessionID   string // parent session ID (for instance lookup)
-	windowIndex int    // -1 for session, >= 0 for specific window
-	remoteName  string // remote name for remote session preview
-	hubNodeID   string // hub node id for hub session preview
+	previewKey         string // cache key
+	sessionID          string // parent session ID (for instance lookup)
+	windowIndex        int    // -1 for session, >= 0 for specific window
+	remoteName         string // remote name for remote session preview
+	hubNodeID          string // hub node id for hub session preview
+	debounceGeneration uint64
 }
 
 // analyticsFetchedMsg is sent when async analytics parsing is complete
@@ -3291,7 +3299,7 @@ func (h *Home) captureSelectedItemIdentity() selectedItemIdentity {
 	return identity
 }
 
-func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
+func (h *Home) restoreSelectedItemIdentityExact(identity selectedItemIdentity) bool {
 	groupOccurrence := identity.groupOccurrence
 	remoteGroupOccurrence := identity.remoteGroupOccurrence
 	hubGroupOccurrence := identity.hubGroupOccurrence
@@ -3339,6 +3347,10 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 		}
 	}
 
+	return false
+}
+
+func (h *Home) restoreSelectedWindowParentIdentity(identity selectedItemIdentity) bool {
 	if identity.windowSessionID != "" {
 		for i, item := range h.flatItems {
 			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == identity.windowSessionID {
@@ -3351,13 +3363,89 @@ func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
 	return false
 }
 
-func (h *Home) rebuildFlatItemsPreservingSelection(identity selectedItemIdentity) {
+// restoreSelectedItemIdentity preserves the historical window-to-parent
+// fallback used by ordinary list rebuilds when a tmux window closes.
+func (h *Home) restoreSelectedItemIdentity(identity selectedItemIdentity) bool {
+	return h.restoreSelectedItemIdentityExact(identity) ||
+		h.restoreSelectedWindowParentIdentity(identity)
+}
+
+func (h *Home) rebuildFlatItemsPreservingSelection(identity selectedItemIdentity) bool {
 	h.rebuildFlatItems()
-	if !h.restoreSelectedItemIdentity(identity) && len(h.flatItems) > 0 {
+	restored := h.restoreSelectedItemIdentity(identity)
+	if !restored && len(h.flatItems) > 0 {
 		h.cursor = min(h.cursor, len(h.flatItems)-1)
 		h.cursor = max(h.cursor, 0)
 	}
 	h.syncViewport()
+	return restored
+}
+
+// rebuildFlatItemsPreservingExactSelection keeps the normal parent-session
+// cursor fallback for usability but reports false unless the exact hinted row
+// survived. Jump activation uses this result to avoid acting on the fallback.
+func (h *Home) rebuildFlatItemsPreservingExactSelection(identity selectedItemIdentity) bool {
+	h.rebuildFlatItems()
+	exact := h.restoreSelectedItemIdentityExact(identity)
+	restored := exact
+	if !restored {
+		restored = h.restoreSelectedWindowParentIdentity(identity)
+	}
+	if !restored && len(h.flatItems) > 0 {
+		h.cursor = min(h.cursor, len(h.flatItems)-1)
+		h.cursor = max(h.cursor, 0)
+	}
+	h.syncViewport()
+	return exact
+}
+
+// rebuildFlatItemsAfterAsyncUpdate keeps volatile state refreshes from changing
+// list order underneath an active navigation gesture. The backing snapshot is
+// already current; one identity-preserving rebuild is applied after settlement.
+func (h *Home) rebuildFlatItemsAfterAsyncUpdate() {
+	if h.isNavigating || h.jumpMode {
+		h.pendingListRebuild = true
+		return
+	}
+	selectedBefore := h.captureSelectedItemIdentity()
+	h.rebuildFlatItemsPreservingSelection(selectedBefore)
+	h.pendingListRebuild = false
+}
+
+func (h *Home) applyPendingSessionReload(identity selectedItemIdentity, requireExact bool) (bool, bool, tea.Cmd) {
+	if h.pendingSessionReload == nil {
+		return true, false, nil
+	}
+	deferred := *h.pendingSessionReload
+	h.pendingSessionReload = nil
+	queuedRebuild := h.pendingListRebuild
+	h.pendingListRebuild = false
+	_, cmd := h.updateInner(deferred)
+
+	// A successful storage reload rebuilt from all current local, remote, and
+	// hub backing state, satisfying the queued lightweight rebuild. A failed
+	// load did not rebuild anything, so apply that queued state now before jump
+	// survival is evaluated.
+	if deferred.err != nil && queuedRebuild {
+		if requireExact {
+			return h.rebuildFlatItemsPreservingExactSelection(identity), true, cmd
+		}
+		return h.rebuildFlatItemsPreservingSelection(identity), true, cmd
+	}
+
+	var survived bool
+	if requireExact {
+		survived = h.restoreSelectedItemIdentityExact(identity)
+		if !survived {
+			// Preserve normal cursor ergonomics, but do not let a jump action
+			// treat a disappeared window's parent session as the same row.
+			h.restoreSelectedWindowParentIdentity(identity)
+		}
+	} else {
+		survived = h.restoreSelectedItemIdentity(identity)
+	}
+	h.syncViewport()
+	return survived, deferred.err == nil, cmd
 }
 
 // rebuildFlatItems rebuilds the flattened view from group tree
@@ -5145,48 +5233,113 @@ func (h *Home) fetchPreview(inst *session.Instance, key string, windowIndex int)
 	}
 }
 
-// fetchPreviewDebounced returns a command that triggers preview fetch after debounce delay.
-// PERFORMANCE: Prevents rapid subprocess spawning during keyboard navigation.
-func (h *Home) fetchPreviewDebounced(sessionID string, windowIndex int) tea.Cmd {
-	const debounceDelay = 150 * time.Millisecond
+const previewDebounceDelay = 150 * time.Millisecond
 
-	key := previewCacheKey(sessionID, windowIndex)
+// schedulePreviewDebounce coalesces all cursor movement in a burst into one
+// Bubble Tea command and one eventual message. Returning a sleeping command for
+// every key still made Bubble Tea run Update+View for every superseded request,
+// even though the old handler correctly skipped the pane capture.
+func (h *Home) schedulePreviewDebounce(request previewDebounceMsg) tea.Cmd {
 	h.previewDebounceMu.Lock()
-	h.pendingPreviewKey = key
+	h.pendingPreviewGeneration++
+	request.debounceGeneration = h.pendingPreviewGeneration
+	h.pendingPreviewKey = request.previewKey
+	h.pendingPreviewRequest = request
+	h.previewDebounceRequested = time.Now()
+
+	if h.previewDebounceWake == nil {
+		h.previewDebounceWake = make(chan struct{}, 1)
+	}
+	wake := h.previewDebounceWake
+	if h.previewDebounceActive {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+		h.previewDebounceMu.Unlock()
+		return nil
+	}
+	h.previewDebounceActive = true
 	h.previewDebounceMu.Unlock()
 
 	return func() tea.Msg {
-		time.Sleep(debounceDelay)
-		return previewDebounceMsg{previewKey: key, sessionID: sessionID, windowIndex: windowIndex}
+		timer := time.NewTimer(previewDebounceDelay)
+		defer timer.Stop()
+
+		for {
+			select {
+			case <-timer.C:
+			case <-wake:
+			}
+
+			h.previewDebounceMu.Lock()
+			quietFor := time.Since(h.previewDebounceRequested)
+			if quietFor >= previewDebounceDelay {
+				msg := h.pendingPreviewRequest
+				h.previewDebounceActive = false
+				h.previewDebounceMu.Unlock()
+				return msg
+			}
+			remaining := previewDebounceDelay - quietFor
+			h.previewDebounceMu.Unlock()
+
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(remaining)
+		}
 	}
+}
+
+// cancelPendingPreviewDebounce invalidates a queued pane capture when the
+// cursor lands on a row that has no preview (for example, a group header).
+// Waking the one shared debounce command makes it return the empty request
+// instead of later capturing the row that used to be selected.
+func (h *Home) cancelPendingPreviewDebounce() {
+	h.previewDebounceMu.Lock()
+	h.pendingPreviewGeneration++
+	request := previewDebounceMsg{debounceGeneration: h.pendingPreviewGeneration}
+	h.pendingPreviewKey = ""
+	h.pendingPreviewRequest = request
+	h.previewDebounceRequested = time.Now()
+	if h.previewDebounceActive && h.previewDebounceWake != nil {
+		select {
+		case h.previewDebounceWake <- struct{}{}:
+		default:
+		}
+	}
+	h.previewDebounceMu.Unlock()
+}
+
+// fetchPreviewDebounced returns a command that triggers preview fetch after the
+// shared debounce delay.
+func (h *Home) fetchPreviewDebounced(sessionID string, windowIndex int) tea.Cmd {
+	return h.schedulePreviewDebounce(previewDebounceMsg{
+		previewKey:  previewCacheKey(sessionID, windowIndex),
+		sessionID:   sessionID,
+		windowIndex: windowIndex,
+	})
 }
 
 func (h *Home) fetchRemotePreviewDebounced(remoteName, sessionID string) tea.Cmd {
-	const debounceDelay = 150 * time.Millisecond
-
-	key := remotePreviewCacheKey(remoteName, sessionID)
-	h.previewDebounceMu.Lock()
-	h.pendingPreviewKey = key
-	h.previewDebounceMu.Unlock()
-
-	return func() tea.Msg {
-		time.Sleep(debounceDelay)
-		return previewDebounceMsg{previewKey: key, sessionID: sessionID, windowIndex: -1, remoteName: remoteName}
-	}
+	return h.schedulePreviewDebounce(previewDebounceMsg{
+		previewKey:  remotePreviewCacheKey(remoteName, sessionID),
+		sessionID:   sessionID,
+		windowIndex: -1,
+		remoteName:  remoteName,
+	})
 }
 
 func (h *Home) fetchHubPreviewDebounced(nodeID, sessionID string) tea.Cmd {
-	const debounceDelay = 150 * time.Millisecond
-
-	key := hubPreviewCacheKey(nodeID, sessionID)
-	h.previewDebounceMu.Lock()
-	h.pendingPreviewKey = key
-	h.previewDebounceMu.Unlock()
-
-	return func() tea.Msg {
-		time.Sleep(debounceDelay)
-		return previewDebounceMsg{previewKey: key, sessionID: sessionID, windowIndex: -1, hubNodeID: nodeID}
-	}
+	return h.schedulePreviewDebounce(previewDebounceMsg{
+		previewKey:  hubPreviewCacheKey(nodeID, sessionID),
+		sessionID:   sessionID,
+		windowIndex: -1,
+		hubNodeID:   nodeID,
+	})
 }
 
 func (h *Home) fetchRemotePreview(remoteName, sessionID, key string) tea.Cmd {
@@ -5343,6 +5496,7 @@ func (h *Home) fetchSelectedPreview() tea.Cmd {
 	// nothing to fill — skip the `tmux capture-pane` entirely. The preview is
 	// re-fetched on resize back into a preview layout (see WindowSizeMsg).
 	if h.getLayoutMode() == LayoutModeSingle {
+		h.cancelPendingPreviewDebounce()
 		return nil
 	}
 	inst, _, winIdx := h.selectedPreviewTarget()
@@ -5353,11 +5507,31 @@ func (h *Home) fetchSelectedPreview() tea.Cmd {
 		}
 		remoteName, remoteSessionID, _, ok := h.selectedRemotePreviewTarget()
 		if !ok {
+			h.cancelPendingPreviewDebounce()
 			return nil
 		}
 		return h.fetchRemotePreviewDebounced(remoteName, remoteSessionID)
 	}
 	return h.fetchPreviewDebounced(inst.ID, winIdx)
+}
+
+// selectedPreviewKey returns the cache key represented by the current row.
+// It is used when a debounce message lands to reject a target that stopped
+// being selected after the command was scheduled.
+func (h *Home) selectedPreviewKey() string {
+	if h.getLayoutMode() == LayoutModeSingle {
+		return ""
+	}
+	if _, key, _ := h.selectedPreviewTarget(); key != "" {
+		return key
+	}
+	if _, _, key, ok := h.selectedHubPreviewTarget(); ok {
+		return key
+	}
+	if _, _, key, ok := h.selectedRemotePreviewTarget(); ok {
+		return key
+	}
+	return ""
 }
 
 // detectOpenCodeSessionCmd returns a command that asynchronously detects
@@ -6958,6 +7132,15 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case loadSessionsMsg:
+		// A storage reload recreates the group tree and flattened rows. Keep the
+		// currently displayed row-to-hint mapping frozen until jump mode ends so
+		// a multi-key hint cannot leak into a normal destructive hotkey.
+		if h.jumpMode || h.isNavigating {
+			deferred := msg
+			h.pendingSessionReload = &deferred
+			return h, nil
+		}
+
 		// Clear loading indicators and store file mtime for external change detection
 		h.reloadMu.Lock()
 		h.isReloading = false
@@ -7247,7 +7430,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			h.setError(msg.err)
 			if msg.tempID != "" {
-				h.rebuildFlatItems() // Remove placeholder from list
+				h.rebuildFlatItemsAfterAsyncUpdate() // Remove placeholder from list
 			}
 		} else {
 			h.instancesMu.Lock()
@@ -7269,15 +7452,18 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Add to existing group tree instead of rebuilding
 			h.groupTree.AddSession(msg.instance)
-			h.rebuildFlatItems()
+			deferListSelection := h.isNavigating || h.jumpMode
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.search.SetItems(h.instances)
 
 			// Auto-select the new session
-			for i, item := range h.flatItems {
-				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
-					h.cursor = i
-					h.syncViewport()
-					break
+			if !deferListSelection {
+				for i, item := range h.flatItems {
+					if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
+						h.cursor = i
+						h.syncViewport()
+						break
+					}
 				}
 			}
 
@@ -7301,7 +7487,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// in that case we fall through to today's select-only behavior.
 			// Skip auto-attach when a setup warning is pending: attaching would
 			// hide the footer before the user can read it.
-			if h.attachOnCreate && msg.setupWarning == "" {
+			if !deferListSelection && h.attachOnCreate && msg.setupWarning == "" {
 				if attachTo := h.attachSession(msg.instance); attachTo != nil {
 					return h, tea.Batch(h.fetchPreview(msg.instance, msg.instance.ID, -1), attachTo)
 				}
@@ -7331,13 +7517,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.groupTree.ExpandGroupWithParents(msg.instance.GroupPath)
 		}
 		h.groupTree.AddSession(msg.instance)
-		h.rebuildFlatItems()
+		deferListSelection := h.isNavigating || h.jumpMode
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.search.SetItems(h.instances)
-		for i, item := range h.flatItems {
-			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
-				h.cursor = i
-				h.syncViewport()
-				break
+		if !deferListSelection {
+			for i, item := range h.flatItems {
+				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
+					h.cursor = i
+					h.syncViewport()
+					break
+				}
 			}
 		}
 		h.forceSaveInstances()
@@ -7400,15 +7589,18 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Add to existing group tree instead of rebuilding
 			h.groupTree.AddSession(msg.instance)
-			h.rebuildFlatItems()
+			deferListSelection := h.isNavigating || h.jumpMode
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.search.SetItems(h.instances)
 
 			// Auto-select the forked session
-			for i, item := range h.flatItems {
-				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
-					h.cursor = i
-					h.syncViewport()
-					break
+			if !deferListSelection {
+				for i, item := range h.flatItems {
+					if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
+						h.cursor = i
+						h.syncViewport()
+						break
+					}
 				}
 			}
 
@@ -7488,7 +7680,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if deletedInstance != nil {
 			h.groupTree.RemoveSession(deletedInstance)
 		}
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		// Update search items
 		h.search.SetItems(h.instances)
 		// Explicitly delete from database to prevent resurrection on reload
@@ -7528,7 +7720,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		h.cachedStatusCounts.valid.Store(false)
 		h.invalidatePreviewCache(msg.sessionID)
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.refreshSessionRenderSnapshot(nil)
 		h.saveInstances()
 		h.publishCurrentSessionStates()
@@ -7551,7 +7743,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		h.cachedStatusCounts.valid.Store(false)
 		h.invalidatePreviewCache(msg.sessionID)
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		if inst := h.getInstanceByID(msg.sessionID); inst != nil {
 			// Persist via a targeted UPDATE, not saveInstances(): under concurrent
 			// writers the full-table save aborts on external-change and reloads,
@@ -7565,7 +7757,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case sessionUnarchivedMsg:
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		if inst := h.getInstanceByID(msg.sessionID); inst != nil {
 			if err := h.persistArchived(inst); err != nil {
 				h.setError(fmt.Errorf("failed to persist unarchive: %w", err))
@@ -7604,17 +7796,21 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.groupTree.ExpandGroupWithParents(msg.instance.GroupPath)
 		}
 
-		// Add to group tree and rebuild
+		// Add to group tree and rebuild. An undo result must not steal the
+		// cursor from an in-progress navigation gesture.
 		h.groupTree.AddSession(msg.instance)
-		h.rebuildFlatItems()
+		deferRebuild := h.isNavigating || h.jumpMode
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.search.SetItems(h.instances)
 
 		// Move cursor to restored session
-		for i, item := range h.flatItems {
-			if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
-				h.cursor = i
-				h.syncViewport()
-				break
+		if !deferRebuild {
+			for i, item := range h.flatItems {
+				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == msg.instance.ID {
+					h.cursor = i
+					h.syncViewport()
+					break
+				}
 			}
 		}
 
@@ -7682,7 +7878,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.instancesMu.Unlock()
 			if msg.unarchived {
 				h.cachedStatusCounts.valid.Store(false)
-				h.rebuildFlatItems()
+				h.rebuildFlatItemsAfterAsyncUpdate()
 			}
 			// Save the updated session state (new tmux session name)
 			h.saveInstances()
@@ -7743,13 +7939,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// directly), but the pill froze on the previous fetch's totals.
 		// Invalidate so the next View() recomputes.
 		h.cachedStatusCounts.valid.Store(false)
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		return h, nil
 
 	case hubSnapshotMsg:
-		selectedBefore := h.captureSelectedItemIdentity()
 		h.applyHubSnapshot(msg.snapshot)
-		h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.publishWebMenuSnapshot()
 		return h, h.listenForHubSnapshot()
 
@@ -8013,7 +8208,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.action == "create" && msg.nodeID != "" && msg.sessionID != "" && msg.createRequest != nil {
 			h.addHubSessionToCache(msg.nodeID, msg.nodeName, msg.sessionID, *msg.createRequest)
-			h.rebuildFlatItems()
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.publishWebMenuSnapshot()
 		}
 		if msg.action == "delete" && msg.nodeID != "" && msg.sessionID != "" {
@@ -8021,16 +8216,16 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.removeOnSuccess && msg.nodeID != "" && msg.sessionID != "" {
 			h.removeHubSessionFromCache(msg.nodeID, msg.sessionID)
-			h.rebuildFlatItems()
+			h.rebuildFlatItemsAfterAsyncUpdate()
 		}
 		if msg.nodeAdmin != nil && msg.nodeID != "" {
 			h.updateHubNodeAdminInCache(msg.nodeID, *msg.nodeAdmin)
-			h.rebuildFlatItems()
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.publishWebMenuSnapshot()
 		}
 		if msg.removeNode && msg.nodeID != "" {
 			h.removeHubNodeFromCache(msg.nodeID)
-			h.rebuildFlatItems()
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.publishWebMenuSnapshot()
 		}
 		return h, nil
@@ -8167,6 +8362,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
 		h.isAttaching.Store(false) // Atomic store for thread safety
+		jumpInProgress := h.jumpMode
 		now := time.Now()
 		h.beginAttachReturnGrace(now)
 		if inst := h.getInstanceByID(msg.attachedSessionID); inst != nil {
@@ -8178,8 +8374,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// carries the rationale; attachReturnSyncedMsg repaints when it lands.
 		syncCmd := h.attachReturnSyncCmd(msg.attachedSessionID)
 
-		selectedBefore := h.captureSelectedItemIdentity()
-		h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		h.rebuildFlatItemsAfterAsyncUpdate()
 
 		// Cursor sync: if user switched sessions via notification bar during attach,
 		// move cursor to the session they were last viewing
@@ -8188,7 +8383,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.lastNotifSwitchID = ""
 		h.lastNotifSwitchMu.Unlock()
 
-		if switchedID != "" {
+		if switchedID != "" && !jumpInProgress {
 			found := false
 			for i, item := range h.flatItems {
 				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == switchedID {
@@ -8332,15 +8527,15 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachReturnSyncedMsg:
 		// Async attach-return reconciliation finished: re-derive the rows from the
 		// snapshot it just published. Pure in-memory work, no tmux, no disk.
-		selectedBefore := h.captureSelectedItemIdentity()
-		h.rebuildFlatItemsPreservingSelection(selectedBefore)
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		return h, nil
 
 	case previewDebounceMsg:
 		// PERFORMANCE: Debounce period elapsed - check if this fetch is still relevant
 		// If user continued navigating, pendingPreviewKey will have changed
 		h.previewDebounceMu.Lock()
-		isPending := h.pendingPreviewKey == msg.previewKey
+		isPending := h.pendingPreviewKey == msg.previewKey &&
+			h.pendingPreviewGeneration == msg.debounceGeneration
 		if isPending {
 			h.pendingPreviewKey = "" // Clear pending state
 		}
@@ -8348,6 +8543,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if !isPending {
 			return h, nil // Superseded by newer navigation
+		}
+		if msg.previewKey == "" || h.selectedPreviewKey() != msg.previewKey {
+			return h, nil
 		}
 
 		if msg.hubNodeID != "" {
@@ -8604,7 +8802,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if inst != nil {
 			h.groupTree.RemoveSession(inst)
 		}
-		h.rebuildFlatItems()
+		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.search.SetItems(h.instances)
 
 		// Delete from database and save
@@ -8733,8 +8931,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		h.drainHubTrustRequests()
 		if h.drainHubSnapshots() {
-			selectedBefore := h.captureSelectedItemIdentity()
-			h.rebuildFlatItemsPreservingSelection(selectedBefore)
+			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.publishWebMenuSnapshot()
 		}
 
@@ -8750,9 +8947,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.isNavigating = false
 		}
 
-		if h.groupViewMode != session.GroupViewNormal && !h.isNavigating {
+		var pendingReloadCmd tea.Cmd
+		rebuiltByPendingReload := false
+		if !h.isNavigating && !h.jumpMode && h.pendingSessionReload != nil {
+			selectedBefore := h.captureSelectedItemIdentity()
+			_, rebuiltByPendingReload, pendingReloadCmd = h.applyPendingSessionReload(selectedBefore, false)
+		}
+
+		if !rebuiltByPendingReload && !h.isNavigating && !h.jumpMode && (h.groupViewMode != session.GroupViewNormal || h.pendingListRebuild) {
 			selectedBefore := h.captureSelectedItemIdentity()
 			h.rebuildFlatItemsPreservingSelection(selectedBefore)
+			h.pendingListRebuild = false
 		}
 
 		// PERFORMANCE: Skip background updates during rapid navigation
@@ -8896,7 +9101,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		const updateRecheckInterval = 5 * time.Minute
 		if h.updateInfo != nil && h.updateInfo.Available && time.Since(h.lastUpdateCheck) >= updateRecheckInterval {
 			h.lastUpdateCheck = time.Now()
-			return h, tea.Batch(h.tick(), h.checkForUpdate())
+			return h, tea.Batch(h.tick(), h.checkForUpdate(), pendingReloadCmd)
 		}
 
 		// Clean up expired animation entries (launching, resuming, MCP loading, forking)
@@ -8958,7 +9163,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		cmds := []tea.Cmd{h.tick(), previewCmd, remoteFetchCmd, remoteLatencyCmd}
+		cmds := []tea.Cmd{h.tick(), previewCmd, remoteFetchCmd, remoteLatencyCmd, pendingReloadCmd}
 		if h.fullRepaint {
 			cmds = append(cmds, tea.ClearScreen)
 		}
@@ -10098,11 +10303,11 @@ func (h *Home) handleJumpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key == "esc":
-		h.jumpMode = false
-		h.jumpBuffer = ""
-		return h, nil
+		_, cmd := h.finishJumpMode()
+		return h, cmd
 
 	case len(key) == 1 && key[0] >= 'a' && key[0] <= 'z':
+		h.markNavigationActivity()
 		h.jumpBuffer += key
 		selectable := selectableItemIndices(h.flatItems)
 		hints := generateJumpHints(len(selectable))
@@ -10112,28 +10317,55 @@ func (h *Home) handleJumpKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			h.cursor = selectable[result.index]
 			h.skipDivider(1) // never land on a non-selectable divider
 			h.syncViewport()
-			h.jumpMode = false
-			h.jumpBuffer = ""
+			survived, deferredCmd := h.finishJumpMode()
+			if !survived {
+				h.setError(fmt.Errorf("jump target is no longer available"))
+				return h, deferredCmd
+			}
 			// For sessions/windows/remotes: attach directly.
 			// For groups: just move cursor (user can press Enter to toggle).
 			item := h.flatItems[h.cursor]
 			if item.Type != session.ItemTypeGroup && item.Type != session.ItemTypeRemoteGroup && item.Type != session.ItemTypeHubNode && item.Type != session.ItemTypeHubGroup {
-				return h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
+				model, actionCmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyEnter})
+				return model, tea.Batch(deferredCmd, actionCmd)
 			}
-			return h, nil
+			return h, deferredCmd
 		}
 		if !result.isPrefix {
-			h.jumpMode = false
-			h.jumpBuffer = ""
+			_, cmd := h.finishJumpMode()
+			return h, cmd
 		}
 		return h, nil
 
 	default:
 		// Non-letter key — exit jump mode, pass key through
-		h.jumpMode = false
-		h.jumpBuffer = ""
-		return h.handleMainKey(msg)
+		survived, deferredCmd := h.finishJumpMode()
+		if !survived {
+			h.setError(fmt.Errorf("selected jump row is no longer available"))
+			return h, deferredCmd
+		}
+		model, actionCmd := h.handleMainKey(msg)
+		return model, tea.Batch(deferredCmd, actionCmd)
 	}
+}
+
+// finishJumpMode applies state that was deliberately held back while hint
+// labels were visible. The bool reports whether the row selected under the
+// frozen mapping still exists after that state is applied.
+func (h *Home) finishJumpMode() (bool, tea.Cmd) {
+	selectedBefore := h.captureSelectedItemIdentity()
+	h.jumpMode = false
+	h.jumpBuffer = ""
+	if h.pendingSessionReload != nil {
+		survived, _, cmd := h.applyPendingSessionReload(selectedBefore, true)
+		return survived, cmd
+	}
+	if h.pendingListRebuild {
+		survived := h.rebuildFlatItemsPreservingExactSelection(selectedBefore)
+		h.pendingListRebuild = false
+		return survived, nil
+	}
+	return true, nil
 }
 
 // hasModalVisible returns true if any modal dialog or overlay is currently visible
@@ -10156,9 +10388,7 @@ func (h *Home) hasModalVisible() bool {
 
 // markNavigationAndFetchPreview sets navigation tracking state and returns a debounced preview command
 func (h *Home) markNavigationAndFetchPreview() tea.Cmd {
-	h.lastNavigationTime = time.Now()
-	h.isNavigating = true
-	h.clearSearchPinnedSessionIfCursorMoved()
+	h.markNavigationActivity()
 	return h.fetchSelectedPreview()
 }
 
@@ -11635,6 +11865,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		if len(h.flatItems) > 0 {
+			h.markNavigationActivity()
 			h.jumpMode = true
 			h.jumpBuffer = ""
 		}

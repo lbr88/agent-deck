@@ -14,6 +14,11 @@ and drained hub refreshes rebuild immediately. Those rebuilds can change the row
 under the numeric cursor. The preview-message backlog can also delay effective
 navigation long enough for the current 700 ms navigation guard to expire.
 
+The same asynchronous rebuild resets Space-jump mode and its partially typed
+hint. A following hint character then reaches the normal keymap; for a hint such
+as `dd`, that can invoke the destructive `d` action instead of completing the
+jump.
+
 ## Goals
 
 - Coalesce a burst of preview requests into one debounce command and one
@@ -24,6 +29,8 @@ navigation long enough for the current 700 ms navigation guard to expire.
   active.
 - Apply deferred state changes after navigation settles, following the selected
   session by stable identity.
+- Keep Space-jump hints active until they complete or are explicitly canceled,
+  without leaking hint characters into normal actions.
 
 ## Design
 
@@ -65,6 +72,16 @@ Mouse selection and wheel navigation will use the same navigation-hot tracking
 as keyboard movement so background workers cannot bypass the guard for those
 inputs.
 
+### Stable Space-jump input
+
+Space-jump mode counts as active navigation. Async list rebuilds are deferred
+while a hint is being entered, including the interval between characters of a
+multi-key hint. Completing or canceling the jump applies any deferred rebuild
+once while preserving the selected row identity.
+
+This keeps the rendered hint mapping and input mapping on the same snapshot and
+prevents hint characters such as `d` from reaching normal destructive actions.
+
 ## Testing
 
 Regression tests will prove that:
@@ -78,6 +95,8 @@ Regression tests will prove that:
   to its new row.
 - Mouse selection establishes the same navigation-hot window as keyboard
   movement.
+- A rendered multi-key hint such as `dd` survives an intervening async refresh,
+  selects its displayed row, and never opens the delete dialog.
 
 The focused UI tests, full race-enabled Go suite, lint, vulnerability scan,
 production build, local install, and a controlled PTY navigation burst will be

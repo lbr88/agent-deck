@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -215,6 +216,268 @@ func TestJumpKeyDoesNotSpendHintOnDivider(t *testing.T) {
 
 	if home.cursor != 2 {
 		t.Fatalf("second selectable jump hint should land on beta at index 2, got cursor=%d", home.cursor)
+	}
+}
+
+func TestJumpHintSurvivesAsyncRefreshUntilMultiKeySelectionCompletes(t *testing.T) {
+	home := NewHome()
+	home.width = 120
+	home.height = 40
+	home.initialLoading = false
+	home.groupTree = session.NewGroupTree(nil)
+	for i := 0; i < 65; i++ {
+		home.groupTree.CreateGroup(fmt.Sprintf("group-%02d", i))
+	}
+	home.rebuildFlatItems()
+
+	selectable := selectableItemIndices(home.flatItems)
+	hints := generateJumpHints(len(selectable))
+	targetHint := "dd"
+	targetHintIndex := -1
+	for i, hint := range hints {
+		if hint == targetHint {
+			targetHintIndex = i
+			break
+		}
+	}
+	if targetHintIndex < 0 {
+		t.Fatalf("precondition: %q missing from %d generated hints", targetHint, len(hints))
+	}
+
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if !home.jumpMode {
+		t.Fatal("space did not enter jump mode")
+	}
+	home.isNavigating = false
+	home.navigationHotUntil.Store(0)
+
+	// Reproduce the live failure: a remote/hub state refresh rebuilt flatItems
+	// between Space and the first hint character, clearing jumpMode. The next
+	// "d" then leaked into the normal destructive-delete binding.
+	home.Update(remoteSessionsFetchedMsg{
+		sessions: map[string][]session.RemoteSessionInfo{},
+	})
+	if !home.jumpMode {
+		t.Fatal("async refresh canceled jump mode before the hint was entered")
+	}
+
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if !home.jumpMode || home.jumpBuffer != "d" {
+		t.Fatalf("first d did not remain a jump prefix: mode=%v buffer=%q", home.jumpMode, home.jumpBuffer)
+	}
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	wantCursor := selectable[targetHintIndex]
+	if home.cursor != wantCursor {
+		t.Fatalf("dd selected cursor %d, want %d", home.cursor, wantCursor)
+	}
+	if home.jumpMode || home.jumpBuffer != "" {
+		t.Fatalf("completed jump did not exit cleanly: mode=%v buffer=%q", home.jumpMode, home.jumpBuffer)
+	}
+	if home.confirmDialog.IsVisible() {
+		t.Fatal("dd leaked into the normal delete binding")
+	}
+}
+
+func TestJumpHintSurvivesAttachReturnRebuild(t *testing.T) {
+	home, _ := buildTwoGroupHome(t)
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.isNavigating = false
+
+	home.Update(attachReturnSyncedMsg{})
+
+	if !home.jumpMode {
+		t.Fatal("attach-return refresh canceled jump mode")
+	}
+}
+
+func TestJumpHintSurvivesStorageReload(t *testing.T) {
+	home, _ := buildTwoGroupHome(t)
+	state := home.preserveState()
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.isNavigating = false
+
+	home.Update(loadSessionsMsg{
+		instances:    append([]*session.Instance(nil), home.instances...),
+		restoreState: &state,
+	})
+
+	if !home.jumpMode {
+		t.Fatal("storage reload canceled jump mode")
+	}
+
+	targetIndex := -1
+	for i, item := range home.flatItems {
+		if item.Type == session.ItemTypeGroup && item.Path == "beta" {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex < 0 {
+		t.Fatal("beta group missing before jump completion")
+	}
+	selectable := selectableItemIndices(home.flatItems)
+	hints := generateJumpHints(len(selectable))
+	var hint string
+	for i, index := range selectable {
+		if index == targetIndex {
+			hint = hints[i]
+			break
+		}
+	}
+	if len(hint) != 1 {
+		t.Fatalf("beta group hint = %q, want one key", hint)
+	}
+
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(hint)})
+
+	if home.jumpMode {
+		t.Fatal("completed storage-reload jump did not exit jump mode")
+	}
+	if home.cursor < 0 || home.cursor >= len(home.flatItems) {
+		t.Fatalf("storage reload left jump cursor out of range: %d of %d", home.cursor, len(home.flatItems))
+	}
+	if home.flatItems[home.cursor].Path != "beta" {
+		t.Fatalf("storage reload changed jump target: cursor=%d item=%#v", home.cursor, home.flatItems[home.cursor])
+	}
+}
+
+func TestJumpTargetRemovalCancelsActivation(t *testing.T) {
+	home := NewHome()
+	home.width = 120
+	home.height = 40
+	home.initialLoading = false
+	home.groupTree = session.NewGroupTree(nil)
+	for i := 0; i < 65; i++ {
+		home.groupTree.CreateGroup(fmt.Sprintf("group-%02d", i))
+	}
+	home.rebuildFlatItems()
+
+	selectable := selectableItemIndices(home.flatItems)
+	hints := generateJumpHints(len(selectable))
+	targetHintIndex := -1
+	for i, hint := range hints {
+		if hint == "dd" {
+			targetHintIndex = i
+			break
+		}
+	}
+	if targetHintIndex < 0 {
+		t.Fatal("precondition: dd hint missing")
+	}
+	targetItem := home.flatItems[selectable[targetHintIndex]]
+
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	home.groupTree.DeleteGroup(targetItem.Path)
+	home.pendingListRebuild = true
+
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	if home.err == nil || !strings.Contains(home.err.Error(), "no longer available") {
+		t.Fatalf("removed jump target was not canceled safely: err=%v", home.err)
+	}
+	if home.confirmDialog.IsVisible() {
+		t.Fatal("removed jump target activated the replacement row")
+	}
+}
+
+func TestFailedDeferredReloadStillAppliesRemovedJumpTarget(t *testing.T) {
+	home := NewHome()
+	home.width = 120
+	home.height = 40
+	home.initialLoading = false
+	home.groupTree = session.NewGroupTree(nil)
+	for i := 0; i < 65; i++ {
+		home.groupTree.CreateGroup(fmt.Sprintf("group-%02d", i))
+	}
+	home.rebuildFlatItems()
+
+	selectable := selectableItemIndices(home.flatItems)
+	hints := generateJumpHints(len(selectable))
+	targetHintIndex := -1
+	for i, hint := range hints {
+		if hint == "dd" {
+			targetHintIndex = i
+			break
+		}
+	}
+	if targetHintIndex < 0 {
+		t.Fatal("precondition: dd hint missing")
+	}
+	targetItem := home.flatItems[selectable[targetHintIndex]]
+
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	home.groupTree.DeleteGroup(targetItem.Path)
+	home.pendingListRebuild = true
+	home.Update(loadSessionsMsg{err: fmt.Errorf("reload failed")})
+
+	if !home.jumpMode || home.pendingSessionReload == nil {
+		t.Fatal("failed reload was not deferred while jump hint was active")
+	}
+
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	if home.err == nil || !strings.Contains(home.err.Error(), "no longer available") {
+		t.Fatalf("failed reload discarded removed target rebuild: err=%v", home.err)
+	}
+	if home.confirmDialog.IsVisible() {
+		t.Fatal("failed reload allowed removed jump target to activate")
+	}
+}
+
+func TestJumpWindowRemovalDoesNotActivateParentSession(t *testing.T) {
+	parent := session.NewInstance("parent", "/tmp/parent")
+	home := NewHome()
+	home.width = 120
+	home.height = 40
+	home.initialLoading = false
+	home.instances = []*session.Instance{parent}
+	home.instanceByID[parent.ID] = parent
+	home.groupTree = session.NewGroupTree(home.instances)
+	for i := 0; i < 65; i++ {
+		home.groupTree.CreateGroup(fmt.Sprintf("group-%02d", i))
+	}
+	home.rebuildFlatItems()
+
+	selectable := selectableItemIndices(home.flatItems)
+	hints := generateJumpHints(len(selectable))
+	targetHintIndex := -1
+	for i, hint := range hints {
+		if hint == "dd" {
+			targetHintIndex = i
+			break
+		}
+	}
+	if targetHintIndex < 0 {
+		t.Fatal("precondition: dd hint missing")
+	}
+	targetFlatIndex := selectable[targetHintIndex]
+	home.flatItems[targetFlatIndex] = session.Item{
+		Type:            session.ItemTypeWindow,
+		WindowSessionID: parent.ID,
+		WindowIndex:     3,
+		WindowName:      "removed-window",
+	}
+
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	home.pendingListRebuild = true // Backing tree no longer contains the window row.
+	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+
+	if home.err == nil || !strings.Contains(home.err.Error(), "no longer available") {
+		t.Fatalf("removed window jump was not canceled safely: err=%v", home.err)
+	}
+	if home.jumpMode {
+		t.Fatal("removed window jump did not exit jump mode")
+	}
+	if home.cursor < 0 || home.cursor >= len(home.flatItems) {
+		t.Fatalf("window fallback cursor out of range: %d of %d", home.cursor, len(home.flatItems))
+	}
+	item := home.flatItems[home.cursor]
+	if item.Type != session.ItemTypeSession || item.Session == nil || item.Session.ID != parent.ID {
+		t.Fatalf("removed window did not retain harmless parent fallback: %#v", item)
 	}
 }
 

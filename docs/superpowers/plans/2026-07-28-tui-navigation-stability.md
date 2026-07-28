@@ -37,7 +37,15 @@ navigation-aware, identity-preserving rebuild helper.
 - Make immediate async rebuilds preserve selection too.
 - Use the common navigation activity helper for mouse selection.
 
-## Task 5: Verification and delivery
+## Task 5: Stable multi-key Space-jump
+
+- Reproduce a multi-key Space-jump with an async refresh between Space and the
+  hint characters.
+- Keep jump mode active across the refresh and apply deferred rows on
+  completion/cancel.
+- Assert the hint selects its displayed row without invoking delete.
+
+## Task 6: Verification and delivery
 
 - Run focused UI tests with `-race`.
 - Run the full race-enabled test suite and lint.
