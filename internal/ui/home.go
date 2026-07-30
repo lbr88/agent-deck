@@ -109,6 +109,14 @@ const (
 	minLaunchAnimationDurationDefault = 500 * time.Millisecond
 	minLaunchAnimationDurationClaude  = 800 * time.Millisecond
 
+	// A large Codex thread can spend minutes rebuilding plugins, tools, and
+	// transcript cells after the tmux process has spawned. Restart() marks the
+	// instance waiting immediately, so readiness must be based on pane output,
+	// not that synthetic status. Keep the guard long enough for real-world
+	// resumes while still bounding a genuinely wedged startup.
+	codexResumeReadyTimeout = 10 * time.Minute
+	resumeReadinessPoll     = 350 * time.Millisecond
+
 	// logCheckInterval - how often to check for oversized logs (fast check, just file stats)
 	// This catches runaway logs before they cause high CPU
 	logCheckInterval = 10 * time.Second
@@ -466,12 +474,22 @@ type Home struct {
 
 	// Launching animation state (for newly created sessions)
 	launchingSessions    map[string]time.Time        // sessionID -> creation time
-	resumingSessions     map[string]time.Time        // sessionID -> resume time (for restart/resume)
+	resumingSessions     map[string]time.Time        // sessionID -> resume generation (until first pane frame)
+	resumeGenerations    map[string]time.Time        // sessionID -> latest restart owner (survives animation cleanup)
+	resumeAttachRequests map[string]time.Time        // sessionID -> resume generation the user asked to open
 	mcpLoadingSessions   map[string]time.Time        // sessionID -> MCP reload time
 	forkingSessions      map[string]time.Time        // sessionID -> fork start time (fork in progress)
 	setupRunningSessions map[string]time.Time        // sessionID -> setup script start time
 	creatingSessions     map[string]*CreatingSession // tempID -> placeholder for worktree creation in progress
 	animationFrame       int                         // Current frame for spinner animation
+
+	// Resume readiness uses fresh pane output rather than Restart()'s synthetic
+	// StatusWaiting value. Production uses tmux capture-pane; tests replace the
+	// external boundary and attach dispatch while retaining the real state
+	// machine.
+	resumeReadinessProbe func(*session.Instance) (string, error)
+	resumeAttachSink     func(*session.Instance) tea.Cmd
+	resumeSessionExists  func(*session.Instance) bool
 
 	// Context for cleanup
 	ctx    context.Context
@@ -1664,6 +1682,8 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		clearOnCompactSent:        make(map[string]time.Time),
 		launchingSessions:         make(map[string]time.Time),
 		resumingSessions:          make(map[string]time.Time),
+		resumeGenerations:         make(map[string]time.Time),
+		resumeAttachRequests:      make(map[string]time.Time),
 		mcpLoadingSessions:        make(map[string]time.Time),
 		forkingSessions:           make(map[string]time.Time),
 		setupRunningSessions:      make(map[string]time.Time),
@@ -1694,6 +1714,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		hubWelcomeCh:              make(chan hubWelcomeMsg, 8),
 		hubTrustRequestCh:         make(chan hubTrustRequestMsg, 64),
 	}
+	h.resumeReadinessProbe = captureResumePane
 	h.sessionRenderSnapshot.Store(make(map[string]sessionRenderState))
 
 	h.reloadHotkeysFromConfig()
@@ -5026,7 +5047,7 @@ func (h *Home) clearError() {
 // Returns list of IDs that were removed (for logging/debugging if needed)
 func (h *Home) cleanupExpiredAnimations(
 	animMap map[string]time.Time,
-	claudeTimeout, defaultTimeout time.Duration,
+	claudeTimeout, defaultTimeout, codexTimeout time.Duration,
 ) []string {
 	var toDelete []string
 	for sessionID, startTime := range animMap {
@@ -5039,7 +5060,9 @@ func (h *Home) cleanupExpiredAnimations(
 		// Use appropriate timeout based on tool
 		// Claude and Gemini use longer timeout (MCP loading can be slow)
 		timeout := defaultTimeout
-		if session.IsClaudeCompatible(inst.Tool) || inst.Tool == "gemini" {
+		if session.IsCodexCompatible(inst.Tool) {
+			timeout = codexTimeout
+		} else if session.IsClaudeCompatible(inst.Tool) || inst.Tool == "gemini" {
 			timeout = claudeTimeout
 		}
 		if time.Since(startTime) > timeout {
@@ -5057,6 +5080,21 @@ func launchAnimationMinDuration(tool string) time.Duration {
 		return minLaunchAnimationDurationClaude
 	}
 	return minLaunchAnimationDurationDefault
+}
+
+func paneFrameReady(content string) bool {
+	return strings.TrimSpace(ansi.Strip(content)) != ""
+}
+
+func captureResumePane(inst *session.Instance) (string, error) {
+	if inst == nil {
+		return "", fmt.Errorf("session no longer exists")
+	}
+	tmuxSess := inst.GetTmuxSession()
+	if tmuxSess == nil {
+		return "", fmt.Errorf("session has no tmux target")
+	}
+	return tmuxSess.CapturePaneFresh()
 }
 
 // hasActiveAnimation checks if a session has an animation currently being displayed
@@ -5096,6 +5134,16 @@ func (h *Home) hasActiveAnimation(sessionID string) bool {
 	// Instead of hardcoded 6-second minimum, use actual session status
 	// Status is updated via background polling (2s interval)
 	timeSinceStart := time.Since(startTime)
+
+	// Restart() assigns StatusWaiting as soon as tmux accepts the Codex spawn.
+	// That status is not evidence that Codex has rendered: on a large resumed
+	// thread the pane can remain completely blank for several minutes. Old
+	// preview content is not evidence either because it may predate respawn-pane.
+	// Only the generation-matched readiness message releases this guard.
+	if _, isResuming := h.resumingSessions[sessionID]; isResuming &&
+		session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+		return timeSinceStart < codexResumeReadyTimeout
+	}
 
 	// Brief minimum to prevent flicker during rapid status changes
 	if timeSinceStart < launchAnimationMinDuration(inst.GetToolThreadSafe()) {
@@ -7665,6 +7713,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Invalidate status counts cache
 		h.cachedStatusCounts.valid.Store(false)
+		delete(h.resumingSessions, msg.deletedID)
+		delete(h.resumeGenerations, msg.deletedID)
+		delete(h.resumeAttachRequests, msg.deletedID)
 		// Invalidate preview cache for deleted session
 		h.invalidatePreviewCache(msg.deletedID)
 		// Clean up analytics caches for deleted session
@@ -7852,11 +7903,82 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.forceSaveInstances()
 		return h, nil
 
+	case sessionResumeReadinessMsg:
+		startedAt, tracked := h.resumingSessions[msg.sessionID]
+		if !tracked || !startedAt.Equal(msg.startedAt) {
+			// A newer restart generation owns this session now.
+			return h, nil
+		}
+
+		if msg.ready {
+			delete(h.resumingSessions, msg.sessionID)
+
+			if msg.content != "" {
+				h.previewCacheMu.Lock()
+				h.previewCache[msg.sessionID] = msg.content
+				h.previewCacheTime[msg.sessionID] = time.Now()
+				h.previewCacheMu.Unlock()
+			}
+
+			attachStartedAt, attachRequested := h.resumeAttachRequests[msg.sessionID]
+			delete(h.resumeAttachRequests, msg.sessionID)
+
+			inst := h.getInstanceByID(msg.sessionID)
+			if inst == nil {
+				h.setError(fmt.Errorf("resumed session no longer exists"))
+				return h, nil
+			}
+
+			// A delayed ready event must not hijack the terminal after the user
+			// has navigated elsewhere during a long Codex startup.
+			if attachRequested && attachStartedAt.Equal(startedAt) {
+				selected := h.getSelectedSession()
+				if selected != nil && selected.ID == msg.sessionID {
+					return h, h.attachResumedSession(inst)
+				}
+			}
+			return h, h.fetchPreview(inst, msg.sessionID, -1)
+		}
+
+		if time.Since(startedAt) >= codexResumeReadyTimeout {
+			delete(h.resumingSessions, msg.sessionID)
+			delete(h.resumeAttachRequests, msg.sessionID)
+			if msg.err != nil {
+				h.setError(fmt.Errorf("session did not render after resume: %w", msg.err))
+			} else {
+				h.setError(fmt.Errorf("session did not render after resume; press R to retry"))
+			}
+			return h, nil
+		}
+
+		// Empty output and transient capture errors both mean "not ready yet".
+		// Keep the user in the visible resuming state and poll the one target at
+		// a bounded cadence instead of opening an empty tmux pane.
+		return h, h.probeSessionResumeReadiness(
+			msg.sessionID,
+			startedAt,
+			resumeReadinessPoll,
+		)
+
 	case sessionRestartedMsg:
+		if !msg.startedAt.IsZero() {
+			latestGeneration, known := h.resumeGenerations[msg.sessionID]
+			if !known || !latestGeneration.Equal(msg.startedAt) {
+				// This restart completed after a newer generation took ownership,
+				// or after the session and its generation were deleted.
+				return h, nil
+			}
+			// Restart completion has now consumed this ownership token. Pane
+			// readiness continues under resumingSessions using the same value.
+			delete(h.resumeGenerations, msg.sessionID)
+		}
+
 		var restartedPreview tea.Cmd
+		var readinessCheck tea.Cmd
 		if msg.err != nil {
 			// Restart failed - clear resuming animation immediately so user can retry.
 			delete(h.resumingSessions, msg.sessionID)
+			delete(h.resumeAttachRequests, msg.sessionID)
 			if msg.fresh {
 				h.setError(fmt.Errorf("failed to restart session fresh: %w", msg.err))
 			} else {
@@ -7889,10 +8011,22 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					h.setError(fmt.Errorf("unarchived and restarted '%s'", inst.Title))
 				}
 			}
+			if startedAt, tracked := h.resumingSessions[msg.sessionID]; tracked {
+				if inst := h.getInstanceByID(msg.sessionID); inst != nil &&
+					session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+					readinessCheck = h.probeSessionResumeReadiness(msg.sessionID, startedAt, 0)
+				} else {
+					readinessCheck = func() tea.Msg {
+						return sessionResumeReadinessMsg{
+							sessionID: msg.sessionID,
+							startedAt: startedAt,
+							ready:     true,
+						}
+					}
+				}
+			}
 		}
-		// Clear animation so ENTER can attach immediately.
-		delete(h.resumingSessions, msg.sessionID)
-		return h, restartedPreview
+		return h, tea.Batch(restartedPreview, readinessCheck)
 
 	case mcpRestartedMsg:
 		if msg.err != nil {
@@ -8784,6 +8918,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Invalidate caches
 		h.cachedStatusCounts.valid.Store(false)
+		delete(h.resumingSessions, msg.sessionID)
+		delete(h.resumeGenerations, msg.sessionID)
+		delete(h.resumeAttachRequests, msg.sessionID)
 		h.invalidatePreviewCache(msg.sessionID)
 		h.analyticsCacheMu.Lock()
 		delete(h.analyticsCache, msg.sessionID)
@@ -9112,10 +9249,22 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Use consolidated cleanup helper for all animation maps
 		// Note: cleanupExpiredAnimations accesses instanceByID which is thread-safe on main goroutine
-		h.cleanupExpiredAnimations(h.launchingSessions, claudeTimeout, defaultTimeout)
-		h.cleanupExpiredAnimations(h.resumingSessions, claudeTimeout, defaultTimeout)
-		h.cleanupExpiredAnimations(h.mcpLoadingSessions, claudeTimeout, defaultTimeout)
-		h.cleanupExpiredAnimations(h.forkingSessions, claudeTimeout, defaultTimeout)
+		h.cleanupExpiredAnimations(h.launchingSessions, claudeTimeout, defaultTimeout, defaultTimeout)
+		expiredResumes := h.cleanupExpiredAnimations(
+			h.resumingSessions,
+			claudeTimeout,
+			defaultTimeout,
+			codexResumeReadyTimeout,
+		)
+		for _, sessionID := range expiredResumes {
+			delete(h.resumeAttachRequests, sessionID)
+			if inst := h.getInstanceByID(sessionID); inst != nil &&
+				session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+				h.setError(fmt.Errorf("session did not render after resume; press R to retry"))
+			}
+		}
+		h.cleanupExpiredAnimations(h.mcpLoadingSessions, claudeTimeout, defaultTimeout, defaultTimeout)
+		h.cleanupExpiredAnimations(h.forkingSessions, claudeTimeout, defaultTimeout, defaultTimeout)
 		// setupRunningSessions is deliberately NOT timer-pruned: it doubles as
 		// the b-hotkey re-entrancy lock, and the setup script may legitimately
 		// run past any UI timeout (setup_timeout_seconds is user-configurable,
@@ -10493,14 +10642,7 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			h.lastClickIndex = -1 // Reset to prevent triple-click
 			item := h.flatItems[itemIndex]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
-				if h.hasActiveAnimation(item.Session.ID) {
-					h.setError(fmt.Errorf("session is starting, please wait..."))
-					return h, nil
-				}
-				if item.Session.Exists() {
-					h.isAttaching.Store(true) // Prevent View() output during transition (atomic)
-					return h, h.attachSession(item.Session)
-				}
+				return h, h.activateLocalSession(item.Session)
 			} else if item.Type == session.ItemTypeGroup {
 				groupPath := item.Path
 				h.groupTree.ToggleGroup(groupPath)
@@ -10872,23 +11014,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
-				if item.Session.Exists() {
-					// Pane dead (process exited) — restart instead of attaching to dead pane.
-					tmuxSess := item.Session.GetTmuxSession()
-					if tmuxSess != nil && tmuxSess.IsPaneDead() {
-						if !h.hasActiveAnimation(item.Session.ID) {
-							h.resumingSessions[item.Session.ID] = time.Now()
-							return h, h.restartSession(item.Session)
-						}
-						return h, nil
-					}
-					return h, h.attachSession(item.Session)
-				}
-				// Session exited (tmux session gone) — auto-restart it.
-				if !h.hasActiveAnimation(item.Session.ID) {
-					h.resumingSessions[item.Session.ID] = time.Now()
-					return h, h.restartSession(item.Session)
-				}
+				return h, h.activateLocalSession(item.Session)
 			} else if item.Type == session.ItemTypeGroup {
 				// Toggle group on enter
 				groupPath := item.Path
@@ -11953,7 +12079,6 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					h.saveInstances()
 					if inst.GetStatusThreadSafe() == session.StatusRunning ||
 						inst.GetStatusThreadSafe() == session.StatusWaiting {
-						h.resumingSessions[inst.ID] = time.Now()
 						return h, h.restartSession(inst)
 					}
 				}
@@ -11977,8 +12102,6 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return h, nil
 				}
 				if item.Session.CanRestart() {
-					// Track as resuming for animation (before async call starts)
-					h.resumingSessions[item.Session.ID] = time.Now()
 					return h, h.restartSession(item.Session)
 				}
 			} else if item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil {
@@ -11999,7 +12122,6 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return h, nil
 				}
 				if item.Session.CanRestartFresh() {
-					h.resumingSessions[item.Session.ID] = time.Now()
 					return h, h.restartSessionFresh(item.Session)
 				}
 			} else if item.Type == session.ItemTypeHubSession && item.HubSession != nil {
@@ -13398,7 +13520,6 @@ func (h *Home) handleEditSessionDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return h, nil
 			}
 			uiLog.Debug("edit_session_auto_restart", slog.String("session_id", sessionID))
-			h.resumingSessions[sessionID] = time.Now()
 			return h, h.restartSession(inst)
 		}
 		return h, nil
@@ -13449,17 +13570,26 @@ func (h *Home) handleHubEditSessionDialogSubmit(nodeID, hubSessionID string) (te
 // applyMultiRepoPathChanges updates the symlink directory and restarts the session.
 func (h *Home) applyMultiRepoPathChanges(inst *session.Instance, newPaths []string) tea.Cmd {
 	id := inst.ID
+	startedAt := h.newSessionResumeGeneration(inst, false)
 	return func() tea.Msg {
 		h.instancesMu.RLock()
 		current := h.instanceByID[id]
 		h.instancesMu.RUnlock()
 		if current == nil {
-			return sessionRestartedMsg{sessionID: id, err: fmt.Errorf("session no longer exists")}
+			return sessionRestartedMsg{
+				sessionID: id,
+				startedAt: startedAt,
+				err:       fmt.Errorf("session no longer exists"),
+			}
 		}
 
 		tempDir := current.MultiRepoTempDir
 		if tempDir == "" {
-			return sessionRestartedMsg{sessionID: id, err: fmt.Errorf("no multi-repo temp dir")}
+			return sessionRestartedMsg{
+				sessionID: id,
+				startedAt: startedAt,
+				err:       fmt.Errorf("no multi-repo temp dir"),
+			}
 		}
 
 		// Remove all existing symlinks/entries in tempDir
@@ -13495,7 +13625,7 @@ func (h *Home) applyMultiRepoPathChanges(inst *session.Instance, newPaths []stri
 		h.saveInstances()
 
 		err := current.Restart()
-		return sessionRestartedMsg{sessionID: id, err: err}
+		return sessionRestartedMsg{sessionID: id, startedAt: startedAt, err: err}
 	}
 }
 
@@ -15909,10 +16039,22 @@ func (h *Home) bulkRemoveErrored() tea.Cmd {
 // sessionRestartedMsg signals that a session was restarted.
 type sessionRestartedMsg struct {
 	sessionID  string
+	startedAt  time.Time
 	err        error
 	warning    string
 	fresh      bool
 	unarchived bool
+}
+
+// sessionResumeReadinessMsg reports whether a restarted Codex pane has
+// produced its first real frame. startedAt is the resume generation: delayed
+// probes from an older restart cannot attach a newer process.
+type sessionResumeReadinessMsg struct {
+	sessionID string
+	startedAt time.Time
+	content   string
+	ready     bool
+	err       error
 }
 
 // mcpRestartedMsg signals that an MCP-triggered restart completed and should auto-attach
@@ -15950,9 +16092,125 @@ func restartWithArchiveTransition(
 	return true, nil
 }
 
+func (h *Home) newSessionResumeGeneration(inst *session.Instance, attachWhenReady bool) time.Time {
+	if inst == nil {
+		return time.Time{}
+	}
+	startedAt := time.Now()
+	h.resumingSessions[inst.ID] = startedAt
+	h.resumeGenerations[inst.ID] = startedAt
+	if attachWhenReady {
+		h.resumeAttachRequests[inst.ID] = startedAt
+	} else {
+		delete(h.resumeAttachRequests, inst.ID)
+	}
+	h.invalidatePreviewCache(inst.ID)
+	return startedAt
+}
+
+func (h *Home) beginSessionResume(inst *session.Instance, attachWhenReady bool) tea.Cmd {
+	startedAt := h.newSessionResumeGeneration(inst, attachWhenReady)
+	if startedAt.IsZero() {
+		return nil
+	}
+	return h.restartSessionForGeneration(inst, startedAt)
+}
+
+// activateLocalSession implements the user-facing Enter/double-click contract:
+// a dead session is restarted and then opened; a running Codex session is
+// opened only after capture-pane proves its TUI has rendered. The latter also
+// repairs a blank resume that was started by another Agent Deck process.
+func (h *Home) activateLocalSession(inst *session.Instance) tea.Cmd {
+	if inst == nil {
+		return nil
+	}
+
+	// A tracked generation means Restart() may not have reached respawn-pane
+	// yet. The old pane can still be live and nonblank at this point, so Enter
+	// must only queue intent; the matching restart result owns the first probe.
+	if startedAt, restarting := h.resumingSessions[inst.ID]; restarting {
+		h.resumeAttachRequests[inst.ID] = startedAt
+		return nil
+	}
+
+	exists := inst.Exists()
+	if h.resumeSessionExists != nil {
+		exists = h.resumeSessionExists(inst)
+	}
+	if !exists {
+		return h.beginSessionResume(inst, true)
+	}
+
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil && tmuxSess.IsPaneDead() {
+		return h.beginSessionResume(inst, true)
+	}
+
+	if !session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+		return h.attachSession(inst)
+	}
+
+	// The pane is live but was not started by this Home instance. Probe it
+	// immediately so a blank resume initiated by another process is guarded.
+	startedAt := h.newSessionResumeGeneration(inst, true)
+	return h.probeSessionResumeReadiness(inst.ID, startedAt, 0)
+}
+
+func (h *Home) probeSessionResumeReadiness(
+	sessionID string,
+	startedAt time.Time,
+	delay time.Duration,
+) tea.Cmd {
+	return func() tea.Msg {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-h.ctx.Done():
+				return nil
+			}
+		}
+
+		h.instancesMu.RLock()
+		inst := h.instanceByID[sessionID]
+		h.instancesMu.RUnlock()
+		if inst == nil {
+			return sessionResumeReadinessMsg{
+				sessionID: sessionID,
+				startedAt: startedAt,
+				err:       fmt.Errorf("session no longer exists"),
+			}
+		}
+
+		probe := h.resumeReadinessProbe
+		if probe == nil {
+			probe = captureResumePane
+		}
+		content, err := probe(inst)
+		return sessionResumeReadinessMsg{
+			sessionID: sessionID,
+			startedAt: startedAt,
+			content:   content,
+			ready:     err == nil && paneFrameReady(content),
+			err:       err,
+		}
+	}
+}
+
+func (h *Home) attachResumedSession(inst *session.Instance) tea.Cmd {
+	if h.resumeAttachSink != nil {
+		return h.resumeAttachSink(inst)
+	}
+	return h.attachSession(inst)
+}
+
 // restartSession restarts a session, unarchiving it first when invoked from
 // the archived view.
 func (h *Home) restartSession(inst *session.Instance) tea.Cmd {
+	return h.beginSessionResume(inst, false)
+}
+
+func (h *Home) restartSessionForGeneration(inst *session.Instance, startedAt time.Time) tea.Cmd {
 	id := inst.ID
 	mcpUILog.Debug(
 		"restart_session_called",
@@ -15971,13 +16229,14 @@ func (h *Home) restartSession(inst *session.Instance) tea.Cmd {
 		if current == nil {
 			err := fmt.Errorf("session no longer exists")
 			mcpUILog.Debug("restart_session_result", slog.String("id", id), slog.Any("error", err))
-			return sessionRestartedMsg{sessionID: id, err: err}
+			return sessionRestartedMsg{sessionID: id, startedAt: startedAt, err: err}
 		}
 
 		unarchived, err := restartWithArchiveTransition(current, h.persistArchived, current.Restart)
 		mcpUILog.Debug("restart_session_result", slog.String("id", id), slog.Any("error", err))
 		return sessionRestartedMsg{
 			sessionID:  id,
+			startedAt:  startedAt,
 			err:        err,
 			warning:    current.ConsumeCodexRestartWarning(),
 			unarchived: unarchived,
@@ -15992,6 +16251,16 @@ func (h *Home) restartSessionFresh(inst *session.Instance) tea.Cmd {
 
 func (h *Home) restartSessionFreshWith(
 	inst *session.Instance,
+	persist func(*session.Instance) error,
+	restartFresh func(*session.Instance) error,
+) tea.Cmd {
+	startedAt := h.newSessionResumeGeneration(inst, false)
+	return h.restartSessionFreshForGenerationWith(inst, startedAt, persist, restartFresh)
+}
+
+func (h *Home) restartSessionFreshForGenerationWith(
+	inst *session.Instance,
+	startedAt time.Time,
 	persist func(*session.Instance) error,
 	restartFresh func(*session.Instance) error,
 ) tea.Cmd {
@@ -16011,7 +16280,7 @@ func (h *Home) restartSessionFreshWith(
 		if current == nil {
 			err := fmt.Errorf("session no longer exists")
 			mcpUILog.Debug("restart_session_fresh_result", slog.String("id", id), slog.Any("error", err))
-			return sessionRestartedMsg{sessionID: id, err: err, fresh: true}
+			return sessionRestartedMsg{sessionID: id, startedAt: startedAt, err: err, fresh: true}
 		}
 
 		unarchived, err := restartWithArchiveTransition(current, persist, func() error {
@@ -16020,6 +16289,7 @@ func (h *Home) restartSessionFreshWith(
 		mcpUILog.Debug("restart_session_fresh_result", slog.String("id", id), slog.Any("error", err))
 		return sessionRestartedMsg{
 			sessionID:  id,
+			startedAt:  startedAt,
 			err:        err,
 			warning:    current.ConsumeCodexRestartWarning(),
 			fresh:      true,
@@ -23514,70 +23784,16 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		animationStartTime = mcpLoadTime
 	}
 
-	// Apply STATUS-BASED animation logic (matches hasActiveAnimation exactly)
-	// Animation shows until session is ready, detected via status or content
-	if isLaunching || isResuming || isMcpLoading {
-		timeSinceStart := time.Since(animationStartTime)
-
-		// Brief minimum to prevent flicker
-		if timeSinceStart < launchAnimationMinDuration(selected.Tool) {
-			if isMcpLoading {
-				showMcpLoadingAnimation = true
-			} else {
-				showLaunchingAnimation = true
-			}
-		} else if timeSinceStart < 15*time.Second {
-			// STATUS-BASED CHECK: Session ready when Running/Waiting/Idle
-			sessionReady := selectedStatus == session.StatusRunning ||
-				selectedStatus == session.StatusWaiting ||
-				selectedStatus == session.StatusIdle
-
-			if !sessionReady {
-				// Also check content for faster detection
-				h.previewCacheMu.RLock()
-				previewContent := h.previewCache[pvKey]
-				h.previewCacheMu.RUnlock()
-
-				// Strip ANSI for reliable pattern matching
-				plainPreview := ansi.Strip(previewContent)
-
-				if session.IsClaudeCompatible(selected.Tool) || selected.Tool == "gemini" {
-					// Claude/Gemini ready indicators
-					agentReady := strings.Contains(plainPreview, "ctrl+c to interrupt") ||
-						strings.Contains(plainPreview, "No, and tell Claude what to do differently") ||
-						strings.Contains(plainPreview, "\n> ") ||
-						strings.Contains(plainPreview, "> \n") ||
-						strings.Contains(plainPreview, "esc to interrupt") ||
-						strings.Contains(plainPreview, "⠋") || strings.Contains(plainPreview, "⠙") ||
-						strings.Contains(plainPreview, "Thinking") ||
-						strings.Contains(plainPreview, "╭─")
-
-					if selected.Tool == "gemini" {
-						agentReady = agentReady ||
-							strings.Contains(plainPreview, "▸") ||
-							strings.Contains(plainPreview, "gemini>")
-					}
-
-					if !agentReady {
-						if isMcpLoading {
-							showMcpLoadingAnimation = true
-						} else {
-							showLaunchingAnimation = true
-						}
-					}
-				} else {
-					// Non-Claude/Gemini: ready if substantial content
-					if len(strings.TrimSpace(plainPreview)) <= 50 {
-						if isMcpLoading {
-							showMcpLoadingAnimation = true
-						} else {
-							showLaunchingAnimation = true
-						}
-					}
-				}
-			}
+	// Keep rendering and interaction on the same readiness decision. This is
+	// especially important for Codex resumes: Restart() reports Waiting before
+	// the first pane frame, so a status-only duplicate here reintroduced the
+	// blank-terminal bug even when hasActiveAnimation correctly blocked Enter.
+	if (isLaunching || isResuming || isMcpLoading) && h.hasActiveAnimation(selected.ID) {
+		if isMcpLoading {
+			showMcpLoadingAnimation = true
+		} else {
+			showLaunchingAnimation = true
 		}
-		// After 15 seconds, animation stops regardless
 	}
 
 	// Terminal preview - use cached content (async fetching keeps View() pure)
