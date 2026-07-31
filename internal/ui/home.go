@@ -1256,9 +1256,7 @@ type hubClientAPI interface {
 
 type hubStarter func(context.Context, session.HubSettings, string, func(string), func(hub.NodeSessions), func(hub.WelcomePayload), func(hub.TrustRequestPayload)) (hubClientAPI, error)
 
-type hubSnapshotMsg struct {
-	snapshot hub.NodeSessions
-}
+type hubSnapshotMsg struct{}
 
 type hubStatusMsg struct {
 	status string
@@ -1710,7 +1708,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		hubSessions:               make(map[string]hub.NodeSessions),
 		hubStarter:                startHubClient,
 		hubStatusCh:               make(chan hubStatusMsg, 64),
-		hubSnapshotCh:             make(chan hubSnapshotMsg, 64),
+		hubSnapshotCh:             make(chan hubSnapshotMsg, 1),
 		hubWelcomeCh:              make(chan hubWelcomeMsg, 8),
 		hubTrustRequestCh:         make(chan hubTrustRequestMsg, 64),
 	}
@@ -2059,13 +2057,14 @@ func (h *Home) hubStatusText() string {
 }
 
 func (h *Home) handleHubSnapshot(snapshot hub.NodeSessions) {
+	h.applyHubSnapshot(snapshot)
+	h.publishHubWebMenuSnapshots()
 	if h.hubSnapshotCh == nil {
 		return
 	}
 	select {
-	case h.hubSnapshotCh <- hubSnapshotMsg{snapshot: snapshot}:
+	case h.hubSnapshotCh <- hubSnapshotMsg{}:
 	default:
-		uiLog.Warn("hub_snapshot_queue_full", slog.String("node_id", snapshot.Node.ID))
 	}
 }
 
@@ -2120,8 +2119,7 @@ func (h *Home) drainHubSnapshots() bool {
 	changed := false
 	for {
 		select {
-		case msg := <-h.hubSnapshotCh:
-			h.applyHubSnapshot(msg.snapshot)
+		case <-h.hubSnapshotCh:
 			changed = true
 		default:
 			return changed
@@ -2792,6 +2790,19 @@ func (h *Home) publishWebMenuSnapshot() {
 	h.appendHubWebMenuItems(archivedSnapshot, true)
 	menuData.SetSnapshot(activeSnapshot)
 	menuData.SetArchivedSnapshot(archivedSnapshot)
+}
+
+func (h *Home) publishHubWebMenuSnapshots() {
+	menuData := h.getWebMenuData()
+	if menuData == nil {
+		return
+	}
+	now := time.Now().UTC()
+	activeSnapshot := &web.MenuSnapshot{Profile: h.profile, GeneratedAt: now}
+	archivedSnapshot := &web.MenuSnapshot{Profile: h.profile, GeneratedAt: now}
+	h.appendHubWebMenuItems(activeSnapshot, false)
+	h.appendHubWebMenuItems(archivedSnapshot, true)
+	menuData.SetHubSnapshots(activeSnapshot, archivedSnapshot)
 }
 
 func (h *Home) appendHubWebMenuItems(snapshot *web.MenuSnapshot, archivedView bool) {
@@ -8077,7 +8088,6 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case hubSnapshotMsg:
-		h.applyHubSnapshot(msg.snapshot)
 		h.rebuildFlatItemsAfterAsyncUpdate()
 		h.publishWebMenuSnapshot()
 		return h, h.listenForHubSnapshot()

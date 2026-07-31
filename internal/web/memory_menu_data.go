@@ -21,6 +21,8 @@ type MemoryMenuData struct {
 	mu               sync.RWMutex
 	snapshot         *MenuSnapshot
 	archivedSnapshot *MenuSnapshot
+	hubSnapshot      *MenuSnapshot
+	archivedHub      *MenuSnapshot
 	fallback         MenuDataLoader
 	onChange         func()
 }
@@ -48,9 +50,10 @@ func (m *MemoryMenuData) SetOnChange(onChange func()) {
 func (m *MemoryMenuData) LoadMenuSnapshot() (*MenuSnapshot, error) {
 	m.mu.RLock()
 	current := cloneMenuSnapshot(m.snapshot)
+	hubSnapshot := cloneMenuSnapshot(m.hubSnapshot)
 	m.mu.RUnlock()
 	if current != nil {
-		return current, nil
+		return mergeHubMenuSnapshot(current, hubSnapshot), nil
 	}
 	if m.fallback == nil {
 		return nil, fmt.Errorf("menu snapshot is unavailable")
@@ -61,7 +64,10 @@ func (m *MemoryMenuData) LoadMenuSnapshot() (*MenuSnapshot, error) {
 		return nil, err
 	}
 	m.SetSnapshot(snapshot)
-	return cloneMenuSnapshot(snapshot), nil
+	m.mu.RLock()
+	hubSnapshot = cloneMenuSnapshot(m.hubSnapshot)
+	m.mu.RUnlock()
+	return mergeHubMenuSnapshot(snapshot, hubSnapshot), nil
 }
 
 // LoadArchivedMenuSnapshot returns archived sessions from the storage fallback.
@@ -71,9 +77,10 @@ func (m *MemoryMenuData) LoadArchivedMenuSnapshot() (*MenuSnapshot, error) {
 	}
 	m.mu.RLock()
 	current := cloneMenuSnapshot(m.archivedSnapshot)
+	hubSnapshot := cloneMenuSnapshot(m.archivedHub)
 	m.mu.RUnlock()
 	if current != nil {
-		return current, nil
+		return mergeHubMenuSnapshot(current, hubSnapshot), nil
 	}
 	if m.fallback == nil {
 		return nil, fmt.Errorf("menu snapshot is unavailable")
@@ -81,7 +88,14 @@ func (m *MemoryMenuData) LoadArchivedMenuSnapshot() (*MenuSnapshot, error) {
 	if loader, ok := m.fallback.(interface {
 		LoadArchivedMenuSnapshot() (*MenuSnapshot, error)
 	}); ok {
-		return loader.LoadArchivedMenuSnapshot()
+		snapshot, err := loader.LoadArchivedMenuSnapshot()
+		if err != nil {
+			return nil, err
+		}
+		m.mu.RLock()
+		hubSnapshot = cloneMenuSnapshot(m.archivedHub)
+		m.mu.RUnlock()
+		return mergeHubMenuSnapshot(snapshot, hubSnapshot), nil
 	}
 	return nil, fmt.Errorf("archived session list is not available")
 }
@@ -121,6 +135,23 @@ func (m *MemoryMenuData) SetArchivedSnapshot(snapshot *MenuSnapshot) {
 	}
 	m.mu.Lock()
 	m.archivedSnapshot = cloneMenuSnapshot(snapshot)
+	onChange := m.onChange
+	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
+}
+
+// SetHubSnapshots replaces the active and archived hub-only menu projections.
+// They are merged into the local base snapshots when readers load menu data,
+// allowing hub callbacks to update web state without touching Bubble Tea state.
+func (m *MemoryMenuData) SetHubSnapshots(active, archived *MenuSnapshot) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.hubSnapshot = cloneMenuSnapshot(active)
+	m.archivedHub = cloneMenuSnapshot(archived)
 	onChange := m.onChange
 	m.mu.Unlock()
 	if onChange != nil {
@@ -182,26 +213,14 @@ func (m *MemoryMenuData) UpdateHubNodeName(nodeID, name string) {
 	}
 
 	m.mu.Lock()
-	if m.snapshot == nil {
-		m.mu.Unlock()
-		return
-	}
-
 	changed := false
-	for i := range m.snapshot.HubNodes {
-		if m.snapshot.HubNodes[i].ID == nodeID && m.snapshot.HubNodes[i].Name != name {
-			m.snapshot.HubNodes[i].Name = name
-			changed = true
-		}
-	}
-	for i := range m.snapshot.Items {
-		item := &m.snapshot.Items[i]
-		if item.Group != nil && item.Group.HubNodeID == nodeID && item.Group.HubNodeName != name {
-			item.Group.HubNodeName = name
-			changed = true
-		}
-		if item.Session != nil && item.Session.HubNodeID == nodeID && item.Session.HubNodeName != name {
-			item.Session.HubNodeName = name
+	for _, snapshot := range []*MenuSnapshot{
+		m.snapshot,
+		m.archivedSnapshot,
+		m.hubSnapshot,
+		m.archivedHub,
+	} {
+		if updateHubNodeName(snapshot, nodeID, name) {
 			changed = true
 		}
 	}
@@ -210,7 +229,6 @@ func (m *MemoryMenuData) UpdateHubNodeName(nodeID, name string) {
 		return
 	}
 
-	m.snapshot.GeneratedAt = time.Now().UTC()
 	onChange := m.onChange
 	m.mu.Unlock()
 	if onChange != nil {
@@ -226,24 +244,74 @@ func (m *MemoryMenuData) RemoveHubNode(nodeID string) {
 	}
 
 	m.mu.Lock()
-	if m.snapshot == nil {
+	changed := false
+	for _, snapshot := range []*MenuSnapshot{
+		m.snapshot,
+		m.archivedSnapshot,
+		m.hubSnapshot,
+		m.archivedHub,
+	} {
+		if removeHubNode(snapshot, nodeID) {
+			changed = true
+		}
+	}
+	if !changed {
 		m.mu.Unlock()
 		return
 	}
 
+	onChange := m.onChange
+	m.mu.Unlock()
+	if onChange != nil {
+		onChange()
+	}
+}
+
+func updateHubNodeName(snapshot *MenuSnapshot, nodeID, name string) bool {
+	if snapshot == nil {
+		return false
+	}
 	changed := false
-	hubNodes := m.snapshot.HubNodes[:0]
-	for _, node := range m.snapshot.HubNodes {
+	for i := range snapshot.HubNodes {
+		if snapshot.HubNodes[i].ID == nodeID && snapshot.HubNodes[i].Name != name {
+			snapshot.HubNodes[i].Name = name
+			changed = true
+		}
+	}
+	for i := range snapshot.Items {
+		item := &snapshot.Items[i]
+		if item.Group != nil && item.Group.HubNodeID == nodeID && item.Group.HubNodeName != name {
+			item.Group.HubNodeName = name
+			changed = true
+		}
+		if item.Session != nil && item.Session.HubNodeID == nodeID && item.Session.HubNodeName != name {
+			item.Session.HubNodeName = name
+			changed = true
+		}
+	}
+	if changed {
+		snapshot.GeneratedAt = time.Now().UTC()
+	}
+	return changed
+}
+
+func removeHubNode(snapshot *MenuSnapshot, nodeID string) bool {
+	if snapshot == nil {
+		return false
+	}
+	changed := false
+	hubNodes := snapshot.HubNodes[:0]
+	for _, node := range snapshot.HubNodes {
 		if node.ID == nodeID {
 			changed = true
 			continue
 		}
 		hubNodes = append(hubNodes, node)
 	}
-	m.snapshot.HubNodes = hubNodes
+	snapshot.HubNodes = hubNodes
 
-	items := m.snapshot.Items[:0]
-	for _, item := range m.snapshot.Items {
+	items := snapshot.Items[:0]
+	for _, item := range snapshot.Items {
 		if item.Group != nil && item.Group.HubNodeID == nodeID {
 			changed = true
 			continue
@@ -255,28 +323,23 @@ func (m *MemoryMenuData) RemoveHubNode(nodeID string) {
 		item.Index = len(items)
 		items = append(items, item)
 	}
-	m.snapshot.Items = items
+	snapshot.Items = items
 	if !changed {
-		m.mu.Unlock()
-		return
+		return false
 	}
 
-	m.snapshot.TotalGroups = 0
-	m.snapshot.TotalSessions = 0
-	for _, item := range m.snapshot.Items {
+	snapshot.TotalGroups = 0
+	snapshot.TotalSessions = 0
+	for _, item := range snapshot.Items {
 		switch item.Type {
 		case MenuItemTypeGroup:
-			m.snapshot.TotalGroups++
+			snapshot.TotalGroups++
 		case MenuItemTypeSession:
-			m.snapshot.TotalSessions++
+			snapshot.TotalSessions++
 		}
 	}
-	m.snapshot.GeneratedAt = time.Now().UTC()
-	onChange := m.onChange
-	m.mu.Unlock()
-	if onChange != nil {
-		onChange()
-	}
+	snapshot.GeneratedAt = time.Now().UTC()
+	return true
 }
 
 func cloneMenuSnapshot(snapshot *MenuSnapshot) *MenuSnapshot {
@@ -301,4 +364,48 @@ func cloneMenuSnapshot(snapshot *MenuSnapshot) *MenuSnapshot {
 	}
 
 	return &cloned
+}
+
+func mergeHubMenuSnapshot(base, overlay *MenuSnapshot) *MenuSnapshot {
+	if base == nil {
+		base = &MenuSnapshot{}
+	}
+	merged := cloneMenuSnapshot(base)
+	if overlay == nil {
+		return merged
+	}
+
+	kept := merged.Items[:0]
+	for _, item := range merged.Items {
+		if item.Group != nil && item.Group.HubNodeID != "" {
+			continue
+		}
+		if item.Session != nil && item.Session.HubNodeID != "" {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	merged.Items = kept
+	overlay = cloneMenuSnapshot(overlay)
+	merged.HubNodes = overlay.HubNodes
+	merged.Items = append(merged.Items, overlay.Items...)
+	if overlay.Profile != "" && merged.Profile == "" {
+		merged.Profile = overlay.Profile
+	}
+	if overlay.GeneratedAt.After(merged.GeneratedAt) {
+		merged.GeneratedAt = overlay.GeneratedAt
+	}
+
+	merged.TotalGroups = 0
+	merged.TotalSessions = 0
+	for i := range merged.Items {
+		merged.Items[i].Index = i
+		switch merged.Items[i].Type {
+		case MenuItemTypeGroup:
+			merged.TotalGroups++
+		case MenuItemTypeSession:
+			merged.TotalSessions++
+		}
+	}
+	return merged
 }

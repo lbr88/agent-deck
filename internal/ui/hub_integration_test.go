@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -347,6 +348,55 @@ func TestHubSnapshotCallbackQueuesUpdateAndProjectsRemote(t *testing.T) {
 	got := h.View()
 	if !strings.Contains(got, "server1 / ops") || !strings.Contains(got, "deploy") {
 		t.Fatalf("view missing callback-projected hub session:\n%s", got)
+	}
+}
+
+func TestHubSnapshotCallbackCoalescesWithoutLosingLatest(t *testing.T) {
+	h := newHubProjectionHome(t, nil)
+	h.hubConfigured = true
+	h.hubLocalNodeName = "local"
+	menuData := web.NewMemoryMenuData(nil)
+	h.SetWebMenuData(menuData)
+
+	for i := 0; i < 200; i++ {
+		h.handleHubSnapshot(hub.NodeSessions{
+			Node: hub.Node{ID: "node_server", Name: "server1"},
+			Sessions: []hub.SessionInfo{{
+				ID:        "r1",
+				Title:     fmt.Sprintf("snapshot-%03d", i),
+				Tool:      "claude",
+				Status:    "waiting",
+				GroupPath: "ops",
+			}},
+		})
+	}
+
+	snapshots := h.hubSessionSnapshots()
+	if len(snapshots) != 1 || len(snapshots[0].Sessions) != 1 {
+		t.Fatalf("authoritative hub snapshots = %+v, want one session", snapshots)
+	}
+	if got := snapshots[0].Sessions[0].Title; got != "snapshot-199" {
+		t.Fatalf("latest hub title = %q, want snapshot-199", got)
+	}
+	if got := len(h.hubSnapshotCh); got != 1 {
+		t.Fatalf("queued hub notifications = %d, want 1", got)
+	}
+
+	webSnapshot, err := menuData.LoadMenuSnapshot()
+	if err != nil {
+		t.Fatalf("LoadMenuSnapshot: %v", err)
+	}
+	foundLatest := false
+	for _, item := range webSnapshot.Items {
+		if item.Session != nil && item.Session.HubNodeID == "node_server" {
+			if item.Session.Title != "snapshot-199" {
+				t.Fatalf("web hub title = %q, want snapshot-199", item.Session.Title)
+			}
+			foundLatest = true
+		}
+	}
+	if !foundLatest {
+		t.Fatalf("web snapshot did not receive latest hub state: %+v", webSnapshot.Items)
 	}
 }
 
