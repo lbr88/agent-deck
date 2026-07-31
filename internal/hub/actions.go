@@ -65,6 +65,7 @@ type ActionBackend interface {
 	AttachPlugin(ctx context.Context, req PluginMutateRequest) (PluginMutateResponse, error)
 	DetachPlugin(ctx context.Context, req PluginMutateRequest) (PluginMutateResponse, error)
 	ToggleYolo(ctx context.Context, sessionID string) error
+	Acknowledge(ctx context.Context, sessionID string) error
 	MarkUnread(ctx context.Context, sessionID string) error
 	Preview(ctx context.Context, sessionID string) (string, error)
 	ImportTmux(ctx context.Context) (int, error)
@@ -939,6 +940,15 @@ func (d CommandDispatcher) Dispatch(ctx context.Context, cmd CommandPayload) (js
 			return nil, err
 		}
 		if err := d.Backend.ToggleYolo(ctx, payload.SessionID); err != nil {
+			return nil, err
+		}
+		return marshalActionResult(actionResult{SessionID: payload.SessionID})
+	case "acknowledge":
+		payload, err := decodeSessionAction(cmd.Payload, "acknowledge")
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Backend.Acknowledge(ctx, payload.SessionID); err != nil {
 			return nil, err
 		}
 		return marshalActionResult(actionResult{SessionID: payload.SessionID})
@@ -3243,6 +3253,41 @@ func (b LocalActionBackend) MarkUnread(ctx context.Context, sessionID string) er
 	inst.ForceNextStatusCheck()
 	_ = inst.UpdateStatus()
 	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+}
+
+// Acknowledge records that a waiting session has been viewed through a hub
+// terminal. The owner persists the transition so every requester observes the
+// same idle state on the next snapshot.
+func (b LocalActionBackend) Acknowledge(ctx context.Context, sessionID string) error {
+	storage, instances, groups, inst, err := b.loadSessionData(sessionID)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if inst.GetStatusThreadSafe() != session.StatusWaiting {
+		return nil
+	}
+
+	inst.ClearHookStatus()
+	if tmuxSess := inst.GetTmuxSession(); tmuxSess != nil {
+		tmuxSess.Acknowledge()
+	}
+	inst.SetStatusThreadSafe(session.StatusIdle)
+	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+		return err
+	}
+	if db := storage.GetDB(); db != nil {
+		if err := db.SetAcknowledged(inst.ID, true); err != nil {
+			return err
+		}
+		if err := db.WriteStatus(inst.ID, string(session.StatusIdle), inst.GetToolThreadSafe()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (b LocalActionBackend) Preview(ctx context.Context, sessionID string) (string, error) {

@@ -592,6 +592,7 @@ func commandActionPublishesSnapshot(action string) bool {
 		"plugin_attach",
 		"plugin_detach",
 		"toggle_yolo",
+		"acknowledge",
 		"mark_unread",
 		"import_tmux":
 		return true
@@ -966,6 +967,7 @@ func (c *Client) openAttach(ctx context.Context, nodeID, sessionID string, size 
 	if conn == nil {
 		return nil, fmt.Errorf("hub client is not connected")
 	}
+	c.acknowledgeBeforeAttach(ctx, nodeID, sessionID)
 	if size.Cols <= 0 || size.Rows <= 0 {
 		size = TerminalSize{Cols: 80, Rows: 24}
 	}
@@ -1007,6 +1009,21 @@ func (c *Client) openAttach(ctx context.Context, nodeID, sessionID string, size 
 		c.unregisterRequesterStream(streamID)
 		_ = conn.writeEnvelope(MsgAttachClose, c.cfg.NodeID, AttachClosePayload{StreamID: streamID, Reason: ctx.Err().Error()})
 		return nil, ctx.Err()
+	}
+}
+
+// acknowledgeBeforeAttach gives the owner node a chance to persist the viewed
+// state before the terminal stream opens. It is deliberately best-effort so a
+// requester can still attach to an older owner that does not know the action.
+func (c *Client) acknowledgeBeforeAttach(ctx context.Context, nodeID, sessionID string) {
+	if strings.HasPrefix(sessionID, tmuxAttachTokenPrefix) {
+		return
+	}
+	if _, err := c.Command(ctx, nodeID, "acknowledge", map[string]string{"session_id": sessionID}); err != nil {
+		hubClientLog.Warn("hub_attach_acknowledge_failed",
+			slog.String("node_id", nodeID),
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -1223,6 +1240,7 @@ func (c *Client) attach(ctx context.Context, nodeID, sessionID string, size Term
 	if conn == nil {
 		return fmt.Errorf("hub client is not connected")
 	}
+	c.acknowledgeBeforeAttach(ctx, nodeID, sessionID)
 	if size.Cols <= 0 || size.Rows <= 0 {
 		size = currentTerminalSize()
 	}

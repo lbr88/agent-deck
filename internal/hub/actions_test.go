@@ -100,6 +100,94 @@ func TestCommandDispatcherDeleteUsesSessionID(t *testing.T) {
 	}
 }
 
+func TestCommandDispatcherAcknowledgeUsesSessionID(t *testing.T) {
+	fake := &fakeActionBackend{}
+	dispatcher := CommandDispatcher{Backend: fake}
+	payload, _ := json.Marshal(map[string]string{"session_id": "s1"})
+	raw, err := dispatcher.Dispatch(context.Background(), CommandPayload{
+		CommandID: "cmd_acknowledge",
+		Action:    "acknowledge",
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch acknowledge: %v", err)
+	}
+	if fake.lastAction != "acknowledge:s1" {
+		t.Fatalf("lastAction = %q, want acknowledge:s1", fake.lastAction)
+	}
+	var result actionResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode acknowledge result: %v", err)
+	}
+	if result.SessionID != "s1" {
+		t.Fatalf("acknowledge result session_id = %q, want s1", result.SessionID)
+	}
+}
+
+func TestLocalActionBackendAcknowledgePersistsIdleAndClearsHook(t *testing.T) {
+	isolateHubActionConfig(t)
+	const profile = "hub-acknowledge"
+	const sessionID = "waiting-codex"
+
+	storage, err := session.NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	inst := &session.Instance{
+		ID:          sessionID,
+		Title:       "waiting worker",
+		ProjectPath: t.TempDir(),
+		GroupPath:   session.DefaultGroupPath,
+		Tool:        "codex",
+		Status:      session.StatusWaiting,
+	}
+	if err := storage.Save([]*session.Instance{inst}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	hookPath := filepath.Join(session.GetHooksDir(), sessionID+".json")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll hooks: %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte(`{"status":"waiting"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile hook: %v", err)
+	}
+
+	backend := LocalActionBackend{Profile: profile}
+	if err := backend.Acknowledge(context.Background(), sessionID); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+
+	verify, err := session.NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile verify: %v", err)
+	}
+	defer verify.Close()
+	rows, err := verify.GetDB().LoadInstances()
+	if err != nil {
+		t.Fatalf("LoadInstances: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != sessionID {
+		t.Fatalf("rows = %+v, want only %s", rows, sessionID)
+	}
+	if rows[0].Status != string(session.StatusIdle) {
+		t.Fatalf("status = %q, want %q", rows[0].Status, session.StatusIdle)
+	}
+	statuses, err := verify.GetDB().ReadAllStatuses()
+	if err != nil {
+		t.Fatalf("ReadAllStatuses: %v", err)
+	}
+	if !statuses[sessionID].Acknowledged {
+		t.Fatal("acknowledged = false, want true")
+	}
+	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+		t.Fatalf("hook file still exists or stat failed: %v", err)
+	}
+}
+
 func TestCommandDispatcherUndoDeleteUsesBackend(t *testing.T) {
 	fake := &fakeActionBackend{undoDeletedSessionID: "s1"}
 	dispatcher := CommandDispatcher{Backend: fake}
@@ -1173,6 +1261,11 @@ func (b *fakeActionBackend) DetachPlugin(_ context.Context, req PluginMutateRequ
 
 func (b *fakeActionBackend) ToggleYolo(_ context.Context, sessionID string) error {
 	b.lastAction = "toggle_yolo:" + sessionID
+	return nil
+}
+
+func (b *fakeActionBackend) Acknowledge(_ context.Context, sessionID string) error {
+	b.lastAction = "acknowledge:" + sessionID
 	return nil
 }
 

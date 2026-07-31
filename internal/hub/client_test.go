@@ -1110,6 +1110,158 @@ func TestClientCommandSendsCommandAndWaitsForResult(t *testing.T) {
 	}
 }
 
+func TestClientOpenAttachAcknowledgesBeforeOpening(t *testing.T) {
+	tests := []struct {
+		name              string
+		sessionID         func(t *testing.T) string
+		acknowledgeOK     bool
+		wantAcknowledge   bool
+		acknowledgeErrMsg string
+	}{
+		{
+			name:            "normal session",
+			sessionID:       func(*testing.T) string { return "sess_1" },
+			acknowledgeOK:   true,
+			wantAcknowledge: true,
+		},
+		{
+			name:              "older owner rejects action",
+			sessionID:         func(*testing.T) string { return "sess_legacy" },
+			wantAcknowledge:   true,
+			acknowledgeErrMsg: "unknown action acknowledge",
+		},
+		{
+			name: "signed attach token",
+			sessionID: func(t *testing.T) string {
+				t.Helper()
+				token, err := newTmuxAttachToken("agent-deck", "sandbox-shell", time.Minute)
+				if err != nil {
+					t.Fatalf("newTmuxAttachToken: %v", err)
+				}
+				return token
+			},
+			wantAcknowledge: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := make(chan observedMessage, 16)
+			serverReady := make(chan *websocket.Conn, 1)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				serverReady <- conn
+				defer conn.Close()
+				welcome, _ := MarshalEnvelope(MsgWelcome, "node_requester", WelcomePayload{NodeID: "node_requester", NodeName: "laptop"})
+				_ = conn.WriteJSON(welcome)
+				for {
+					var env Envelope
+					if err := conn.ReadJSON(&env); err != nil {
+						return
+					}
+					messages <- observedMessage{envelope: env, payload: env.Payload}
+				}
+			}))
+			defer server.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errCh := make(chan error, 1)
+			client := NewClient(ClientConfig{
+				URL:               "wss://" + strings.TrimPrefix(server.URL, "https://"),
+				NodeID:            "node_requester",
+				NodeName:          "laptop",
+				Token:             "node_secret",
+				TLSSkipVerify:     true,
+				HeartbeatInterval: time.Hour,
+				SnapshotInterval:  time.Hour,
+			}, nil)
+			go func() { errCh <- client.Connect(ctx) }()
+
+			conn := waitWebSocketConn(t, serverReady)
+			assertNextMessageType(t, messages, MsgHello)
+			assertNextMessageType(t, messages, MsgSnapshot)
+
+			sessionID := tt.sessionID(t)
+			type openResult struct {
+				stream AttachStream
+				err    error
+			}
+			resultCh := make(chan openResult, 1)
+			go func() {
+				stream, err := client.OpenAttach(ctx, "node_owner", sessionID, TerminalSize{Cols: 100, Rows: 30})
+				resultCh <- openResult{stream: stream, err: err}
+			}()
+
+			if tt.wantAcknowledge {
+				command := assertNextMessageType(t, messages, MsgCommand)
+				var commandPayload CommandPayload
+				if err := json.Unmarshal(command.payload, &commandPayload); err != nil {
+					t.Fatalf("decode acknowledge command: %v", err)
+				}
+				if commandPayload.Action != "acknowledge" || commandPayload.NodeID != "node_owner" {
+					t.Fatalf("acknowledge command = %+v", commandPayload)
+				}
+				var payload map[string]string
+				if err := json.Unmarshal(commandPayload.Payload, &payload); err != nil {
+					t.Fatalf("decode acknowledge payload: %v", err)
+				}
+				if payload["session_id"] != sessionID {
+					t.Fatalf("acknowledge session_id = %q, want %q", payload["session_id"], sessionID)
+				}
+				result, err := MarshalEnvelope(MsgCommandResult, "node_owner", CommandResultPayload{
+					CommandID: commandPayload.CommandID,
+					OK:        tt.acknowledgeOK,
+					Error:     tt.acknowledgeErrMsg,
+				})
+				if err != nil {
+					t.Fatalf("MarshalEnvelope acknowledge result: %v", err)
+				}
+				if err := conn.WriteJSON(result); err != nil {
+					t.Fatalf("write acknowledge result: %v", err)
+				}
+			}
+
+			open := assertNextMessageType(t, messages, MsgAttachOpen)
+			var openPayload AttachOpenPayload
+			if err := json.Unmarshal(open.payload, &openPayload); err != nil {
+				t.Fatalf("decode attach open: %v", err)
+			}
+			if openPayload.NodeID != "node_owner" || openPayload.SessionID != sessionID {
+				t.Fatalf("attach open = %+v", openPayload)
+			}
+			ready, err := MarshalEnvelope(MsgAttachReady, "node_owner", openPayload)
+			if err != nil {
+				t.Fatalf("MarshalEnvelope attach ready: %v", err)
+			}
+			if err := conn.WriteJSON(ready); err != nil {
+				t.Fatalf("write attach ready: %v", err)
+			}
+
+			select {
+			case result := <-resultCh:
+				if result.err != nil {
+					t.Fatalf("OpenAttach: %v", result.err)
+				}
+				if result.stream == nil {
+					t.Fatal("OpenAttach returned nil stream")
+				}
+				_ = result.stream.Close()
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for OpenAttach")
+			}
+
+			cancel()
+			if err := waitErr(t, errCh); err != nil {
+				t.Fatalf("Connect returned error after context cancellation: %v", err)
+			}
+		})
+	}
+}
+
 func TestLocalSessionSourceLoadsStoredSessions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
