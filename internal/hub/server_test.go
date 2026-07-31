@@ -1107,6 +1107,32 @@ func TestHubNodeWebSocketAcceptsHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHubNodeWebSocketSilentPeerBecomesOffline(t *testing.T) {
+	server, err := NewServer(ServerConfig{
+		DataDir:         t.TempDir(),
+		PingInterval:    20 * time.Millisecond,
+		LivenessTimeout: 60 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	conn := dialTestNodeWebSocket(t, httpServer.URL, "node_1", "node_secret")
+	defer conn.Close()
+	readTestWelcome(t, conn)
+	waitNodeStatus(t, server, "node_1", "online")
+
+	// Stop reading after the welcome. Without a read loop Gorilla cannot
+	// answer the server's ping frames, which models a silently dead node.
+	waitNodeStatus(t, server, "node_1", "offline")
+}
+
 func TestHubNodeWebSocketOverlappingConnectionsKeepNodeOnline(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.store.UpsertNode("node_1", "laptop", hashSecret("node_secret"), "1.0.0", "linux", "amd64"); err != nil {

@@ -16,11 +16,13 @@ import (
 )
 
 type ServerConfig struct {
-	ListenAddr   string
-	DataDir      string
-	CertFile     string
-	KeyFile      string
-	AdvertiseURL string
+	ListenAddr      string
+	DataDir         string
+	CertFile        string
+	KeyFile         string
+	AdvertiseURL    string
+	PingInterval    time.Duration
+	LivenessTimeout time.Duration
 }
 
 type Server struct {
@@ -835,6 +837,9 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	conn.SetReadLimit(maxHubEnvelopeBytes)
+	if err := configureWebSocketReadLiveness(conn, s.cfg.livenessTimeout()); err != nil {
+		return
+	}
 
 	peerID, err := newSecret("peer_")
 	if err != nil {
@@ -858,6 +863,23 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 	if err := s.sendLatestSnapshots(peer); err != nil {
 		return
 	}
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		ticker := time.NewTicker(s.cfg.pingInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-ticker.C:
+				if err := writeWebSocketPing(conn); err != nil {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 	for {
 		var env Envelope
 		if err := conn.ReadJSON(&env); err != nil {
@@ -870,6 +892,20 @@ func (s *Server) handleNodeWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func (cfg ServerConfig) pingInterval() time.Duration {
+	if cfg.PingInterval > 0 {
+		return cfg.PingInterval
+	}
+	return defaultHubPingInterval
+}
+
+func (cfg ServerConfig) livenessTimeout() time.Duration {
+	if cfg.LivenessTimeout > 0 {
+		return cfg.LivenessTimeout
+	}
+	return defaultHubPongWait
 }
 
 func (s *Server) authenticateNodeRequest(r *http.Request) (Node, error) {
