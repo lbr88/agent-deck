@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,6 +225,83 @@ func TestClientConnectSendsHelloSnapshotAndHeartbeat(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("server did not observe websocket close")
+	}
+}
+
+func TestClientReconnectsWhenPeerStopsAnsweringPing(t *testing.T) {
+	var connectionCount atomic.Int32
+	secondConnection := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nodeWSUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		connectionNumber := connectionCount.Add(1)
+		welcome, _ := MarshalEnvelope(MsgWelcome, "node_1", WelcomePayload{
+			NodeID:   "node_1",
+			NodeName: "laptop",
+		})
+		if err := conn.WriteJSON(welcome); err != nil {
+			return
+		}
+
+		if connectionNumber == 1 {
+			for range 2 {
+				var env Envelope
+				if err := conn.ReadJSON(&env); err != nil {
+					return
+				}
+			}
+			// Stop reading without closing the socket. Gorilla only processes
+			// ping frames while reading, so this peer becomes a real half-open
+			// connection from the client's perspective.
+			<-releaseFirst
+			return
+		}
+
+		select {
+		case secondConnection <- struct{}{}:
+		default:
+		}
+		for {
+			var env Envelope
+			if err := conn.ReadJSON(&env); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	defer close(releaseFirst)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	client := NewClient(ClientConfig{
+		URL:                "wss://" + strings.TrimPrefix(server.URL, "https://"),
+		NodeID:             "node_1",
+		NodeName:           "laptop",
+		Token:              "node_secret",
+		TLSSkipVerify:      true,
+		HeartbeatInterval:  20 * time.Millisecond,
+		SnapshotInterval:   time.Hour,
+		ReconnectBaseDelay: 10 * time.Millisecond,
+		ReconnectMaxDelay:  10 * time.Millisecond,
+	}, nil)
+	go func() { errCh <- client.Connect(ctx) }()
+
+	select {
+	case <-secondConnection:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("client did not reconnect after the peer stopped answering pings")
+	}
+
+	cancel()
+	if err := waitErr(t, errCh); err != nil {
+		t.Fatalf("Connect returned error after context cancellation: %v", err)
 	}
 }
 

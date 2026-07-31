@@ -47,6 +47,7 @@ type ClientConfig struct {
 	PinnedCertSHA256 string
 
 	HeartbeatInterval  time.Duration
+	LivenessTimeout    time.Duration
 	SnapshotInterval   time.Duration
 	ReconnectBaseDelay time.Duration
 	ReconnectMaxDelay  time.Duration
@@ -92,6 +93,18 @@ func (c *clientConn) writeEnvelope(typ MessageType, nodeID string, payload any) 
 	defer c.mu.Unlock()
 	if err := writeWebSocketJSON(c.conn, env); err != nil {
 		return fmt.Errorf("write hub %s: %w", typ, err)
+	}
+	return nil
+}
+
+func (c *clientConn) writePing() error {
+	if c == nil || c.conn == nil {
+		return fmt.Errorf("hub client is not connected")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := writeWebSocketPing(c.conn); err != nil {
+		return fmt.Errorf("write hub ping: %w", err)
 	}
 	return nil
 }
@@ -330,6 +343,9 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 	}
 	defer conn.Close()
 	conn.SetReadLimit(maxHubEnvelopeBytes)
+	if err := configureWebSocketReadLiveness(conn, cfg.livenessTimeout()); err != nil {
+		return fmt.Errorf("configure hub websocket liveness: %w", err)
+	}
 	hubConn := &clientConn{conn: conn}
 	c.setActiveConn(hubConn)
 	defer c.clearActiveConn(hubConn)
@@ -379,6 +395,9 @@ func (c *Client) connectOnce(ctx context.Context, cfg ClientConfig, wsURL string
 			return err
 		case <-heartbeatTicker.C:
 			if err := hubConn.writeEnvelope(MsgHeartbeat, cfg.NodeID, nil); err != nil {
+				return err
+			}
+			if err := hubConn.writePing(); err != nil {
 				return err
 			}
 		case <-snapshotTicker.C:
@@ -1934,6 +1953,14 @@ func (cfg ClientConfig) heartbeatInterval() time.Duration {
 		return cfg.HeartbeatInterval
 	}
 	return 30 * time.Second
+}
+
+func (cfg ClientConfig) livenessTimeout() time.Duration {
+	if cfg.LivenessTimeout > 0 {
+		return cfg.LivenessTimeout
+	}
+	heartbeat := cfg.heartbeatInterval()
+	return heartbeat + heartbeat/2
 }
 
 func (cfg ClientConfig) snapshotInterval() time.Duration {
