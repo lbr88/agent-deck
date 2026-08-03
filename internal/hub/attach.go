@@ -231,7 +231,7 @@ func tmuxAttachTokenSigningSecret() ([]byte, error) {
 }
 
 func hubTmuxAttachCommand(ctx context.Context, socketName, sessionName string) *exec.Cmd {
-	return tmux.EnsureSaneAttachTERM(tmux.ExecContext(ctx, socketName, "attach-session", "-t", sessionName))
+	return tmux.EnsureSaneAttachTERM(tmux.ExecContext(ctx, socketName, "-u", "attach-session", "-t", sessionName))
 }
 
 func (b TmuxAttachBackend) findSession(sessionID string) (*statedb.InstanceRow, error) {

@@ -6,7 +6,7 @@
 // stale server squatting on the chosen port.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -14,6 +14,31 @@ const REPO_ROOT = resolve(import.meta.dirname, '..', '..', '..')
 const FIXTURE_PKG = './tests/web/fixtures/cmd/web-fixture/'
 const BIN_PATH = resolve(REPO_ROOT, 'tests/web/.tmp/web-fixture')
 const PID_PATH = resolve(REPO_ROOT, 'tests/web/.tmp/web-fixture.pid')
+const CLAUDE_CONFIG_DIR = resolve(REPO_ROOT, 'tests/web/.tmp/claude-config')
+
+function seedClaudeSearchFixture() {
+  const projectDir = resolve(CLAUDE_CONFIG_DIR, 'projects', '-fixture-project')
+  rmSync(CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  mkdirSync(projectDir, { recursive: true })
+  const transcript = [
+    JSON.stringify({
+      sessionId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      type: 'user',
+      message: { role: 'user', content: 'implement MCP server for observability metrics' },
+      cwd: '/fixture/project',
+    }),
+    JSON.stringify({
+      sessionId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'I will expose Prometheus-style observability metrics.' },
+    }),
+  ].join('\n')
+  writeFileSync(
+    resolve(projectDir, 'a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl'),
+    transcript,
+    'utf8',
+  )
+}
 
 export default async function globalSetup() {
   const port = process.env.AGENT_DECK_WEB_PORT
@@ -25,6 +50,7 @@ export default async function globalSetup() {
   }
 
   mkdirSync(dirname(BIN_PATH), { recursive: true })
+  seedClaudeSearchFixture()
 
   // Build the fixture binary. Pin Go 1.25.12 to match go.mod and the project's
   // CI workflows after the #1054 toolchain bump.
@@ -44,6 +70,7 @@ export default async function globalSetup() {
       cwd: REPO_ROOT,
       stdio: ['ignore', 'inherit', 'inherit'],
       detached: true,
+      env: { ...process.env, CLAUDE_CONFIG_DIR },
     },
   )
   proc.unref()

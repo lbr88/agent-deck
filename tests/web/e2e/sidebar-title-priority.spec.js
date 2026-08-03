@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test'
 
-test('long hub and provider metadata cannot collapse the session title', async ({ page }) => {
+test('long hub and provider metadata cannot collapse the session title', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === 'chromium-phone', 'the desktop sidebar is intentionally hidden on phone')
+
   const hubName = 'very-long-hub-node-name-that-must-yield-to-the-session-title'
   const providerName = 'opencode'
   let targetTitle = ''

@@ -34,6 +34,7 @@ import {
   profilesSignal, systemStatsSignal, hubConfiguredSignal, hubAdminSignal,
   toolFilterSignal, visibleToolsSignal, toolFilterFallbackSignal,
   hiddenToolsSignal, pickerToolsSignal,
+  trustedDomainsSignal, confirmLinkOpenSignal,
 } from './state.js'
 import {
   activeTabSignal, paletteOpenSignal, tweaksOpenSignal,
@@ -353,6 +354,13 @@ export function AppShell() {
         }
         if (Array.isArray(data.pickerTools) && data.pickerTools.length > 0) {
           pickerToolsSignal.value = data.pickerTools
+        }
+        // Terminal link-open policy (issue #1682).
+        if (Array.isArray(data.trustedDomains)) {
+          trustedDomainsSignal.value = data.trustedDomains
+        }
+        if (typeof data.confirmLinkOpen === 'boolean') {
+          confirmLinkOpenSignal.value = data.confirmLinkOpen
         }
       })
       .catch(() => {})
