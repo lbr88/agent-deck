@@ -24416,16 +24416,32 @@ func (h *Home) renderNotesSection(inst *session.Instance, width, maxLines int) s
 }
 
 // stripControlCharsPreserveANSI removes dangerous C0 control characters while
-// preserving ANSI escape sequences (ESC = 0x1b). This allows terminal colors
-// and formatting from capture-pane -e output to pass through to display, while
-// still stripping \r, \b, and other control chars that corrupt TUI layout.
+// preserving ANSI escape sequences (ESC = 0x1b). Horizontal tabs are expanded
+// to explicit spaces at eight-cell terminal tab stops before preview width
+// measurement, preventing the outer terminal from moving beyond the pane.
 func stripControlCharsPreserveANSI(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\n' && r != '\t' && r != '\x1b' {
-			return -1 // Drop the character
+	const tabWidth = 8
+
+	var b strings.Builder
+	b.Grow(len(s))
+	lineStart := 0
+
+	for _, r := range s {
+		switch {
+		case r == '\t':
+			column := cellWidth(b.String()[lineStart:])
+			b.WriteString(strings.Repeat(" ", tabWidth-column%tabWidth))
+		case r == '\n':
+			b.WriteRune(r)
+			lineStart = b.Len()
+		case r < 0x20 && r != '\x1b':
+			continue
+		default:
+			b.WriteRune(r)
 		}
-		return r
-	}, s)
+	}
+
+	return b.String()
 }
 
 // ansiBackgroundRE matches ANSI background color escape sequences:

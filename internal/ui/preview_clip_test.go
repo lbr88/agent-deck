@@ -126,3 +126,25 @@ func TestRenderPreviewPane_NvimStatusline_NoBleedEscapes_Issue579(t *testing.T) 
 		}
 	}
 }
+
+func TestRenderPreviewPane_ExpandsTabsBeforeWidthAccounting(t *testing.T) {
+	const raw = "\x1b[48;2;33;58;43m    \x1b[2m588 \x1b[0m\x1b[32m+\x1b[39m\t\t\x1b[35mreturn\x1b[0m err\n"
+
+	h := homeWithRunningPreview(t, raw, 40, 20)
+	rendered := h.renderPreviewPane(40, 20)
+
+	if strings.ContainsRune(rendered, '\t') {
+		t.Fatalf("rendered preview leaked a horizontal tab into the outer terminal: %q", rendered)
+	}
+	if !strings.Contains(ansi.Strip(rendered), "    588 +               return err") {
+		t.Fatalf("tabs were not expanded at eight-cell stops: %q", ansi.Strip(rendered))
+	}
+	if !strings.Contains(rendered, "\x1b[35mreturn") {
+		t.Fatalf("tab sanitization removed ANSI styling: %q", rendered)
+	}
+	for i, line := range strings.Split(rendered, "\n") {
+		if got := ansi.StringWidth(line); got > 40 {
+			t.Fatalf("rendered row %d is %d cells wide, want <= 40: %q", i, got, line)
+		}
+	}
+}
