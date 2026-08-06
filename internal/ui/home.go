@@ -5295,6 +5295,18 @@ func truncateRemotePreviewContent(content string) string {
 	return string(trimmed)
 }
 
+// prepareNonLocalPreviewContent preserves the newest visible tail when the
+// byte cap cuts a preview that contains no line boundaries. Normal pane output
+// stays raw until the completed preview crosses sanitizePreviewOutput.
+func prepareNonLocalPreviewContent(content string, maxWidth int) string {
+	originalBytes := len(content)
+	content = truncateRemotePreviewContent(content)
+	if originalBytes > remotePreviewMaxBytes && !strings.ContainsRune(content, '\n') {
+		return sanitizePreviewTailLine(content, maxWidth)
+	}
+	return content
+}
+
 // fetchPreview returns a command that asynchronously fetches preview content.
 // windowIndex < 0 captures the session's primary pane; >= 0 captures a specific window.
 func (h *Home) fetchPreview(inst *session.Instance, key string, windowIndex int) tea.Cmd {
@@ -22324,7 +22336,7 @@ func (h *Home) renderRemotePreview(item session.Item, width, height int) string 
 	b.WriteString(dimStyle.Render("Last response") + "\n")
 	b.WriteString(strings.Repeat("-", max(1, min(width-4, 40))))
 	b.WriteString("\n")
-	previewContent = truncateRemotePreviewContent(previewContent)
+	previewContent = prepareNonLocalPreviewContent(previewContent, max(1, width-2))
 	if hasPreview && strings.TrimSpace(previewContent) != "" {
 		b.WriteString(previewContent)
 		b.WriteString("\n\n")
@@ -22341,7 +22353,7 @@ func (h *Home) renderRemotePreview(item session.Item, width, height int) string 
 
 	b.WriteString(dimStyle.Render("Press Enter to attach via SSH"))
 
-	return b.String()
+	return sanitizePreviewOutput(b.String(), max(1, width-2))
 }
 
 func (h *Home) renderHubPreview(item session.Item, width, height int) string {
@@ -22439,7 +22451,7 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 	b.WriteString(dimStyle.Render("Last response") + "\n")
 	b.WriteString(strings.Repeat("-", max(1, min(width-4, 40))))
 	b.WriteString("\n")
-	previewContent = truncateRemotePreviewContent(previewContent)
+	previewContent = prepareNonLocalPreviewContent(previewContent, max(1, width-2))
 	if hasPreview && strings.TrimSpace(previewContent) != "" {
 		b.WriteString(previewContent)
 		b.WriteString("\n\n")
@@ -22455,7 +22467,7 @@ func (h *Home) renderHubPreview(item session.Item, width, height int) string {
 	}
 
 	b.WriteString(dimStyle.Render("Press Enter to attach via hub"))
-	return b.String()
+	return sanitizePreviewOutput(b.String(), max(1, width-2))
 }
 
 // remoteRowGutter returns the fixed-width left gutter for a remote row: the
@@ -24196,26 +24208,8 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		consecutiveEmpty := 0
 		const maxConsecutiveEmpty = 2 // Allow up to 2 consecutive empty lines
 
-		isLightTheme := GetCurrentTheme() == ThemeLight
 		for _, line := range lines {
-			// Strip dangerous control characters (\r, \b, etc.) but preserve
-			// ANSI escape sequences (ESC = 0x1b) so colors and formatting
-			// from the captured terminal output pass through to display.
-			safeLine := stripControlCharsPreserveANSI(line)
-
-			// Strip CSI K (Erase in Line) and CSI J (Erase in Display).
-			// Without this, captured content (e.g. Neovim mini.statusline)
-			// instructs the outer terminal to paint the active SGR
-			// background beyond the pane's truncation point. See #579.
-			safeLine = stripDisplayErasingEscapes(safeLine)
-
-			// In light theme, remap captured ANSI background colors to the
-			// current preview surface instead of stripping them completely.
-			// This preserves the soft highlighted blocks used by tools like
-			// Codex without letting dark background bands bleed through.
-			if isLightTheme {
-				safeLine = remapANSIBackground(safeLine, previewSurfaceANSI())
-			}
+			safeLine := sanitizePreviewLine(line, maxWidth)
 
 			// Check if visually empty (strip ANSI for this check)
 			stripped := ansi.Strip(safeLine)
@@ -24229,16 +24223,6 @@ func (h *Home) renderPreviewPane(width, height int) string {
 			}
 			consecutiveEmpty = 0 // Reset counter on non-empty line
 
-			// Truncate based on display width using ANSI-aware measurement.
-			// #937 v2: cellWidth/cellTruncate so pane-content lines from
-			// the tmux capture-pane buffer — which is where @jennings's
-			// keycap glyphs live — are sized at the cell count terminals
-			// actually render.
-			displayWidth := cellWidth(safeLine)
-			if displayWidth > maxWidth {
-				safeLine = cellTruncate(safeLine, maxWidth-3, "...")
-			}
-
 			b.WriteString(safeLine)
 			b.WriteString("\n")
 		}
@@ -24247,37 +24231,9 @@ func (h *Home) renderPreviewPane(width, height int) string {
 	// CRITICAL: Enforce width constraint on ALL lines to prevent overflow into left panel
 	// When lipgloss.JoinHorizontal combines panels, any line exceeding rightWidth
 	// will wrap and corrupt the layout
-	maxWidth := width - 2 // Small margin for safety
-	if maxWidth < 20 {
-		maxWidth = 20
-	}
+	maxWidth := max(1, width-2) // Small margin for safety
 
-	result := b.String()
-	lines := strings.Split(result, "\n")
-	var truncatedLines []string
-	for _, line := range lines {
-		// #937 v2: cellWidth/cellTruncate so the right-panel width
-		// enforcement before lipgloss.JoinHorizontal handles keycap
-		// clusters; ansi.* alone under-counted them and let oversized
-		// lines bleed into the left panel.
-		displayWidth := cellWidth(line)
-		if displayWidth > maxWidth {
-			line = cellTruncate(line, maxWidth-3, "...")
-		}
-		// Issue #699: captured Claude output (e.g., highlighted input line) can
-		// contain an unclosed SGR whose reset was off-screen or clipped by
-		// truncation. Without a hard reset at each newline boundary, the
-		// highlight persists across the row — and when lipgloss.JoinHorizontal
-		// lays down the next row (left_pane + separator + right_pane), the
-		// left pane inherits the right pane's dangling SGR state. Close every
-		// line that carries ANSI so state never leaks past the pane boundary.
-		if strings.ContainsRune(line, 0x1b) {
-			line += "\x1b[0m"
-		}
-		truncatedLines = append(truncatedLines, line)
-	}
-
-	return strings.Join(truncatedLines, "\n")
+	return sanitizePreviewOutput(b.String(), maxWidth)
 }
 
 func notesSectionLineBudget(remaining int, reserveOutput bool, split float64) int {
@@ -24442,6 +24398,76 @@ func stripControlCharsPreserveANSI(s string) string {
 	}
 
 	return b.String()
+}
+
+// sanitizePreviewLine applies the terminal-safety and cell-width boundary used
+// by every TUI preview source. Raw pane content remains unchanged in caches and
+// transports; only the rendered line is normalized for the outer terminal.
+func sanitizePreviewLine(line string, maxWidth int) string {
+	line = stripControlCharsPreserveANSI(line)
+	line = stripDisplayErasingEscapes(line)
+	if GetCurrentTheme() == ThemeLight {
+		line = remapANSIBackground(line, previewSurfaceANSI())
+	}
+
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+	if cellWidth(line) > maxWidth {
+		contentWidth := maxWidth
+		suffix := ""
+		if maxWidth > 3 {
+			contentWidth = maxWidth - 3
+			suffix = "..."
+		}
+		line = cellTruncate(line, contentWidth, suffix)
+	}
+
+	// Issue #699: captured output can contain an unclosed SGR whose reset was
+	// clipped. Close every ANSI-bearing line so styling cannot leak into the
+	// next preview row or the session list joined beside it.
+	if strings.ContainsRune(line, 0x1b) {
+		line += "\x1b[0m"
+	}
+	return line
+}
+
+func sanitizePreviewTailLine(line string, maxWidth int) string {
+	line = stripControlCharsPreserveANSI(line)
+	line = stripDisplayErasingEscapes(line)
+	if GetCurrentTheme() == ThemeLight {
+		line = remapANSIBackground(line, previewSurfaceANSI())
+	}
+
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+	visibleWidth := cellWidth(line)
+	if visibleWidth > maxWidth {
+		prefix := "..."
+		if maxWidth <= cellWidth(prefix) {
+			line = cellTruncate(prefix, maxWidth, "")
+		} else {
+			keepWidth := maxWidth - cellWidth(prefix)
+			line = ansi.TruncateLeft(line, visibleWidth-keepWidth, prefix)
+			if cellWidth(line) > maxWidth {
+				line = ansi.TruncateLeft(line, cellWidth(line)-maxWidth, "")
+			}
+		}
+	}
+
+	if strings.ContainsRune(line, 0x1b) {
+		line += "\x1b[0m"
+	}
+	return line
+}
+
+func sanitizePreviewOutput(content string, maxWidth int) string {
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = sanitizePreviewLine(lines[i], maxWidth)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ansiBackgroundRE matches ANSI background color escape sequences:
