@@ -17,7 +17,7 @@ on:
   # previous version while the API may already advertise the new tag, so the
   # version-match check below failed on a race rather than on a real break —
   # and it was verifying the previous release, not the one being cut.
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] Trusted Release completion; this job consumes no triggering artifacts or ref.
     workflows: ['Release']
     types:
       - completed
@@ -26,8 +26,16 @@ on:
     - cron: '0 9 * * 1'
   workflow_dispatch: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   verify-formula:
+    name: Verify published Homebrew formula
     runs-on: ubuntu-latest
     # A failed release deliberately leaves the previous version published and
     # the tap untouched, which is a consistent state — nothing to verify, and
@@ -36,6 +44,8 @@ jobs:
       github.repository == 'asheshgoplani/agent-deck' &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Verify homebrew tap publishes a working formula
         run: bash scripts/verify-homebrew-install.sh

@@ -71,7 +71,7 @@ func IsolateTmuxSocket() func() {
 		// run — but we REALLY don't want them on the default socket.
 		// Fall back to a PID-keyed path that won't collide with other
 		// test runs or the user's real sessions.
-		dir = fmt.Sprintf("/tmp/agent-deck-test-tmux-fallback-%d", os.Getpid())
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("agent-deck-test-tmux-fallback-%d", os.Getpid()))
 		_ = os.MkdirAll(dir, 0o700)
 	}
 	assertIsolatedTmuxTmpdir(dir)
@@ -235,9 +235,9 @@ func envWithoutTmuxVars() []string {
 	return env
 }
 
-// ShortTmuxSocket returns a tmux -S socket path under a short base dir (/tmp
-// when writable, via shortTmuxTmpBase) that fits the darwin sun_path 104-byte
-// limit regardless of $TMPDIR length or test name, plus a cleanup func that
+// ShortTmuxSocket returns a tmux -S socket path under the configured TMPDIR
+// when it is short enough (via shortTmuxTmpBase) and fits the darwin sun_path
+// 104-byte limit regardless of test name, plus a cleanup func that
 // removes the dir. Use for any test that passes its own `tmux -S <path>`;
 // t.TempDir() on darwin resolves under /var/folders/<hash>/T/<TestName>... and
 // overshoots the limit for long test names ("File name too long").
@@ -247,13 +247,13 @@ func envWithoutTmuxVars() []string {
 func ShortTmuxSocket() (socket string, cleanup func()) {
 	dir, err := os.MkdirTemp(shortTmuxTmpBase(), "ad-sock-")
 	if err != nil {
-		// Primary MkdirTemp failed. Retry directly under /tmp so each call
+		// Primary MkdirTemp failed. Retry under the configured temp root so each call
 		// still gets a UNIQUE dir (MkdirTemp's random suffix) that fits
 		// sun_path; a PID-keyed path would be process-constant and collide
 		// across calls, racing one call's cleanup against another's socket.
 		// A static PID path remains only as an absolute last resort.
-		if dir, err = os.MkdirTemp("/tmp", "agent-deck-test-sock-"); err != nil {
-			dir = fmt.Sprintf("/tmp/agent-deck-test-sock-%d", os.Getpid())
+		if dir, err = os.MkdirTemp(os.TempDir(), "agent-deck-test-sock-"); err != nil {
+			dir = filepath.Join(os.TempDir(), fmt.Sprintf("agent-deck-test-sock-%d", os.Getpid()))
 			_ = os.MkdirAll(dir, 0o700)
 		}
 	}
@@ -268,31 +268,39 @@ func ShortTmuxSocket() (socket string, cleanup func()) {
 // shortTmuxTmpBase returns a short base directory for the per-test TMUX_TMPDIR.
 //
 // UNIX-domain socket paths are capped at sockaddr_un.sun_path (104 chars on
-// darwin, 108 on linux). tmux appends "/tmux-<uid>/<sock>" (~17 chars) to
-// TMUX_TMPDIR, and MkdirTemp's random suffix eats ~10 more, so the base must
-// stay well under ~75 chars. On darwin, os.TempDir() returns
-// /var/folders/<aa>/<32-char-hash>/T (resolved through /private/...) which is
-// ~56 chars and immediately overshoots the limit. /tmp is the well-known short
-// path on every Unix-like OS, matches tmux's own default location, and matches
-// the existing failure-mode fallback at the bottom of IsolateTmuxSocket.
-//
-// Returns "/tmp" when writable; otherwise returns "" so os.MkdirTemp falls
-// back to os.TempDir() (preserving the prior behavior on hosts that remap
-// TMPDIR but leave /tmp unwritable — rare under sandboxes/SELinux/AppArmor).
+// darwin, 108 on linux). tmux appends "/tmux-<uid>/<sock>" and MkdirTemp adds a
+// random suffix, so each candidate is checked against a conservative 100-byte
+// sample path before use. The configured TMPDIR wins whenever it fits; /var/tmp
+// is the short Unix fallback, followed by the platform temp directory.
 func shortTmuxTmpBase() string {
-	const candidate = "/tmp"
-	info, err := os.Stat(candidate)
-	if err != nil || !info.IsDir() {
-		return ""
+	candidates := []string{strings.TrimSpace(os.Getenv("TMPDIR")), "/var/tmp", filepath.Clean(os.TempDir())}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if candidate == "." || candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if len(filepath.Join(candidate, "ad-tmux-12345678", "tmux-4294967295", "default")) >= 100 {
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		probe, err := os.CreateTemp(candidate, ".ad-tmux-probe-")
+		if err != nil {
+			continue
+		}
+		name := probe.Name()
+		_ = probe.Close()
+		_ = os.Remove(name)
+		return candidate
 	}
-	probe, err := os.CreateTemp(candidate, ".ad-tmux-probe-")
-	if err != nil {
-		return ""
-	}
-	name := probe.Name()
-	_ = probe.Close()
-	_ = os.Remove(name)
-	return candidate
+	return ""
 }
 
 // restoreEnv puts an env var back to its original state. If it wasn't set

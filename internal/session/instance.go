@@ -262,7 +262,12 @@ type Instance struct {
 	CodexDetectedAt      time.Time `json:"codex_detected_at,omitempty"`
 	CodexBindingRevision int64     `json:"-"` // SQLite-side generation used to order concurrent binding writers
 	CodexStartedAt       int64     `json:"-"` // Unix millis when we started Codex (for session matching, not persisted)
-	lastCodexScanAt      time.Time // Rate-limits expensive ~/.codex/sessions scans
+	// CodexForkSourceSessionID prevents the `codex fork` bootstrap process from
+	// binding its new Agent Deck row to the parent rollout it temporarily opens.
+	// It is deliberately transient: once the child exists, normal detection
+	// binds and persists the child's distinct session ID.
+	CodexForkSourceSessionID string    `json:"-"`
+	lastCodexScanAt          time.Time // Rate-limits expensive ~/.codex/sessions scans
 	// Usage-limit detection (#1802), all guarded by i.mu.
 	// lastUsageLimitScanAt throttles the transcript read (records scan START).
 	// usageLimitedCached memoises the verdict for that window, and
@@ -1905,8 +1910,8 @@ func (i *Instance) UpdateOpenCodeSSEStatus(status string, updatedAt time.Time) {
 	defer i.mu.Unlock()
 	// A transition means new activity/output the user hasn't seen yet: reset
 	// acknowledgment so waiting renders orange, mirroring UpdateHookStatus.
-	if status != i.sseStatus && i.tmuxSession != nil {
-		i.tmuxSession.ResetAcknowledged()
+	if status != i.sseStatus {
+		i.resetAcknowledgedForNewActivityLocked(true)
 	}
 	i.sseStatus = status
 	i.sseLastUpdate = updatedAt
@@ -3186,32 +3191,83 @@ func decodeJSONStringField(raw map[string]json.RawMessage, key string) string {
 	return strings.TrimSpace(s)
 }
 
-// collectOtherCodexSessionIDs enumerates other managed tmux sessions and returns
-// the CODEX_SESSION_ID values they currently own.
+// collectOtherCodexSessionIDs returns every Codex thread already owned by a
+// different Agent Deck row. Live tmux environments are useful fast evidence,
+// but they are not durable: sessions created by older builds and panes whose
+// environment sync has not run yet may have no CODEX_SESSION_ID. Include the
+// SQLite bindings as the authoritative fallback so a fresh same-cwd Codex
+// process cannot temporarily adopt and rename another row's native thread.
 func (i *Instance) collectOtherCodexSessionIDs() map[string]bool {
 	exclude := make(map[string]bool)
 
 	tmuxSessions, err := tmux.ListAgentDeckSessions()
-	if err != nil {
-		return exclude
-	}
-
 	myTmuxName := ""
 	if i.tmuxSession != nil {
 		myTmuxName = i.tmuxSession.Name
 	}
 
-	for _, sessName := range tmuxSessions {
-		if sessName == myTmuxName {
-			continue
+	if err == nil {
+		for _, sessName := range tmuxSessions {
+			if sessName == myTmuxName {
+				continue
+			}
+			other := &tmux.Session{Name: sessName}
+			if id, envErr := other.GetEnvironment("CODEX_SESSION_ID"); envErr == nil && id != "" {
+				exclude[strings.ToLower(strings.TrimSpace(id))] = true
+			}
 		}
-		other := &tmux.Session{Name: sessName}
-		if id, err := other.GetEnvironment("CODEX_SESSION_ID"); err == nil && id != "" {
-			exclude[id] = true
+	}
+
+	if db := i.metadataStateDB(); db != nil {
+		rows, loadErr := db.LoadInstances()
+		if loadErr != nil {
+			sessionLog.Debug("codex_owned_binding_load_failed", slog.String("error", loadErr.Error()))
+		} else {
+			for _, row := range rows {
+				if row == nil || row.ID == i.ID {
+					continue
+				}
+				id, _, _ := statedb.ReadCodexSessionBindingFromToolData(row.ToolData)
+				id = strings.ToLower(strings.TrimSpace(id))
+				if id != "" {
+					exclude[id] = true
+				}
+			}
 		}
 	}
 
 	return exclude
+}
+
+// codexSessionOwner returns the Agent Deck row that already owns sessionID.
+// Discovery evidence can be transient or ambiguous during Codex startup, but
+// the persisted one-row-to-one-thread binding is authoritative. Keeping this
+// check separate from filesystem scanning also protects process-FD and hook
+// discovery paths from cross-binding two rows to the same native thread.
+func (i *Instance) codexSessionOwner(sessionID string) string {
+	sessionID = strings.ToLower(strings.TrimSpace(sessionID))
+	if sessionID == "" {
+		return ""
+	}
+	db := i.metadataStateDB()
+	if db == nil {
+		return ""
+	}
+	rows, err := db.LoadInstances()
+	if err != nil {
+		sessionLog.Debug("codex_owned_binding_load_failed", slog.String("error", err.Error()))
+		return ""
+	}
+	for _, row := range rows {
+		if row == nil || row.ID == i.ID {
+			continue
+		}
+		id, _, _ := statedb.ReadCodexSessionBindingFromToolData(row.ToolData)
+		if strings.EqualFold(strings.TrimSpace(id), sessionID) {
+			return row.ID
+		}
+	}
+	return ""
 }
 
 // shouldScanCodexSession returns whether we should run an expensive filesystem
@@ -5491,7 +5547,11 @@ func (i *Instance) UpdateStatus() error {
 	// quarantined guardian/old-root hook must be a complete no-op.
 	if coldLoadedHookStatus && i.hookStatus != "" && i.tmuxSession != nil &&
 		(i.hookStatus == "running" || i.hookStatus == "waiting") {
-		i.tmuxSession.ResetAcknowledged()
+		if i.hookStatus == "running" {
+			i.resetAcknowledgedForNewActivityLocked(true)
+		} else {
+			i.tmuxSession.ResetAcknowledged()
+		}
 	}
 
 	// HOOK FAST PATH: hook-based status for tools that emit lifecycle events.
@@ -5507,18 +5567,18 @@ func (i *Instance) UpdateStatus() error {
 			// Reset acknowledged: new activity means output not yet seen.
 			// Without this, a previously-acknowledged session would go straight
 			// to idle (gray) after Stop, skipping the waiting (orange) state.
-			if i.tmuxSession != nil {
-				i.tmuxSession.ResetAcknowledged()
-			}
+			i.resetAcknowledgedForNewActivityLocked(false)
 		case "waiting":
 			if IsCodexCompatible(i.Tool) {
-				// Codex completion should surface as attention-needed.
-				// Keep this as waiting and let tmux settle to idle if the user
-				// has acknowledged and no new activity appears.
-				if i.tmuxSession != nil {
-					i.tmuxSession.ResetAcknowledged()
+				// Codex completion is attention-needed until the user views it.
+				// The attach paths persist and apply this acknowledgement across
+				// local, SSH, web, and hub surfaces; only genuinely new activity
+				// resets it.
+				if i.tmuxSession != nil && i.tmuxSession.IsAcknowledged() {
+					i.Status = StatusIdle
+				} else {
+					i.Status = StatusWaiting
 				}
-				i.Status = StatusWaiting
 			} else {
 				// Claude fires its Stop hook (→ "waiting") when the FOREGROUND turn
 				// ends, even while run_in_background shells or a background agent the
@@ -5993,10 +6053,9 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 	// activity that the user must respond to — unlike Stop (task complete) which
 	// can stay grey if already seen.
 	// Handles both PermissionRequest events and Notification/permission_prompt.
-	if isNewEvent && status.Status == "waiting" && i.tmuxSession != nil {
-		if status.Event == "PermissionRequest" || status.Event == "Notification" {
-			i.tmuxSession.ResetAcknowledged()
-		}
+	if isNewEvent && (status.Status == "running" ||
+		(status.Status == "waiting" && (status.Event == "PermissionRequest" || status.Event == "Notification"))) {
+		i.resetAcknowledgedForNewActivityLocked(true)
 	}
 
 	// Issue #1349 defense-in-depth #1: never bind a session id from a terminal
@@ -6291,17 +6350,33 @@ func (i *Instance) acceptCodexSessionID(sessionID string, syncTmuxEnv bool) bool
 	if sessionID == "" {
 		return false
 	}
+	if sourceID := strings.ToLower(strings.TrimSpace(i.CodexForkSourceSessionID)); sourceID != "" && sessionID == sourceID {
+		sessionLog.Debug("codex_fork_source_binding_rejected",
+			slog.String("instance_id", logging.SanitizeValue(i.ID)),
+			slog.String("source_session_id", logging.SanitizeValue(sourceID)))
+		return false
+	}
 	releaseHookLock, err := AcquireHookSessionLock(i.ID)
 	if err != nil {
 		sessionLog.Warn("codex_session_binding_lock_failed",
-			slog.String("instance_id", i.ID),
-			slog.String("candidate", sessionID),
-			slog.String("error", err.Error()))
+			slog.String("instance_id", logging.SanitizeValue(i.ID)),
+			slog.String("candidate", logging.SanitizeValue(sessionID)),
+			slog.String("error", logging.SanitizeValue(err.Error())))
 		return false
 	}
 	defer releaseHookLock()
 
 	overridePending := i.codexSessionBindingOverrideIntent
+	currentID := strings.ToLower(strings.TrimSpace(i.CodexSessionID))
+	if !overridePending && currentID != sessionID {
+		if ownerID := i.codexSessionOwner(sessionID); ownerID != "" {
+			sessionLog.Warn("codex_owned_binding_rejected",
+				slog.String("instance_id", logging.SanitizeValue(i.ID)),
+				slog.String("candidate", logging.SanitizeValue(sessionID)),
+				slog.String("owner_instance_id", logging.SanitizeValue(ownerID)))
+			return false
+		}
+	}
 	// Defense in depth for callers that did not pass through the normal
 	// update/hook barriers. If another process already persisted a promoted
 	// top-level fork, adopt it first and refuse a different stale candidate.
@@ -6476,6 +6551,29 @@ func (i *Instance) metadataStateDB() *statedb.StateDB {
 		return i.stateDB
 	}
 	return statedb.GetGlobal()
+}
+
+// resetAcknowledgedForNewActivityLocked keeps the tmux tracker and the
+// profile database in sync when new agent activity makes prior output unseen.
+// forcePersist is true at event boundaries; the status fast path passes false
+// so steady running polls do not write unless shared SQLite state re-applied a
+// stale acknowledgement to tmux memory.
+func (i *Instance) resetAcknowledgedForNewActivityLocked(forcePersist bool) {
+	wasAcknowledged := false
+	if i.tmuxSession != nil {
+		wasAcknowledged = i.tmuxSession.IsAcknowledged()
+		i.tmuxSession.ResetAcknowledged()
+	}
+	if !forcePersist && !wasAcknowledged {
+		return
+	}
+	if db := i.metadataStateDB(); db != nil {
+		if err := db.SetAcknowledged(i.ID, false); err != nil {
+			sessionLog.Warn("acknowledgement_reset_persist_failed",
+				slog.String("instance_id", logging.SanitizeValue(i.ID)),
+				slog.String("error", logging.SanitizeValue(err.Error())))
+		}
+	}
 }
 
 // bindGeminiSessionFromHook is the Gemini counterpart of
@@ -9888,6 +9986,7 @@ func (i *Instance) CreateForkedCodexInstanceWithOptions(
 	}
 	forked.ForkStartCommand = cmd
 	forked.IsForkAwaitingStart = true
+	forked.CodexForkSourceSessionID = strings.ToLower(strings.TrimSpace(i.CodexSessionID))
 
 	if opts != nil && opts.WorktreePath != "" {
 		forked.WorktreePath = opts.WorktreePath

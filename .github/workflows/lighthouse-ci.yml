@@ -37,8 +37,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: write
+  pull-requests: read # Read labels used by the regression acknowledgement gate.
 
 concurrency:
   group: lighthouse-${{ github.head_ref || github.ref }}
@@ -51,23 +50,29 @@ jobs:
   lighthouse:
     name: Performance Budget
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # Read labels used by the regression acknowledgement gate.
+      issues: write # Create the repository-level acknowledgement label when absent.
     env:
       MAX_BYTE_WEIGHT_DELTA_PCT: 5
       MAX_SCRIPT_SIZE_DELTA_PCT: 5
       GOTOOLCHAIN: go1.25.12
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: pr
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout base ref
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.base_ref }}
           path: base
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Ensure ack label exists in repo
         env:
@@ -86,7 +91,7 @@ jobs:
           output=$(gh label create "$ACK_LABEL" \
             --repo "$GITHUB_REPOSITORY" \
             --color "fbca04" \
-            --description "Maintainer ack: lighthouse-ci delta gate regression is intentional. Removing the label re-fails the check." 2>&1)
+            --description "Maintainer acknowledgement for an intentional Lighthouse bundle-delta regression." 2>&1)
           rc=$?
           if [ "$rc" -eq 0 ]; then
             echo "Label '$ACK_LABEL' created."
@@ -105,17 +110,14 @@ jobs:
           exit 1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: '1.25.12'
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '20'
-
-      - name: Install Lighthouse CI
-        run: npm install -g @lhci/cli@0.15.1
 
       - name: Build PR head
         working-directory: pr
@@ -127,7 +129,7 @@ jobs:
 
       - name: Collect Lighthouse on PR head
         working-directory: pr
-        run: lhci collect --config=.lighthouserc.json
+        run: npx --yes @lhci/cli@0.15.1 collect --config=.lighthouserc.json
 
       - name: Stash PR results
         run: |
@@ -147,7 +149,7 @@ jobs:
         # itself is consistent across the two collects; only the binary differs.
         run: |
           cp ../pr/.lighthouserc.json .lighthouserc.json
-          lhci collect --config=.lighthouserc.json
+          npx --yes @lhci/cli@0.15.1 collect --config=.lighthouserc.json
 
       - name: Stash base results
         if: steps.base_collect.outcome == 'success'
@@ -161,7 +163,7 @@ jobs:
 
       - name: Assert absolute thresholds (PR head)
         working-directory: pr
-        run: lhci assert --config=.lighthouserc.json
+        run: npx --yes @lhci/cli@0.15.1 assert --config=.lighthouserc.json
 
       - name: Compare PR vs base bundle deltas
         id: delta_gate
@@ -172,9 +174,10 @@ jobs:
         if: steps.delta_gate.outcome == 'failure'
         env:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GITHUB_EVENT_PULL_REQUEST_USER_LOGIN: ${{ github.event.pull_request.user.login }}
         run: |
           if echo ",${PR_LABELS}," | grep -q ",${ACK_LABEL},"; then
-            echo "::notice title=Lighthouse delta override::Regression acknowledged via '${ACK_LABEL}' label by ${{ github.event.pull_request.user.login }} or a maintainer. Check is intentionally green."
+            echo "::notice title=Lighthouse delta override::Regression acknowledged via '${ACK_LABEL}' label by ${GITHUB_EVENT_PULL_REQUEST_USER_LOGIN} or a maintainer. Check is intentionally green."
             echo ""
             echo "Override active. The bundle delta exceeded MAX_*_DELTA_PCT but the maintainer"
             echo "applied the '${ACK_LABEL}' label to acknowledge this is intentional."
@@ -195,7 +198,7 @@ jobs:
 
       - name: Upload Lighthouse results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: lighthouse-results-${{ github.run_id }}
           retention-days: 14

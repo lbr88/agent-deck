@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // newHeadlessHomeForTest builds a Home backed by a real (sandboxed, _test
@@ -96,6 +97,37 @@ func TestIssue1397_HeadlessDeleteUnknownStillErrors(t *testing.T) {
 	m := NewWebMutator(h)
 	if err := m.DeleteSession("does-not-exist"); err == nil {
 		t.Fatal("deleting a non-existent session must still error")
+	}
+}
+
+func TestHeadlessMarkSessionUnreadPersistsAcknowledgementReset(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	h, storage := newHeadlessHomeForTest(t, "_test_mark_unread_ack")
+	const id = "headless-mark-unread"
+	inst := &session.Instance{
+		ID: id, Title: "viewed worker", ProjectPath: t.TempDir(),
+		GroupPath: session.DefaultGroupPath, Command: "bash", Tool: "codex",
+		Status: session.StatusIdle, CreatedAt: time.Now(),
+	}
+	tmuxSession := tmux.NewSession("missing-web-unread-pane", inst.ProjectPath)
+	tmuxSession.SocketName = "web-mark-unread-test"
+	inst.SetTmuxSessionForTest(tmuxSession)
+	if err := storage.SaveWithGroups([]*session.Instance{inst}, session.NewGroupTree([]*session.Instance{inst})); err != nil {
+		t.Fatalf("seed SaveWithGroups: %v", err)
+	}
+	if err := storage.GetDB().SetAcknowledged(id, true); err != nil {
+		t.Fatalf("SetAcknowledged(true): %v", err)
+	}
+
+	if err := NewWebMutator(h).MarkSessionUnread(id); err != nil {
+		t.Fatalf("MarkSessionUnread: %v", err)
+	}
+	statuses, err := storage.GetDB().ReadAllStatuses()
+	if err != nil {
+		t.Fatalf("ReadAllStatuses: %v", err)
+	}
+	if statuses[id].Acknowledged {
+		t.Fatal("MarkSessionUnread left SQLite acknowledged=true; shared sync will immediately undo it")
 	}
 }
 

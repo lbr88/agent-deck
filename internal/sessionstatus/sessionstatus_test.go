@@ -265,12 +265,11 @@ func TestDerive_ClaudeWaiting_AcknowledgedYieldsIdle(t *testing.T) {
 	}
 }
 
-// TestDerive_CodexWaiting_AcknowledgedStillWaiting locks the codex-specific
-// rule from instance.go:2886-2893: codex completion surfaces as
-// attention-needed (StatusWaiting) regardless of acknowledged state. Without
-// this assertion the helper could be naively factored to "waiting +
-// acknowledged → idle" and silently regress codex parity.
-func TestDerive_CodexWaiting_AcknowledgedStillWaiting(t *testing.T) {
+// TestDerive_CodexWaiting_AcknowledgedYieldsIdle guards the viewed-session
+// contract shared by local, SSH, web, and hub surfaces: a completed Codex turn
+// needs attention until the user enters it, then becomes idle until genuinely
+// new activity arrives.
+func TestDerive_CodexWaiting_AcknowledgedYieldsIdle(t *testing.T) {
 	t.Parallel()
 	out := sessionstatus.Derive(sessionstatus.Input{
 		Tool:         "codex",
@@ -282,8 +281,8 @@ func TestDerive_CodexWaiting_AcknowledgedStillWaiting(t *testing.T) {
 		},
 		Now: fixedNow,
 	})
-	if out.Status != session.StatusWaiting {
-		t.Fatalf("codex waiting must surface as attention-needed even when acknowledged: got %q", out.Status)
+	if out.Status != session.StatusIdle {
+		t.Fatalf("codex waiting + acknowledged must yield idle: got %q", out.Status)
 	}
 }
 

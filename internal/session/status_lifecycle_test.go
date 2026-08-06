@@ -215,6 +215,29 @@ func TestHookFastPath_WaitingAcknowledged(t *testing.T) {
 	}
 }
 
+// TestHookFastPath_CodexWaitingAcknowledgedYieldsIdle reproduces the remote
+// attach failure with a real tmux session. A fresh Codex completion starts
+// yellow; after the hub/SSH attach path records that the user viewed it, the
+// same completion must stay gray instead of immediately becoming yellow again.
+func TestHookFastPath_CodexWaitingAcknowledgedYieldsIdle(t *testing.T) {
+	skipIfNoTmuxBinary(t)
+	inst, cleanup := runParitySetup(t, "codex-viewed", "codex")
+	defer cleanup()
+
+	inst.UpdateHookStatus(&HookStatus{
+		Status:    "waiting",
+		Event:     "Stop",
+		UpdatedAt: time.Now(),
+	})
+	inst.tmuxSession.Acknowledge()
+	if err := inst.UpdateStatus(); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+	if got := inst.GetStatusThreadSafe(); got != StatusIdle {
+		t.Fatalf("acknowledged Codex completion status = %q, want %q", got, StatusIdle)
+	}
+}
+
 // TestHookFastPath_ShellIgnoresHooks verifies that shell tool sessions do NOT
 // use the hook fast path. Shell sessions should always use tmux polling.
 // The hook fast path condition requires IsClaudeCompatible(tool) || tool == "codex",

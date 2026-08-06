@@ -1,18 +1,27 @@
 name: PR diff-scope guard
 on:
   pull_request: { branches: [main] }
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: read # Read the pull-request diff through the GitHub CLI.
+
 jobs:
   diffscope:
+    name: Enforce pull-request diff scope
     runs-on: ubuntu-latest
     steps:
       - name: Count changed files
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          n=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only | wc -l)
+          n=$(gh pr diff "$PR_NUMBER" --repo "$REPOSITORY" --name-only | wc -l)
           echo "Changed files: $n"
           if [ "$n" -gt 200 ]; then
             echo "::error::PR touches $n files (>200). Likely stale base or generated-code dump. Inspect before merge."
