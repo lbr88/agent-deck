@@ -15,9 +15,11 @@ export function CommandPalette() {
   const inputRef = useRef(null)
 
   useEffect(() => {
-    if (!open) return
-    setQ('')
-    setTimeout(() => inputRef.current?.focus(), 0)
+    if (!open) {
+      setQ('')
+      return
+    }
+    inputRef.current?.focus()
   }, [open])
 
   if (!open) return null
