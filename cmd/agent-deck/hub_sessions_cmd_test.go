@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -1027,5 +1030,100 @@ func TestResolveHubSessionTargetRejectsAmbiguousSessionTitle(t *testing.T) {
 	_, err := resolveHubSessionTarget(snapshots, "work", "api")
 	if err == nil || !strings.Contains(err.Error(), "multiple") || !strings.Contains(err.Error(), "sess_a") || !strings.Contains(err.Error(), "sess_b") {
 		t.Fatalf("error = %v, want ambiguous session ids", err)
+	}
+}
+
+func TestRunWithHubSnapshotResolutionWaitsForRequestedSessionSnapshot(t *testing.T) {
+	cache := newHubShellSnapshotCache()
+	cache.update(hub.NodeSessions{Node: hub.Node{ID: "node_docker", Name: "a-nyvej-docker"}})
+
+	firstAttempt := make(chan struct{})
+	go func() {
+		<-firstAttempt
+		cache.update(hub.NodeSessions{
+			Node: hub.Node{ID: "node_workstation", Name: "lbr-workstation"},
+			Sessions: []hub.SessionInfo{{
+				ID:    "0f6a3379-1786026003",
+				Title: "agent-deck v1.11.2 rollout",
+			}},
+		})
+	}()
+
+	attempts := 0
+	err := runWithHubSnapshotResolution(context.Background(), cache, time.Second, func(snapshots []hub.NodeSessions) error {
+		attempts++
+		if attempts == 1 {
+			close(firstAttempt)
+		}
+		_, err := resolveHubSessionTarget(snapshots, "lbr-workstation", "0f6a3379-1786026003")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("wait for requested hub session snapshot: %v", err)
+	}
+	if attempts < 2 {
+		t.Fatalf("resolution attempts = %d, want retry after requested snapshot arrives", attempts)
+	}
+}
+
+func TestRunWithHubSnapshotResolutionWaitsForInitialSnapshot(t *testing.T) {
+	cache := newHubShellSnapshotCache()
+	callbackRan := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithHubSnapshotResolution(context.Background(), cache, time.Second, func([]hub.NodeSessions) error {
+			close(callbackRan)
+			return nil
+		})
+	}()
+
+	select {
+	case <-callbackRan:
+		t.Fatal("snapshot callback ran before the first hub snapshot arrived")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	cache.update(hub.NodeSessions{Node: hub.Node{ID: "node_docker", Name: "a-nyvej-docker"}})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run after initial snapshot: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot callback did not run after the first hub snapshot arrived")
+	}
+}
+
+func TestRunWithHubSnapshotResolutionReturnsCanceledBeforeInitialSnapshot(t *testing.T) {
+	cache := newHubShellSnapshotCache()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	callbackCalls := 0
+	err := runWithHubSnapshotResolution(ctx, cache, time.Second, func([]hub.NodeSessions) error {
+		callbackCalls++
+		return nil
+	})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("snapshot callback calls = %d, want 0 after cancellation", callbackCalls)
+	}
+}
+
+func TestRunWithHubSnapshotResolutionReturnsCanceledWhileRetrying(t *testing.T) {
+	cache := newHubShellSnapshotCache()
+	cache.update(hub.NodeSessions{Node: hub.Node{ID: "node_docker", Name: "a-nyvej-docker"}})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	err := runWithHubSnapshotResolution(ctx, cache, time.Second, func([]hub.NodeSessions) error {
+		cancel()
+		return fmt.Errorf("%w: %q", errHubShellNodeNotFound, "lbr-workstation")
+	})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
 	}
 }

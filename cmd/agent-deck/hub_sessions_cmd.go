@@ -815,6 +815,60 @@ func listHubSessionRows(snapshots []hub.NodeSessions, nodeSelector string) ([]hu
 	return rows, nil
 }
 
+func runWithHubSnapshotResolution(
+	ctx context.Context,
+	snapshots *hubShellSnapshotCache,
+	timeout time.Duration,
+	run func([]hub.NodeSessions) error,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if snapshots == nil {
+		return fmt.Errorf("hub snapshot cache is required")
+	}
+	if run == nil {
+		return fmt.Errorf("hub snapshot callback is required")
+	}
+	if timeout <= 0 {
+		return run(snapshots.list())
+	}
+
+	resolveCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if len(snapshots.list()) == 0 {
+		select {
+		case <-snapshots.changed:
+		case <-resolveCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return run(snapshots.list())
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := run(snapshots.list())
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errHubShellNodeNotFound) && !errors.Is(err, errHubSessionNotFound) {
+			return err
+		}
+		select {
+		case <-snapshots.changed:
+			continue
+		case <-resolveCtx.Done():
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return err
+		}
+	}
+}
+
 func withConnectedHubSessionClient(profile string, connectTimeout, snapshotTimeout time.Duration, run func(context.Context, hubShellClient, []hub.NodeSessions) error) error {
 	if run == nil {
 		return fmt.Errorf("hub session callback is required")
@@ -859,23 +913,9 @@ func withConnectedHubSessionClient(profile string, connectTimeout, snapshotTimeo
 	case <-waitCtx.Done():
 		return fmt.Errorf("hub connection timed out after %s", connectTimeout.String())
 	}
-	if snapshotTimeout > 0 && len(snapshots.list()) == 0 {
-		timer := time.NewTimer(snapshotTimeout)
-		select {
-		case <-snapshots.changed:
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
-	return run(ctx, client, snapshots.list())
+	return runWithHubSnapshotResolution(ctx, snapshots, snapshotTimeout, func(current []hub.NodeSessions) error {
+		return run(ctx, client, current)
+	})
 }
 
 func printHubSessionRows(rows []hubSessionRow) {
