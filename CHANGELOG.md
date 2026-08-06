@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.3] - 2026-08-06
+
+### Fixed
+
+- **One-shot hub session commands wait for the requested node and session snapshot.** `hub sessions` actions no longer fail intermittently with `hub shell node not found` or open the wrong timing window merely because another node's snapshot arrived first.
+
 ## [1.11.2] - 2026-08-06
 
 ### Fixed
