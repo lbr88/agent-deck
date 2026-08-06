@@ -54,6 +54,29 @@ else
   exit 2
 fi
 
+# Use the same Chrome-for-Testing build as the web E2E suite. Auto-discovered
+# system Chromium can be a Snap launcher whose confinement rejects the
+# disk-backed TMPDIR used by the local gate.
+if [ -z "${CHROME_PATH:-}" ]; then
+  if [ ! -x tests/web/node_modules/.bin/playwright ]; then
+    if command -v npm &>/dev/null; then
+      (cd tests/web && npm ci --no-audit --no-fund)
+    elif command -v pnpm &>/dev/null; then
+      (cd tests/web && pnpm dlx npm@10 ci --no-audit --no-fund)
+    fi
+  fi
+  # shellcheck source=../../scripts/prepare-playwright-browser.sh
+  source "$REPO_ROOT/scripts/prepare-playwright-browser.sh"
+  cd "$REPO_ROOT/tests/web"
+  prepare_playwright_browser
+  CHROME_PATH="$(playwright_chromium_path)"
+  export CHROME_PATH
+  cd "$REPO_ROOT"
+  echo "[budget-check] Using Playwright Chromium at $CHROME_PATH."
+else
+  echo "[budget-check] Using explicitly configured Chrome at $CHROME_PATH."
+fi
+
 # --- Start test server ---
 
 echo "[budget-check] Starting test server on port $PORT..."
@@ -82,7 +105,7 @@ sleep 1
 # --- Run Lighthouse CI ---
 
 echo "[budget-check] Running lhci collect (${LHCI_VERSION})..."
-"${LHCI_CMD[@]}" collect --config="$CONFIG"
+"${LHCI_CMD[@]}" collect --config="$CONFIG" --settings.chromeFlags=--no-sandbox
 
 echo "[budget-check] Running lhci assert..."
 ASSERT_EXIT=0

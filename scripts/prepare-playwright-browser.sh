@@ -38,6 +38,17 @@ prepare_playwright_browser() {
   ./node_modules/.bin/playwright install chromium
 }
 
+playwright_chromium_path() {
+  local chromium_path
+  chromium_path="$(node --input-type=module -e \
+    "import { chromium } from '@playwright/test'; process.stdout.write(chromium.executablePath())")"
+  if [ ! -x "$chromium_path" ]; then
+    echo "ERROR: Playwright Chromium is not executable at $chromium_path." >&2
+    return 1
+  fi
+  printf '%s' "$chromium_path"
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   prepare_playwright_browser
 fi
