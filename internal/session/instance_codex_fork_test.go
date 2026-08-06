@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
+
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
 
 func seedCodexRollout(t *testing.T, codexHome, sid string) {
@@ -72,6 +75,92 @@ func TestCreateForkedCodexInstance_UsesWorktreeAndForkCommand(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "fork "+sid) {
 		t.Fatalf("fork command must run `codex fork <parent-sid>`; got: %s", cmd)
+	}
+}
+
+// TestCreateForkedCodexInstance_RejectsParentBindingDuringStartup reproduces
+// the live rename collision from pr-review-and-merge 3. While `codex fork`
+// initializes, the child process temporarily has the parent's rollout open.
+// Process-FD discovery must not bind that parent ID to the new Agent Deck row,
+// because an immediate explicit rename would then rename both the parent and
+// the fork through the shared native thread ID.
+func TestCreateForkedCodexInstance_RejectsParentBindingDuringStartup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	parentID := "12121212-2222-4333-8444-555555555555"
+	seedCodexRollout(t, home, parentID)
+
+	parent := NewInstanceWithTool("parent", t.TempDir(), "codex")
+	parent.CodexSessionID = parentID
+	parent.CodexDetectedAt = time.Now()
+	forked, _, err := parent.CreateForkedCodexInstanceWithOptions("fork", "", nil)
+	if err != nil {
+		t.Fatalf("CreateForkedCodexInstanceWithOptions: %v", err)
+	}
+
+	if changed := forked.acceptCodexSessionID(parentID, false); changed {
+		t.Fatal("fork startup accepted the parent's Codex session ID")
+	}
+	if forked.CodexSessionID != "" {
+		t.Fatalf("fork CodexSessionID = %q, want empty until the new child thread exists", forked.CodexSessionID)
+	}
+}
+
+// TestCodexBootstrapExcludesPersistedBindings reproduces the ordinary-session
+// form of the live collision: a new Codex process starts in the same cwd as an
+// already-running session whose rollout is still being written. The older
+// session's durable binding must be excluded even when its tmux environment is
+// missing CODEX_SESSION_ID, otherwise the new row temporarily adopts the old
+// thread and title synchronization renames the wrong session.
+func TestCodexBootstrapExcludesPersistedBindings(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	db := withTempGlobalStateDB(t)
+
+	oldID := "13131313-2222-4333-8444-555555555555"
+	newID := "14141414-2222-4333-8444-555555555555"
+	projectPath := t.TempDir()
+	seedCodexRollout(t, codexHome, oldID)
+	seedCodexRollout(t, codexHome, newID)
+
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "06", "06")
+	oldPath := filepath.Join(rolloutDir, "rollout-20260606T000000-"+oldID+".jsonl")
+	newPath := filepath.Join(rolloutDir, "rollout-20260606T000000-"+newID+".jsonl")
+	now := time.Now()
+	if err := os.Chtimes(newPath, now.Add(-time.Second), now.Add(-time.Second)); err != nil {
+		t.Fatalf("age new rollout: %v", err)
+	}
+	if err := os.Chtimes(oldPath, now, now); err != nil {
+		t.Fatalf("refresh old rollout: %v", err)
+	}
+
+	if err := db.SaveInstance(&statedb.InstanceRow{
+		ID:          "existing-agent-deck-row",
+		Title:       "existing",
+		ProjectPath: projectPath,
+		GroupPath:   "test",
+		Tool:        "codex",
+		Status:      "running",
+		CreatedAt:   now.Add(-time.Hour),
+		ToolData:    json.RawMessage(`{"codex_session_id":"` + oldID + `"}`),
+	}); err != nil {
+		t.Fatalf("persist existing Codex binding: %v", err)
+	}
+
+	created := NewInstanceWithTool("new", projectPath, "codex")
+	created.CodexStartedAt = now.Add(-time.Minute).UnixMilli()
+	if changed := created.acceptCodexSessionID(oldID, false); changed {
+		t.Fatal("central binding gate accepted a Codex thread already owned by another Agent Deck row")
+	}
+	if created.CodexSessionID != "" {
+		t.Fatalf("CodexSessionID = %q after owned candidate, want empty", created.CodexSessionID)
+	}
+	excluded := created.collectOtherCodexSessionIDs()
+	if !excluded[oldID] {
+		t.Fatalf("persisted Codex binding %q was not excluded: %#v", oldID, excluded)
+	}
+	if got := created.queryCodexSession(excluded, true); got != newID {
+		t.Fatalf("bootstrap candidate = %q, want unowned new thread %q", got, newID)
 	}
 }
 

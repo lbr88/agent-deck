@@ -789,11 +789,11 @@ func (s *StateDB) saveInstanceOnce(inst *InstanceRow) error {
 
 	existingAutoName := existingAutoNameFields{}
 	var existingToolDataString string
-	var existingAutoNameInt int
+	var existingAutoNameInt, existingAcknowledgedInt int
 	queryErr := tx.QueryRow(
-		"SELECT tool_data, auto_name, auto_name_description FROM instances WHERE id = ?",
+		"SELECT tool_data, auto_name, auto_name_description, acknowledged FROM instances WHERE id = ?",
 		inst.ID,
-	).Scan(&existingToolDataString, &existingAutoNameInt, &existingAutoName.description)
+	).Scan(&existingToolDataString, &existingAutoNameInt, &existingAutoName.description, &existingAcknowledgedInt)
 	if queryErr == nil {
 		existingToolData := json.RawMessage(existingToolDataString)
 		existingAutoName.found = true
@@ -832,8 +832,9 @@ func (s *StateDB) saveInstanceOnce(inst *InstanceRow) error {
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
 			worktree_path, worktree_repo, worktree_branch, account,
-			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin,
+			acknowledged
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		inst.ID, inst.Title, inst.ProjectPath, inst.GroupPath, inst.Order,
 		inst.Command, inst.Wrapper, inst.Tool, inst.Status, inst.TmuxSession, inst.TmuxSocketName,
@@ -841,6 +842,7 @@ func (s *StateDB) saveInstanceOnce(inst *InstanceRow) error {
 		inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 		inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
 		archivedAtUnix(inst.ArchivedAt), string(toolData), titleLockedInt, autoNameInt, autoNameDescription, inst.Pin,
+		existingAcknowledgedInt,
 	)
 	if err != nil {
 		return err
@@ -907,6 +909,7 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 	// outcome is one stale-overlay save, recoverable on next save.
 	existingToolData := make(map[string]json.RawMessage, len(insts))
 	existingAutoNames := make(map[string]existingAutoNameFields, len(insts))
+	existingAcknowledged := make(map[string]int, len(insts))
 	if len(insts) > 0 {
 		placeholders := make([]string, len(insts))
 		args := make([]any, len(insts))
@@ -916,16 +919,17 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 		}
 		// #nosec G202 -- placeholders is a fixed sequence of "?" tokens generated
 		// from len(insts); all values flow through args[], never the SQL string.
-		query := "SELECT id, tool_data, auto_name, auto_name_description FROM instances WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+		query := "SELECT id, tool_data, auto_name, auto_name_description, acknowledged FROM instances WHERE id IN (" + strings.Join(placeholders, ",") + ")"
 		rows, queryErr := s.db.Query(query, args...)
 		if queryErr == nil {
 			for rows.Next() {
 				var id string
 				var td []byte
-				var autoNameInt int
+				var autoNameInt, acknowledgedInt int
 				var autoNameDescription string
-				if scanErr := rows.Scan(&id, &td, &autoNameInt, &autoNameDescription); scanErr == nil {
+				if scanErr := rows.Scan(&id, &td, &autoNameInt, &autoNameDescription, &acknowledgedInt); scanErr == nil {
 					existingToolData[id] = json.RawMessage(td)
+					existingAcknowledged[id] = acknowledgedInt
 					existingAutoNames[id] = existingAutoNameFields{
 						found:       true,
 						autoName:    autoNameInt != 0,
@@ -1015,8 +1019,9 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 			created_at, last_accessed,
 			parent_session_id, is_conductor, no_transition_notify,
 			worktree_path, worktree_repo, worktree_branch, account,
-			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			archived_at, tool_data, title_locked, auto_name, auto_name_description, pin,
+			acknowledged
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1040,8 +1045,9 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 		// this is the only point that can atomically prevent the stale whole-row
 		// snapshot from replacing it. A targeted writer that starts after this
 		// transaction waits and wins after our commit, so both orderings converge.
+		authoritativeAcknowledged := existingAcknowledged[inst.ID]
 		var authoritativeToolData string
-		if err := tx.QueryRow("SELECT tool_data FROM instances WHERE id = ?", inst.ID).Scan(&authoritativeToolData); err == nil {
+		if err := tx.QueryRow("SELECT tool_data, acknowledged FROM instances WHERE id = ?", inst.ID).Scan(&authoritativeToolData, &authoritativeAcknowledged); err == nil {
 			authoritative := json.RawMessage(authoritativeToolData)
 			toolData = mergeToolDataExtrasWithoutCodexManaged(authoritative, toolData)
 			toolData = reconcileCodexBindingToolData(authoritative, toolData, inst.CodexBindingOverrideIntent)
@@ -1075,6 +1081,7 @@ func (s *StateDB) saveInstancesOnce(insts []*InstanceRow, sweep bool) error {
 			inst.ParentSessionID, isConductorInt, noTransitionNotifyInt,
 			inst.WorktreePath, inst.WorktreeRepo, inst.WorktreeBranch, inst.Account,
 			archivedAtUnix(inst.ArchivedAt), string(toolData), titleLockedInt, autoNameInt, autoNameDescription, inst.Pin,
+			authoritativeAcknowledged,
 		); err != nil {
 			return err
 		}

@@ -62,10 +62,9 @@ type Input struct {
 	Hook *session.HookStatus
 
 	// Acknowledged signals that the user has attached to the session
-	// since the last "waiting" event. When true and the tool is
-	// claude-compatible/gemini, a fresh "waiting" hook resolves to
-	// StatusIdle instead of StatusWaiting (matches Instance.UpdateStatus
-	// at instance.go:2899). Codex ignores this bit by design.
+	// since the last "waiting" event. When true, a fresh "waiting" hook
+	// resolves to StatusIdle instead of StatusWaiting for every hook-emitting
+	// tool. New activity clears the bit before the next completion is applied.
 	Acknowledged bool
 
 	// Now is injected for deterministic freshness arithmetic. Tests pass
@@ -143,12 +142,13 @@ func Derive(in Input) Decision {
 		return Decision{Status: session.StatusRunning, Applied: true}
 
 	case "waiting":
-		// Acknowledged + claude/gemini → idle. Codex always surfaces
-		// waiting because completion is attention-needed.
+		// A completed turn is attention-needed until the user views it. Once
+		// acknowledged, every provider must converge on idle; otherwise Codex
+		// remote sessions immediately turn yellow again after attach.
 		if !fresh && !in.AllowStaleWaiting {
 			return keep
 		}
-		if in.Acknowledged && !session.IsCodexCompatible(in.Tool) {
+		if in.Acknowledged {
 			return Decision{Status: session.StatusIdle, Applied: true}
 		}
 		return Decision{Status: session.StatusWaiting, Applied: true}

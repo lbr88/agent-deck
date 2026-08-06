@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-08-06
+
+### Fixed
+
+- **Viewed remote Codex sessions reliably transition from waiting to idle.** Attach acknowledgements now apply consistently across local, SSH, web, and hub surfaces, survive unrelated state-database saves, and remain authoritative until genuinely new activity arrives.
+- **New and forked Codex sessions cannot steal another row's conversation binding.** Startup discovery now excludes every persisted Codex thread owned by another Agent Deck session, all automatic binding paths enforce the same one-row-to-one-thread rule, and forks explicitly reject their parent's thread while the child is starting. This keeps explicit titles, previews, and Enter routing attached to the intended session.
+
 ## [1.11.1] - 2026-08-06
 
 ### Added
