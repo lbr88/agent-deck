@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-08-06
+
 ### Added
 
 - **Live in-place updates for long-running modes.** Verified local and remote updates now publish atomically, and running TUI, web, hub, OpenClaw bridge, notification, and credential-refresh processes gracefully re-exec the replacement with the same PID and launch context. Managed tmux agent sessions remain alive; `agent-deck update --yes` enables non-interactive host automation.
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Preview terminal safety is consistent across local, SSH remote, and hub sessions.** Tabs are expanded before cell-width accounting, terminal erase controls are removed, and every rendered preview row is constrained to its pane without changing raw cached or copied content.
 - **Self-update transactions are concurrency-safe and recoverable.** Local and SSH deployments use serialized unique staging, executable preflight checks, atomic publication, and rollback; SSH deployments also verify after publication and refuse to flatten package-manager symlinks. Stop-vs-update races now honor explicit operator shutdown instead of resurrecting a process.
 - **Saved Codex import finds modern Codex state.** The import dialog reads Codex's SQLite state in addition to the legacy JSONL index, searches paths, defaults imported sessions to start, and keeps the import hotkey local even when a hub session is selected.
 - **Hub sessions render and attach naturally.** Remote hub sessions are grouped by node, sorted with local status sections, support larger paste payloads, and restart stopped/error sessions before attach.
