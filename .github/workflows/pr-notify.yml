@@ -1,18 +1,28 @@
 name: PR Notification
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] Metadata-only job; it never checks out or executes pull-request code.
     types: [opened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read # Read pull-request discussion for the notification payload.
+  pull-requests: read # Read files, reviews, and commits for the notification payload.
 
 jobs:
   notify:
+    name: Send pull-request notification
     runs-on: ubuntu-latest
     # Skip draft PRs unless they become ready
     if: github.event.pull_request.draft == false
     steps:
       - name: Gather PR context
         id: context
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const pr = context.payload.pull_request;

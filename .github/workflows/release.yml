@@ -29,26 +29,29 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  # Sigstore OIDC + GitHub artifact attestation (SLSA build provenance).
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   release:
+    name: Build, attest, and publish release
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: write # Create the release and upload its versioned assets.
+      id-token: write # Obtain the Sigstore identity used for build provenance.
+      attestations: write # Publish attestations for the release archives.
     # Tag-push runs use the pushed tag; manual dispatch supplies it explicitly.
     env:
       REF_NAME: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Check out the tag itself so GoReleaser sees the version tag at HEAD,
           # even when dispatched against main.
           ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
+          persist-credentials: false
 
       # #1759: the empty-release window. If a release already exists for this
       # tag and is already published (an out-of-band `gh release create`, or a
@@ -132,7 +135,7 @@ jobs:
           echo "Release ${REF_NAME} is now an unpublished draft titled ${REF_NAME}."
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           # Disable the module cache in this write-permission workflow: a
