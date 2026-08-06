@@ -85,32 +85,27 @@ func TestEval_Session_ITermBadge_RealAttach(t *testing.T) {
 	// Cleanup the session even on failure.
 	t.Cleanup(func() { _, _ = runBinTry(sb, "session", "stop", "badge") })
 
-	// PTY-spawn the attach. TERM_PROGRAM=iTerm.app turns on the badge
-	// emit gate. TERM=dumb (harness default) is intentional: under it,
-	// the inner tmux attach process exits immediately with "terminal does
-	// not support clear", which drives agent-deck's Attach() through its
-	// full on-entry-then-cleanupAttach lifecycle in a single short-lived
-	// spawn. We do not need to actually run an interactive session — we
-	// just need both OSC emit boundaries to fire so we can assert on them.
+	// PTY-spawn the attach. TERM_PROGRAM=iTerm.app turns on the badge emit
+	// gate. Do not depend on TERM=dumb making a particular tmux version exit:
+	// current tmux releases can remain attached under TERM=dumb. Instead,
+	// wait until the attach UI is ready and exercise Agent Deck's real detach
+	// key so both OSC emit boundaries are deterministic on every runner.
 	p := sb.SpawnWithEnv(
 		[]string{"TERM_PROGRAM=iTerm.app"},
 		"session", "attach", "badge",
 	)
 	defer p.Close()
 
-	// Wait for the binary to exit naturally. Under TERM=dumb the inner
-	// tmux attach exits with "terminal does not support clear", but
-	// agent-deck's Attach normalises that into a clean exit (the cmdDone
-	// branch treats exit codes 0/1 as detach equivalents). Both emit
-	// sites fire before and after, which is what we're testing. A 10s
-	// ceiling is generous for what's typically a sub-second flow.
+	// Set-on-entry: SetBadgeFormat=<base64("badge")> + BEL.
+	wantSet := "\x1b]1337;SetBadgeFormat=" +
+		base64.StdEncoding.EncodeToString([]byte("badge")) + "\a"
+	p.ExpectOutput(wantSet, 10*time.Second)
+	p.ExpectOutput("ctrl+q detach", 10*time.Second)
+	p.Send("\x11") // Ctrl+Q
 	p.ExpectExit(0, 10*time.Second)
 
 	captured := p.Output()
 
-	// Set-on-entry: SetBadgeFormat=<base64("badge")> + BEL.
-	wantSet := "\x1b]1337;SetBadgeFormat=" +
-		base64.StdEncoding.EncodeToString([]byte("badge")) + "\a"
 	if !strings.Contains(captured, wantSet) {
 		t.Fatalf("attach did not emit SetBadgeFormat OSC for session title 'badge'.\n"+
 			"want substring: %q\ncaptured (escaped): %q",
