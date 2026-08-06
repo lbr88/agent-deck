@@ -3252,7 +3252,13 @@ func (b LocalActionBackend) MarkUnread(ctx context.Context, sessionID string) er
 	tmuxSess.ResetAcknowledged()
 	inst.ForceNextStatusCheck()
 	_ = inst.UpdateStatus()
-	return storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups))
+	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
+		return err
+	}
+	if db := storage.GetDB(); db != nil {
+		return db.SetAcknowledged(inst.ID, false)
+	}
+	return nil
 }
 
 // Acknowledge records that a waiting session has been viewed through a hub

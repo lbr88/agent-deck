@@ -51,6 +51,15 @@ func TestIsolateTmuxSocket(t *testing.T) {
 	}
 }
 
+func TestShortTmuxTmpBasePrefersConfiguredTMPDIR(t *testing.T) {
+	configured := "/var/tmp"
+	t.Setenv("TMPDIR", configured)
+
+	if got := shortTmuxTmpBase(); got != configured {
+		t.Fatalf("shortTmuxTmpBase() = %q, want configured TMPDIR %q", got, configured)
+	}
+}
+
 // TestIsolateTmuxSocket_UnsetsTmuxEnvVar is the regression test for the
 // 2026-04-17 three-cascade incident.
 //

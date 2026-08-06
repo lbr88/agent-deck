@@ -1910,8 +1910,8 @@ func (i *Instance) UpdateOpenCodeSSEStatus(status string, updatedAt time.Time) {
 	defer i.mu.Unlock()
 	// A transition means new activity/output the user hasn't seen yet: reset
 	// acknowledgment so waiting renders orange, mirroring UpdateHookStatus.
-	if status != i.sseStatus && i.tmuxSession != nil {
-		i.tmuxSession.ResetAcknowledged()
+	if status != i.sseStatus {
+		i.resetAcknowledgedForNewActivityLocked(true)
 	}
 	i.sseStatus = status
 	i.sseLastUpdate = updatedAt
@@ -5547,7 +5547,11 @@ func (i *Instance) UpdateStatus() error {
 	// quarantined guardian/old-root hook must be a complete no-op.
 	if coldLoadedHookStatus && i.hookStatus != "" && i.tmuxSession != nil &&
 		(i.hookStatus == "running" || i.hookStatus == "waiting") {
-		i.tmuxSession.ResetAcknowledged()
+		if i.hookStatus == "running" {
+			i.resetAcknowledgedForNewActivityLocked(true)
+		} else {
+			i.tmuxSession.ResetAcknowledged()
+		}
 	}
 
 	// HOOK FAST PATH: hook-based status for tools that emit lifecycle events.
@@ -5563,9 +5567,7 @@ func (i *Instance) UpdateStatus() error {
 			// Reset acknowledged: new activity means output not yet seen.
 			// Without this, a previously-acknowledged session would go straight
 			// to idle (gray) after Stop, skipping the waiting (orange) state.
-			if i.tmuxSession != nil {
-				i.tmuxSession.ResetAcknowledged()
-			}
+			i.resetAcknowledgedForNewActivityLocked(false)
 		case "waiting":
 			if IsCodexCompatible(i.Tool) {
 				// Codex completion is attention-needed until the user views it.
@@ -6051,10 +6053,9 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 	// activity that the user must respond to — unlike Stop (task complete) which
 	// can stay grey if already seen.
 	// Handles both PermissionRequest events and Notification/permission_prompt.
-	if isNewEvent && status.Status == "waiting" && i.tmuxSession != nil {
-		if status.Event == "PermissionRequest" || status.Event == "Notification" {
-			i.tmuxSession.ResetAcknowledged()
-		}
+	if isNewEvent && (status.Status == "running" ||
+		(status.Status == "waiting" && (status.Event == "PermissionRequest" || status.Event == "Notification"))) {
+		i.resetAcknowledgedForNewActivityLocked(true)
 	}
 
 	// Issue #1349 defense-in-depth #1: never bind a session id from a terminal
@@ -6351,16 +6352,16 @@ func (i *Instance) acceptCodexSessionID(sessionID string, syncTmuxEnv bool) bool
 	}
 	if sourceID := strings.ToLower(strings.TrimSpace(i.CodexForkSourceSessionID)); sourceID != "" && sessionID == sourceID {
 		sessionLog.Debug("codex_fork_source_binding_rejected",
-			slog.String("instance_id", i.ID),
-			slog.String("source_session_id", sourceID))
+			slog.String("instance_id", logging.SanitizeValue(i.ID)),
+			slog.String("source_session_id", logging.SanitizeValue(sourceID)))
 		return false
 	}
 	releaseHookLock, err := AcquireHookSessionLock(i.ID)
 	if err != nil {
 		sessionLog.Warn("codex_session_binding_lock_failed",
-			slog.String("instance_id", i.ID),
-			slog.String("candidate", sessionID),
-			slog.String("error", err.Error()))
+			slog.String("instance_id", logging.SanitizeValue(i.ID)),
+			slog.String("candidate", logging.SanitizeValue(sessionID)),
+			slog.String("error", logging.SanitizeValue(err.Error())))
 		return false
 	}
 	defer releaseHookLock()
@@ -6370,9 +6371,9 @@ func (i *Instance) acceptCodexSessionID(sessionID string, syncTmuxEnv bool) bool
 	if !overridePending && currentID != sessionID {
 		if ownerID := i.codexSessionOwner(sessionID); ownerID != "" {
 			sessionLog.Warn("codex_owned_binding_rejected",
-				slog.String("instance_id", i.ID),
-				slog.String("candidate", sessionID),
-				slog.String("owner_instance_id", ownerID))
+				slog.String("instance_id", logging.SanitizeValue(i.ID)),
+				slog.String("candidate", logging.SanitizeValue(sessionID)),
+				slog.String("owner_instance_id", logging.SanitizeValue(ownerID)))
 			return false
 		}
 	}
@@ -6550,6 +6551,29 @@ func (i *Instance) metadataStateDB() *statedb.StateDB {
 		return i.stateDB
 	}
 	return statedb.GetGlobal()
+}
+
+// resetAcknowledgedForNewActivityLocked keeps the tmux tracker and the
+// profile database in sync when new agent activity makes prior output unseen.
+// forcePersist is true at event boundaries; the status fast path passes false
+// so steady running polls do not write unless shared SQLite state re-applied a
+// stale acknowledgement to tmux memory.
+func (i *Instance) resetAcknowledgedForNewActivityLocked(forcePersist bool) {
+	wasAcknowledged := false
+	if i.tmuxSession != nil {
+		wasAcknowledged = i.tmuxSession.IsAcknowledged()
+		i.tmuxSession.ResetAcknowledged()
+	}
+	if !forcePersist && !wasAcknowledged {
+		return
+	}
+	if db := i.metadataStateDB(); db != nil {
+		if err := db.SetAcknowledged(i.ID, false); err != nil {
+			sessionLog.Warn("acknowledgement_reset_persist_failed",
+				slog.String("instance_id", logging.SanitizeValue(i.ID)),
+				slog.String("error", logging.SanitizeValue(err.Error())))
+		}
+	}
 }
 
 // bindGeminiSessionFromHook is the Gemini counterpart of

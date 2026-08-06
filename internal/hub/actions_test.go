@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 func TestCommandDispatcherRejectsUnknownAction(t *testing.T) {
@@ -185,6 +186,52 @@ func TestLocalActionBackendAcknowledgePersistsIdleAndClearsHook(t *testing.T) {
 	}
 	if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
 		t.Fatalf("hook file still exists or stat failed: %v", err)
+	}
+}
+
+func TestLocalActionBackendMarkUnreadPersistsAcknowledgementReset(t *testing.T) {
+	isolateHubActionConfig(t)
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	const profile = "hub-mark-unread"
+	const sessionID = "viewed-codex"
+
+	storage, err := session.NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile: %v", err)
+	}
+	inst := &session.Instance{
+		ID: sessionID, Title: "viewed worker", ProjectPath: t.TempDir(),
+		GroupPath: session.DefaultGroupPath, Tool: "codex", Status: session.StatusIdle,
+	}
+	tmuxSession := tmux.NewSession("missing-mark-unread-pane", inst.ProjectPath)
+	tmuxSession.SocketName = "hub-mark-unread-test"
+	inst.SetTmuxSessionForTest(tmuxSession)
+	if err := storage.Save([]*session.Instance{inst}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := storage.GetDB().SetAcknowledged(sessionID, true); err != nil {
+		t.Fatalf("SetAcknowledged(true): %v", err)
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	backend := LocalActionBackend{Profile: profile}
+	if err := backend.MarkUnread(context.Background(), sessionID); err != nil {
+		t.Fatalf("MarkUnread: %v", err)
+	}
+
+	verify, err := session.NewStorageWithProfile(profile)
+	if err != nil {
+		t.Fatalf("NewStorageWithProfile verify: %v", err)
+	}
+	defer verify.Close()
+	statuses, err := verify.GetDB().ReadAllStatuses()
+	if err != nil {
+		t.Fatalf("ReadAllStatuses: %v", err)
+	}
+	if statuses[sessionID].Acknowledged {
+		t.Fatal("MarkUnread left SQLite acknowledged=true; shared sync will immediately undo it")
 	}
 }
 

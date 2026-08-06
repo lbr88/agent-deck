@@ -138,9 +138,12 @@ func envWithoutTmux() []string {
 }
 
 // adTmuxBases returns the candidate base dirs where IsolateTmuxSocket creates
-// its per-run TMUX_TMPDIR (shortTmuxTmpBase prefers /tmp, else os.TempDir()).
+// its per-run TMUX_TMPDIR (shortTmuxTmpBase prefers TMPDIR, then /var/tmp).
 func adTmuxBases() []string {
-	bases := map[string]struct{}{"/tmp": {}, os.TempDir(): {}}
+	bases := map[string]struct{}{"/tmp": {}, "/var/tmp": {}, os.TempDir(): {}}
+	if configured := strings.TrimSpace(os.Getenv("TMPDIR")); configured != "" {
+		bases[configured] = struct{}{}
+	}
 	out := make([]string, 0, len(bases))
 	for b := range bases {
 		out = append(out, b)

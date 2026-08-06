@@ -1658,7 +1658,18 @@ func (m *WebMutator) MarkSessionUnread(id string) error {
 	ts.ResetAcknowledged()
 	inst.ForceNextStatusCheck()
 	_ = inst.UpdateStatus()
-	return m.persistAllInstances()
+	if err := m.persistAllInstances(); err != nil {
+		return err
+	}
+	storage, err := session.NewStorageWithProfile(m.h.profile)
+	if err != nil {
+		return fmt.Errorf("open storage to persist unread state: %w", err)
+	}
+	defer storage.Close()
+	if err := storage.GetDB().SetAcknowledged(inst.ID, false); err != nil {
+		return fmt.Errorf("persist unread state: %w", err)
+	}
+	return nil
 }
 
 func (m *WebMutator) hubSessionAction(nodeID, sessionID, action string) error {
