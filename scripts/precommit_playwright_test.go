@@ -105,6 +105,37 @@ func TestPlaywrightChromiumPath_UsesPlaywrightManagedBrowser(t *testing.T) {
 	}
 }
 
+func TestPlaywrightChromiumPath_HonorsExplicitExecutable(t *testing.T) {
+	helper := precommitPlaywrightHelperPath(t)
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake bin: %v", err)
+	}
+
+	want := filepath.Join(workDir, "chrome-for-testing")
+	if err := os.WriteFile(want, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write explicit Chromium: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "node"), []byte("#!/bin/sh\nexit 99\n"), 0o755); err != nil {
+		t.Fatalf("write rejecting node: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", "source \"$1\"; playwright_chromium_path", "bash", helper)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="+want,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve explicit Playwright Chromium path: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("Playwright Chromium path = %q, want explicit path %q", got, want)
+	}
+}
+
 func precommitPlaywrightHelperPath(t *testing.T) string {
 	t.Helper()
 	workDir, err := os.Getwd()

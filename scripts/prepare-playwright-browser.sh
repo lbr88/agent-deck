@@ -39,9 +39,11 @@ prepare_playwright_browser() {
 }
 
 playwright_chromium_path() {
-  local chromium_path
-  chromium_path="$(node --input-type=module -e \
-    "import { chromium } from '@playwright/test'; process.stdout.write(chromium.executablePath())")"
+  local chromium_path="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
+  if [ -z "$chromium_path" ]; then
+    chromium_path="$(node --input-type=module -e \
+      "import { chromium } from '@playwright/test'; process.stdout.write(chromium.executablePath())")"
+  fi
   if [ ! -x "$chromium_path" ]; then
     echo "ERROR: Playwright Chromium is not executable at $chromium_path." >&2
     return 1
