@@ -125,21 +125,12 @@ if [ "$web_changed" = true ]; then
     run "${npm_cmd[@]}" ci --no-audit --no-fund
     run "${npm_cmd[@]}" run test:unit
 
-    playwright_chromium="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}"
-    if [ -z "$playwright_chromium" ]; then
-      for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-          playwright_chromium="$(command -v "$candidate")"
-          break
-        fi
-      done
-    fi
-    if [ -n "$playwright_chromium" ]; then
-      export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$playwright_chromium"
-      echo "[precommit-ci] Using system Chromium at $PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH."
-    else
-      run ./node_modules/.bin/playwright install chromium
-    fi
+    # Use Playwright's matching browser by default. Arbitrary system Chromium
+    # launchers can be Snap-confined or protocol-incompatible; callers that
+    # intentionally want one can still set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH.
+    # shellcheck source=prepare-playwright-browser.sh
+    source "$ROOT/scripts/prepare-playwright-browser.sh"
+    prepare_playwright_browser
     run "${npm_cmd[@]}" run test:e2e
   )
 else
