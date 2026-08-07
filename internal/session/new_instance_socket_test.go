@@ -146,3 +146,24 @@ socket_name = "new-socket"
 		t.Fatalf("recreateTmuxSession leaked new config socket onto existing instance; got %q want %q", ts.SocketName, "old-socket")
 	}
 }
+
+// TestRecreateTmuxSession_PreservesPersistedNameAfterRename pins the tmux
+// identity split that made a renamed, restarted session impossible to open.
+// The database keeps the original internal tmux name when the user changes the
+// display title. Recreating from the new title must therefore keep that stable
+// internal name; otherwise the replacement pane is alive under one name while
+// status, preview, and Enter reload the old name from persistence.
+func TestRecreateTmuxSession_PreservesPersistedNameAfterRename(t *testing.T) {
+	inst := NewInstanceWithTool("centralized-docs", t.TempDir(), "codex")
+	originalTmuxName := inst.GetTmuxSession().Name
+
+	inst.Title = "GEN-8525 centralized-docs"
+	inst.recreateTmuxSession()
+
+	if got := inst.GetTmuxSession().Name; got != originalTmuxName {
+		t.Fatalf("recreateTmuxSession changed persisted tmux identity after rename: got %q want %q", got, originalTmuxName)
+	}
+	if got := inst.GetTmuxSession().DisplayName; got != inst.Title {
+		t.Fatalf("recreateTmuxSession display name = %q, want renamed title %q", got, inst.Title)
+	}
+}

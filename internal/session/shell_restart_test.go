@@ -68,6 +68,52 @@ func TestRestart_ShellSession_PostRestartIsHealthy(t *testing.T) {
 	}
 }
 
+// TestRestart_RenamedSessionKeepsPersistedTmuxIdentity exercises the complete
+// stop/restart sequence against a real tmux server. A display rename must not
+// move the replacement pane to a newly generated internal name, because a
+// storage reload would reconnect to the original persisted name and strand the
+// live pane.
+func TestRestart_RenamedSessionKeepsPersistedTmuxIdentity(t *testing.T) {
+	skipIfNoTmuxBinary(t)
+	isolateUserHomeForShellRestart(t)
+
+	inst := NewInstance(uniqueShellTestTitle("RenamedRestart"), t.TempDir())
+	inst.Command = "sleep 60"
+
+	if err := inst.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	originalTmuxName := inst.GetTmuxSession().Name
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", originalTmuxName).Run() })
+
+	if _, _, err := SetField(inst, FieldTitle, "GEN-8525 centralized-docs", nil); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if err := inst.Kill(); err != nil {
+		t.Fatalf("Kill failed: %v", err)
+	}
+	if err := inst.Restart(); err != nil {
+		t.Fatalf("Restart failed: %v", err)
+	}
+
+	if got := inst.GetTmuxSession().Name; got != originalTmuxName {
+		t.Fatalf("renamed restart changed persisted tmux identity: got %q want %q", got, originalTmuxName)
+	}
+	if !waitForTmuxSession(originalTmuxName, time.Second) {
+		t.Fatalf("replacement pane did not start under persisted tmux identity %q", originalTmuxName)
+	}
+	if got := inst.GetTmuxSession().DisplayName; got != "GEN-8525 centralized-docs" {
+		t.Fatalf("replacement display name = %q, want renamed title", got)
+	}
+	row, err := instanceToRow(inst)
+	if err != nil {
+		t.Fatalf("serialize restarted session: %v", err)
+	}
+	if row.TmuxSession != originalTmuxName {
+		t.Fatalf("persisted tmux identity after renamed restart = %q, want %q", row.TmuxSession, originalTmuxName)
+	}
+}
+
 // TestRestart_ShellSession_AdoptsLiveTmuxOnNameMismatch reproduces the
 // user's reported state: Instance.tmuxSession.Name does NOT point at any
 // live tmux session, but a live tmux session matching the title prefix

@@ -7228,10 +7228,25 @@ func (i *Instance) clearSessionBindingForFreshStart() {
 }
 
 func (i *Instance) recreateTmuxSession() {
+	// The internal tmux name is the session's persisted identity, not a
+	// derivative of its current display title. A user rename intentionally
+	// changes Title without rewriting the stored tmux_session column. Minting a
+	// title-derived name here would start the replacement pane successfully but
+	// leave every fresh reader (status, preview, Enter, CLI, and web) targeting
+	// the old name from SQLite. Preserve the existing identity while letting
+	// NewSession refresh the display name and other runtime state.
+	stableName := ""
+	if i.tmuxSession != nil {
+		stableName = i.tmuxSession.Name
+	}
+
 	// Issue #663: multi-repo sessions must cwd into MultiRepoTempDir, not
 	// ProjectPath (which is a symlink into that parent dir). Delegates to
 	// EffectiveWorkingDir so single-repo sessions keep using ProjectPath.
 	i.tmuxSession = tmux.NewSession(i.Title, i.EffectiveWorkingDir())
+	if stableName != "" {
+		i.tmuxSession.Name = stableName
+	}
 	// Preserve the socket the instance was originally created on (issue
 	// #687). A restart/respawn cycle must NOT silently relocate the session
 	// to the current default socket — that would strand the old tmux pane
