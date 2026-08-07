@@ -2237,7 +2237,6 @@ func (s *Session) Start(command string) error {
 	//
 	// workDir was resolved and validated at the top of Start (#1713).
 	launcher, args := s.startCommandSpec(workDir, command)
-	s.ReusePersistedIdentity = false
 	if reusePersistedIdentity && launcher == "systemd-run" && wasServiceModeArgs(args) {
 		// A restart deliberately reuses the persisted tmux name. Service mode
 		// derives its transient unit from that same name, so an exhausted or
@@ -2534,6 +2533,10 @@ func (s *Session) Start(command string) error {
 	// Neither works reliably for detecting user input. We use polling for GREEN instead.
 	// The Stop hook (via Claude settings) handles instant YELLOW detection.
 
+	// Consume the one-shot marker only after every required start step has
+	// succeeded. A caller retrying a transient failure must retain the same
+	// no-remap and stale-service-unit safeguards.
+	s.ReusePersistedIdentity = false
 	return nil
 }
 

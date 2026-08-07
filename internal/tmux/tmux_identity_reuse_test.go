@@ -59,3 +59,30 @@ func TestStart_FreshIdentityStillRegeneratesOnCollision(t *testing.T) {
 	require.True(t, original.Exists(), "fresh collision handling must not replace the existing target")
 	require.True(t, fresh.Exists(), "fresh collision handling must start the regenerated target")
 }
+
+func TestStart_PersistedIdentityMarkerSurvivesFailedSpawnRetry(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("no tmux binary available: %v", err)
+	}
+
+	originalExec := execCommand
+	t.Cleanup(func() { execCommand = originalExec })
+	execCommand = func(string, ...string) *exec.Cmd { return exec.Command("false") }
+
+	s := NewSession("persisted-retry-"+randomServerSuffix(t), t.TempDir())
+	stableName := s.Name
+	s.LaunchAs = "direct"
+	s.ReusePersistedIdentity = true
+	t.Cleanup(func() { _ = s.Kill() })
+
+	require.Error(t, s.Start(""), "first spawn must exercise the failure path")
+	require.True(t, s.ReusePersistedIdentity,
+		"failed Start must retain persisted-identity safeguards for retry")
+	require.Equal(t, stableName, s.Name)
+
+	execCommand = originalExec
+	require.NoError(t, s.Start(""), "retry with a healthy launcher must succeed")
+	require.False(t, s.ReusePersistedIdentity,
+		"successful Start may consume the one-shot persisted-identity marker")
+	require.Equal(t, stableName, s.Name)
+}
