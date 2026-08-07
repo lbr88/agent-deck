@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.4] - 2026-08-07
+
+### Fixed
+
+- **Renamed sessions keep their persisted terminal identity when restarted.** Stop/restart no longer creates a new title-derived tmux target that can diverge from SQLite, orphan the live agent pane, or make Enter attach to a missing or unrelated session.
+
 ## [1.11.3] - 2026-08-06
 
 ### Fixed
