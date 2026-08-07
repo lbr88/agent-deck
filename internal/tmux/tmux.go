@@ -1101,6 +1101,12 @@ type Session struct {
 	// from TmuxSettings.GetLaunchAs which already canonicalises.
 	LaunchAs string
 
+	// reusePersistedIdentity marks a replacement Session created for an
+	// existing persisted tmux target. Service-mode starts use it to clear a
+	// stale transient unit with the same derived name before respawning. Fresh
+	// sessions leave it false and avoid the systemd/tmux ownership probes.
+	reusePersistedIdentity bool
+
 	// Custom patterns for generic tool support
 	customToolName       string
 	customBusyPatterns   []string
@@ -1563,6 +1569,33 @@ func (s *Session) SetMouse(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mouse = enabled
+}
+
+// MarkPersistedIdentityReuse tells the next successful Start to replace the
+// exact persisted tmux target instead of resolving a collision by changing its
+// name. The marker survives failed starts so a retry cannot drift identity.
+func (s *Session) MarkPersistedIdentityReuse() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reusePersistedIdentity = true
+}
+
+// PersistedIdentityReusePending reports whether the next successful Start is
+// required to reuse the persisted tmux target. It is exported for restart
+// orchestration and invariant tests; callers must use MarkPersistedIdentityReuse
+// rather than mutating Session state directly.
+func (s *Session) PersistedIdentityReusePending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reusePersistedIdentity
+}
+
+// consumePersistedIdentityReuse clears the one-shot marker only after Start
+// has completed every required setup step successfully.
+func (s *Session) consumePersistedIdentityReuse() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reusePersistedIdentity = false
 }
 
 // GetMouse reports whether tmux mouse mode is currently enabled for this
@@ -2201,11 +2234,28 @@ func (s *Session) Start(command string) error {
 	s.cachedPromptDetectorTool = ""
 	s.mu.Unlock()
 
-	// Check if session already exists (shouldn't happen with unique IDs, but handle gracefully)
+	// Check if session already exists (shouldn't happen with unique IDs, but handle gracefully).
+	// A persisted restart is different: changing its name would split the live
+	// target from the identity already stored in SQLite. A supervising service
+	// can recreate the old target between teardown and this call, so replace
+	// that exact target and fail if it cannot be released — never mint a suffix.
+	reusePersistedIdentity := s.PersistedIdentityReusePending()
 	if s.Exists() {
-		// Session with this exact name exists - regenerate with new unique suffix
-		sanitized := sanitizeName(s.DisplayName)
-		s.Name = SessionPrefix + sanitized + "_" + generateShortID()
+		if reusePersistedIdentity {
+			killErr := s.Kill()
+			s.invalidateCache()
+			if verifyErr := s.waitForPersistedIdentityAbsence(); verifyErr != nil {
+				if killErr != nil {
+					return fmt.Errorf("failed to replace persisted tmux identity %q: kill: %v; verification: %w", s.Name, killErr, verifyErr)
+				}
+				return fmt.Errorf("failed to replace persisted tmux identity %q: %w", s.Name, verifyErr)
+			}
+		} else {
+			// A genuinely new session may resolve its rare random-name collision
+			// by selecting a fresh suffix; no persistence points at it yet.
+			sanitized := sanitizeName(s.DisplayName)
+			s.Name = SessionPrefix + sanitized + "_" + generateShortID()
+		}
 	}
 
 	// Create new tmux session in detached mode with the command as the initial
@@ -2214,6 +2264,19 @@ func (s *Session) Start(command string) error {
 	//
 	// workDir was resolved and validated at the top of Start (#1713).
 	launcher, args := s.startCommandSpec(workDir, command)
+	if reusePersistedIdentity && launcher == "systemd-run" && wasServiceModeArgs(args) {
+		// A restart deliberately reuses the persisted tmux name. Service mode
+		// derives its transient unit from that same name, so an exhausted or
+		// otherwise inactive unit from the previous generation can still be
+		// loaded and make systemd-run reject the replacement as a duplicate.
+		// Retire only a provably inactive, unshared unit before spawning. The
+		// ownership gate leaves active/restarting/shared units untouched; those
+		// continue through the existing service -> scope -> direct fallback.
+		StopServiceUnitOwned(ServiceUnitOwnership{
+			SessionName: s.Name,
+			SocketName:  s.SocketName,
+		})
+	}
 	// newSpawnCommand (not bare execCommand) so the spawn — and any tmux server
 	// it starts — runs from SpawnBaseDir and can never inherit a directory that
 	// is later deleted. See workdir_guard.go.
@@ -2497,6 +2560,10 @@ func (s *Session) Start(command string) error {
 	// Neither works reliably for detecting user input. We use polling for GREEN instead.
 	// The Stop hook (via Claude settings) handles instant YELLOW detection.
 
+	// Consume the one-shot marker only after every required start step has
+	// succeeded. A caller retrying a transient failure must retain the same
+	// no-remap and stale-service-unit safeguards.
+	s.consumePersistedIdentityReuse()
 	return nil
 }
 
@@ -2507,6 +2574,49 @@ func (s *Session) Start(command string) error {
 // the session still exists and let a later poll resolve it). Overridable in
 // tests.
 var hasSessionProbeTimeout = 2 * time.Second
+
+const persistedIdentityProbeAttempts = 3
+
+var (
+	persistedIdentityProbeDelay       = 50 * time.Millisecond
+	errPersistedIdentityStillExists   = errors.New("persisted tmux target still exists after replacement kill")
+	errPersistedIdentityIndeterminate = errors.New("persisted tmux target verification is indeterminate")
+)
+
+// probeExistsDirect bypasses positive caches and reports three outcomes for
+// callers that must distinguish a definite target from a busy tmux server:
+// true/nil = present, false/nil = absent, false/errTmuxTimeout = indeterminate.
+func (s *Session) probeExistsDirect() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
+	defer cancel()
+	err := s.tmuxCmdContext(ctx, "has-session", "-t", s.Name).Run()
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		return false, fmt.Errorf("has-session %q: %w", s.Name, errTmuxTimeout)
+	}
+	return err == nil, nil
+}
+
+// waitForPersistedIdentityAbsence gives a busy server a brief chance to answer
+// after kill-session. It never turns an indeterminate timeout into either
+// "absent" (unsafe overwrite) or "present" (misleading collision error).
+func (s *Session) waitForPersistedIdentityAbsence() error {
+	var lastErr error
+	for attempt := 0; attempt < persistedIdentityProbeAttempts; attempt++ {
+		exists, err := s.probeExistsDirect()
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("%w: %w", errPersistedIdentityIndeterminate, err)
+		case exists:
+			lastErr = errPersistedIdentityStillExists
+		default:
+			return nil
+		}
+		if attempt+1 < persistedIdentityProbeAttempts {
+			time.Sleep(persistedIdentityProbeDelay)
+		}
+	}
+	return lastErr
+}
 
 // Exists checks if the tmux session exists
 // Uses cached session list when available (refreshed by RefreshExistingSessions)
@@ -2545,13 +2655,11 @@ func (s *Session) Exists() bool {
 	// is indeterminate — assume the session still exists rather than reporting
 	// it dead (which would flip a live session to StatusError). Only a probe
 	// that actually completes with a non-success status means "gone".
-	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
-	defer cancel()
-	err := s.tmuxCmdContext(ctx, "has-session", "-t", s.Name).Run()
-	if ctx.Err() == context.DeadlineExceeded {
+	exists, err := s.probeExistsDirect()
+	if errors.Is(err, errTmuxTimeout) {
 		return true // probe timed out: indeterminate, assume still alive
 	}
-	return err == nil
+	return exists
 }
 
 // ExistsCached is a cheap, non-blocking liveness check for hot periodic loops
