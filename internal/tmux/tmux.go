@@ -2214,6 +2214,19 @@ func (s *Session) Start(command string) error {
 	//
 	// workDir was resolved and validated at the top of Start (#1713).
 	launcher, args := s.startCommandSpec(workDir, command)
+	if launcher == "systemd-run" && wasServiceModeArgs(args) {
+		// A restart deliberately reuses the persisted tmux name. Service mode
+		// derives its transient unit from that same name, so an exhausted or
+		// otherwise inactive unit from the previous generation can still be
+		// loaded and make systemd-run reject the replacement as a duplicate.
+		// Retire only a provably inactive, unshared unit before spawning. The
+		// ownership gate leaves active/restarting/shared units untouched; those
+		// continue through the existing service -> scope -> direct fallback.
+		StopServiceUnitOwned(ServiceUnitOwnership{
+			SessionName: s.Name,
+			SocketName:  s.SocketName,
+		})
+	}
 	// newSpawnCommand (not bare execCommand) so the spawn — and any tmux server
 	// it starts — runs from SpawnBaseDir and can never inherit a directory that
 	// is later deleted. See workdir_guard.go.

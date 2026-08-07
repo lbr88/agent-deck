@@ -17,6 +17,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestStart_Service_ClearsFailedReusableUnitBeforeSpawn covers a renamed
+// session restart whose stable tmux name also reuses its transient systemd
+// unit name. An exhausted Restart=on-failure unit remains loaded in failed
+// state after the pane is gone; systemd-run rejects that duplicate unit and
+// Start otherwise falls back to an unsupervised scope/direct launch.
+func TestStart_Service_ClearsFailedReusableUnitBeforeSpawn(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("no tmux binary available: %v", err)
+	}
+
+	originalExec := execCommand
+	originalLook := systemctlLookPath
+	originalState := readServiceUnitState
+	originalLive := liveSessionsOnSocket
+	t.Cleanup(func() {
+		execCommand = originalExec
+		systemctlLookPath = originalLook
+		readServiceUnitState = originalState
+		liveSessionsOnSocket = originalLive
+	})
+
+	systemctlLookPath = func() error { return nil }
+	readServiceUnitState = func(string) (serviceUnitState, error) {
+		return serviceUnitState{ActiveState: "failed"}, nil
+	}
+	liveSessionsOnSocket = func(string) (map[string]struct{}, error) {
+		return liveSet(), nil
+	}
+
+	var calls []string
+	execCommand = func(name string, arg ...string) *exec.Cmd {
+		switch name {
+		case "systemctl":
+			calls = append(calls, strings.Join(append([]string{name}, arg...), " "))
+			return exec.Command("true")
+		case "systemd-run":
+			calls = append(calls, name)
+			return exec.Command("tmux", stripSystemdRunPrefix(arg)...)
+		default:
+			return exec.Command(name, arg...)
+		}
+	}
+
+	s := NewSession("test-svc-reuse-"+randomServerSuffix(t), t.TempDir())
+	s.LaunchAs = "service"
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", s.Name).Run() })
+
+	require.NoError(t, s.Start(""))
+	unit := ServiceUnitName(s.Name)
+	require.GreaterOrEqual(t, len(calls), 3)
+	assert.Equal(t, "systemctl --user stop "+unit, calls[0])
+	assert.Equal(t, "systemctl --user reset-failed "+unit, calls[1])
+	assert.Equal(t, "systemd-run", calls[2], "stale unit must be retired before service spawn")
+}
+
 // TestStart_Service_SuccessPath: service spawn works first time, no
 // scope/direct retries attempted. Negative guard: execCommand counter
 // asserts exactly one systemd-run invocation.

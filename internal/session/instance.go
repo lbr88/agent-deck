@@ -8285,8 +8285,8 @@ func (i *Instance) ServiceUnitOwnership() tmux.ServiceUnitOwnership {
 // RetireServiceUnit stops + resets-failed the transient systemd-user
 // service unit associated with this instance's tmux server (if
 // LaunchAs=service was used) — but ONLY when `own` proves this session was
-// its exclusive owner. Intended for the remove/delete code path ONLY —
-// NOT for restart, which needs the unit to persist so it can re-spawn tmux.
+// its exclusive owner. Intended for the remove/delete code path; restart's
+// tmux Start path separately clears only a stale, inactive reusable unit.
 //
 // `own` must come from ServiceUnitOwnership() called BEFORE teardown. The
 // returned decision reports whether the unit was stopped and why (see the
