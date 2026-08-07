@@ -62,7 +62,7 @@ func TestStart_Service_ClearsFailedReusableUnitBeforeSpawn(t *testing.T) {
 
 	s := NewSession("test-svc-reuse-"+randomServerSuffix(t), t.TempDir())
 	s.LaunchAs = "service"
-	s.ReusePersistedIdentity = true
+	s.MarkPersistedIdentityReuse()
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", s.Name).Run() })
 
 	require.NoError(t, s.Start(""))

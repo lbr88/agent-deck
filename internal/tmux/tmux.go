@@ -1101,11 +1101,11 @@ type Session struct {
 	// from TmuxSettings.GetLaunchAs which already canonicalises.
 	LaunchAs string
 
-	// ReusePersistedIdentity marks a replacement Session created for an
+	// reusePersistedIdentity marks a replacement Session created for an
 	// existing persisted tmux target. Service-mode starts use it to clear a
 	// stale transient unit with the same derived name before respawning. Fresh
 	// sessions leave it false and avoid the systemd/tmux ownership probes.
-	ReusePersistedIdentity bool
+	reusePersistedIdentity bool
 
 	// Custom patterns for generic tool support
 	customToolName       string
@@ -1569,6 +1569,33 @@ func (s *Session) SetMouse(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mouse = enabled
+}
+
+// MarkPersistedIdentityReuse tells the next successful Start to replace the
+// exact persisted tmux target instead of resolving a collision by changing its
+// name. The marker survives failed starts so a retry cannot drift identity.
+func (s *Session) MarkPersistedIdentityReuse() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reusePersistedIdentity = true
+}
+
+// PersistedIdentityReusePending reports whether the next successful Start is
+// required to reuse the persisted tmux target. It is exported for restart
+// orchestration and invariant tests; callers must use MarkPersistedIdentityReuse
+// rather than mutating Session state directly.
+func (s *Session) PersistedIdentityReusePending() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reusePersistedIdentity
+}
+
+// consumePersistedIdentityReuse clears the one-shot marker only after Start
+// has completed every required setup step successfully.
+func (s *Session) consumePersistedIdentityReuse() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reusePersistedIdentity = false
 }
 
 // GetMouse reports whether tmux mouse mode is currently enabled for this
@@ -2212,7 +2239,7 @@ func (s *Session) Start(command string) error {
 	// target from the identity already stored in SQLite. A supervising service
 	// can recreate the old target between teardown and this call, so replace
 	// that exact target and fail if it cannot be released — never mint a suffix.
-	reusePersistedIdentity := s.ReusePersistedIdentity
+	reusePersistedIdentity := s.PersistedIdentityReusePending()
 	if s.Exists() {
 		if reusePersistedIdentity {
 			killErr := s.Kill()
@@ -2536,7 +2563,7 @@ func (s *Session) Start(command string) error {
 	// Consume the one-shot marker only after every required start step has
 	// succeeded. A caller retrying a transient failure must retain the same
 	// no-remap and stale-service-unit safeguards.
-	s.ReusePersistedIdentity = false
+	s.consumePersistedIdentityReuse()
 	return nil
 }
 

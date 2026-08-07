@@ -166,7 +166,7 @@ func TestRecreateTmuxSession_PreservesPersistedNameAfterRename(t *testing.T) {
 	if got := inst.GetTmuxSession().DisplayName; got != inst.Title {
 		t.Fatalf("recreateTmuxSession display name = %q, want renamed title %q", got, inst.Title)
 	}
-	if !inst.GetTmuxSession().ReusePersistedIdentity {
+	if !inst.GetTmuxSession().PersistedIdentityReusePending() {
 		t.Fatal("recreateTmuxSession must mark the stable target for one-time service-unit reuse cleanup")
 	}
 }

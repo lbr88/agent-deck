@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"os/exec"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,7 +28,7 @@ func TestStart_ReusedPersistedIdentityNeverRegeneratesOnExistingTarget(t *testin
 	replacement := NewSession("renamed display title", workDir)
 	replacement.Name = stableName
 	replacement.LaunchAs = "direct"
-	replacement.ReusePersistedIdentity = true
+	replacement.MarkPersistedIdentityReuse()
 	t.Cleanup(func() { _ = replacement.Kill() })
 
 	require.NoError(t, replacement.Start(""))
@@ -72,17 +73,40 @@ func TestStart_PersistedIdentityMarkerSurvivesFailedSpawnRetry(t *testing.T) {
 	s := NewSession("persisted-retry-"+randomServerSuffix(t), t.TempDir())
 	stableName := s.Name
 	s.LaunchAs = "direct"
-	s.ReusePersistedIdentity = true
+	s.MarkPersistedIdentityReuse()
 	t.Cleanup(func() { _ = s.Kill() })
 
 	require.Error(t, s.Start(""), "first spawn must exercise the failure path")
-	require.True(t, s.ReusePersistedIdentity,
+	require.True(t, s.PersistedIdentityReusePending(),
 		"failed Start must retain persisted-identity safeguards for retry")
 	require.Equal(t, stableName, s.Name)
 
 	execCommand = originalExec
 	require.NoError(t, s.Start(""), "retry with a healthy launcher must succeed")
-	require.False(t, s.ReusePersistedIdentity,
+	require.False(t, s.PersistedIdentityReusePending(),
 		"successful Start may consume the one-shot persisted-identity marker")
 	require.Equal(t, stableName, s.Name)
+}
+
+// TestPersistedIdentityReuseMarker_ConcurrentAccess pins the marker's mutex
+// contract. Restart preparation and status/start work can overlap, so every
+// read and write of the one-shot marker must go through synchronized helpers.
+func TestPersistedIdentityReuseMarker_ConcurrentAccess(t *testing.T) {
+	s := NewSession("persisted-marker-concurrency", t.TempDir())
+
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.MarkPersistedIdentityReuse()
+		}()
+		go func() {
+			defer wg.Done()
+			_ = s.PersistedIdentityReusePending()
+		}()
+	}
+	wg.Wait()
+
+	require.True(t, s.PersistedIdentityReusePending())
 }
