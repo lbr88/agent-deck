@@ -2207,11 +2207,27 @@ func (s *Session) Start(command string) error {
 	s.cachedPromptDetectorTool = ""
 	s.mu.Unlock()
 
-	// Check if session already exists (shouldn't happen with unique IDs, but handle gracefully)
+	// Check if session already exists (shouldn't happen with unique IDs, but handle gracefully).
+	// A persisted restart is different: changing its name would split the live
+	// target from the identity already stored in SQLite. A supervising service
+	// can recreate the old target between teardown and this call, so replace
+	// that exact target and fail if it cannot be released — never mint a suffix.
+	reusePersistedIdentity := s.ReusePersistedIdentity
 	if s.Exists() {
-		// Session with this exact name exists - regenerate with new unique suffix
-		sanitized := sanitizeName(s.DisplayName)
-		s.Name = SessionPrefix + sanitized + "_" + generateShortID()
+		if reusePersistedIdentity {
+			if err := s.Kill(); err != nil {
+				return fmt.Errorf("failed to replace persisted tmux identity %q: %w", s.Name, err)
+			}
+			s.invalidateCache()
+			if s.Exists() {
+				return fmt.Errorf("failed to replace persisted tmux identity %q: target still exists", s.Name)
+			}
+		} else {
+			// A genuinely new session may resolve its rare random-name collision
+			// by selecting a fresh suffix; no persistence points at it yet.
+			sanitized := sanitizeName(s.DisplayName)
+			s.Name = SessionPrefix + sanitized + "_" + generateShortID()
+		}
 	}
 
 	// Create new tmux session in detached mode with the command as the initial
@@ -2220,7 +2236,6 @@ func (s *Session) Start(command string) error {
 	//
 	// workDir was resolved and validated at the top of Start (#1713).
 	launcher, args := s.startCommandSpec(workDir, command)
-	reusePersistedIdentity := s.ReusePersistedIdentity
 	s.ReusePersistedIdentity = false
 	if reusePersistedIdentity && launcher == "systemd-run" && wasServiceModeArgs(args) {
 		// A restart deliberately reuses the persisted tmux name. Service mode
