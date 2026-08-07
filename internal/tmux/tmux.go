@@ -1101,6 +1101,12 @@ type Session struct {
 	// from TmuxSettings.GetLaunchAs which already canonicalises.
 	LaunchAs string
 
+	// ReusePersistedIdentity marks a replacement Session created for an
+	// existing persisted tmux target. Service-mode starts use it to clear a
+	// stale transient unit with the same derived name before respawning. Fresh
+	// sessions leave it false and avoid the systemd/tmux ownership probes.
+	ReusePersistedIdentity bool
+
 	// Custom patterns for generic tool support
 	customToolName       string
 	customBusyPatterns   []string
@@ -2214,7 +2220,9 @@ func (s *Session) Start(command string) error {
 	//
 	// workDir was resolved and validated at the top of Start (#1713).
 	launcher, args := s.startCommandSpec(workDir, command)
-	if launcher == "systemd-run" && wasServiceModeArgs(args) {
+	reusePersistedIdentity := s.ReusePersistedIdentity
+	s.ReusePersistedIdentity = false
+	if reusePersistedIdentity && launcher == "systemd-run" && wasServiceModeArgs(args) {
 		// A restart deliberately reuses the persisted tmux name. Service mode
 		// derives its transient unit from that same name, so an exhausted or
 		// otherwise inactive unit from the previous generation can still be

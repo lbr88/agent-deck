@@ -7246,6 +7246,7 @@ func (i *Instance) recreateTmuxSession() {
 	i.tmuxSession = tmux.NewSession(i.Title, i.EffectiveWorkingDir())
 	if stableName != "" {
 		i.tmuxSession.Name = stableName
+		i.tmuxSession.ReusePersistedIdentity = true
 	}
 	// Preserve the socket the instance was originally created on (issue
 	// #687). A restart/respawn cycle must NOT silently relocate the session
