@@ -2215,12 +2215,13 @@ func (s *Session) Start(command string) error {
 	reusePersistedIdentity := s.ReusePersistedIdentity
 	if s.Exists() {
 		if reusePersistedIdentity {
-			if err := s.Kill(); err != nil {
-				return fmt.Errorf("failed to replace persisted tmux identity %q: %w", s.Name, err)
-			}
+			killErr := s.Kill()
 			s.invalidateCache()
-			if s.Exists() {
-				return fmt.Errorf("failed to replace persisted tmux identity %q: target still exists", s.Name)
+			if verifyErr := s.waitForPersistedIdentityAbsence(); verifyErr != nil {
+				if killErr != nil {
+					return fmt.Errorf("failed to replace persisted tmux identity %q: kill: %v; verification: %w", s.Name, killErr, verifyErr)
+				}
+				return fmt.Errorf("failed to replace persisted tmux identity %q: %w", s.Name, verifyErr)
 			}
 		} else {
 			// A genuinely new session may resolve its rare random-name collision
@@ -2544,6 +2545,49 @@ func (s *Session) Start(command string) error {
 // tests.
 var hasSessionProbeTimeout = 2 * time.Second
 
+const persistedIdentityProbeAttempts = 3
+
+var (
+	persistedIdentityProbeDelay       = 50 * time.Millisecond
+	errPersistedIdentityStillExists   = errors.New("persisted tmux target still exists after replacement kill")
+	errPersistedIdentityIndeterminate = errors.New("persisted tmux target verification is indeterminate")
+)
+
+// probeExistsDirect bypasses positive caches and reports three outcomes for
+// callers that must distinguish a definite target from a busy tmux server:
+// true/nil = present, false/nil = absent, false/errTmuxTimeout = indeterminate.
+func (s *Session) probeExistsDirect() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
+	defer cancel()
+	err := s.tmuxCmdContext(ctx, "has-session", "-t", s.Name).Run()
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		return false, fmt.Errorf("has-session %q: %w", s.Name, errTmuxTimeout)
+	}
+	return err == nil, nil
+}
+
+// waitForPersistedIdentityAbsence gives a busy server a brief chance to answer
+// after kill-session. It never turns an indeterminate timeout into either
+// "absent" (unsafe overwrite) or "present" (misleading collision error).
+func (s *Session) waitForPersistedIdentityAbsence() error {
+	var lastErr error
+	for attempt := 0; attempt < persistedIdentityProbeAttempts; attempt++ {
+		exists, err := s.probeExistsDirect()
+		switch {
+		case err != nil:
+			lastErr = fmt.Errorf("%w: %w", errPersistedIdentityIndeterminate, err)
+		case exists:
+			lastErr = errPersistedIdentityStillExists
+		default:
+			return nil
+		}
+		if attempt+1 < persistedIdentityProbeAttempts {
+			time.Sleep(persistedIdentityProbeDelay)
+		}
+	}
+	return lastErr
+}
+
 // Exists checks if the tmux session exists
 // Uses cached session list when available (refreshed by RefreshExistingSessions)
 // Falls back to direct tmux call if cache is stale
@@ -2581,13 +2625,11 @@ func (s *Session) Exists() bool {
 	// is indeterminate — assume the session still exists rather than reporting
 	// it dead (which would flip a live session to StatusError). Only a probe
 	// that actually completes with a non-success status means "gone".
-	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
-	defer cancel()
-	err := s.tmuxCmdContext(ctx, "has-session", "-t", s.Name).Run()
-	if ctx.Err() == context.DeadlineExceeded {
+	exists, err := s.probeExistsDirect()
+	if errors.Is(err, errTmuxTimeout) {
 		return true // probe timed out: indeterminate, assume still alive
 	}
-	return err == nil
+	return exists
 }
 
 // ExistsCached is a cheap, non-blocking liveness check for hot periodic loops
