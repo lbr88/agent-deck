@@ -71,4 +71,7 @@ func TestForkInstanceDeps_OpenCodeUsesResolvedWorktreeDir(t *testing.T) {
 	if inst.WorktreePath != "/tmp/original-wt" || inst.WorktreeRepoRoot != "/tmp/original" || inst.WorktreeBranch != "fork/oc-parent" {
 		t.Fatalf("OpenCode fork worktree metadata not copied: %+v", inst)
 	}
+	if !inst.TitleLocked {
+		t.Fatal("quick-fork title is unlocked; provider title sync can collapse it onto the parent")
+	}
 }

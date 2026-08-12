@@ -9728,9 +9728,16 @@ func (i *Instance) CreateForkedInstanceWithOptions(
 }
 
 // CreateForkedInstanceForTool creates a forked instance using the correct
-// tool-specific fork implementation. opts is the shared fork carrier for
-// worktree fields; non-Claude tool options continue to come from global config.
+// tool-specific fork implementation. Every fork title is locked so an inherited
+// provider name cannot collapse the child back onto the parent's display title.
+// opts is the shared fork carrier for worktree fields; non-Claude tool options
+// continue to come from global config.
 func (i *Instance) CreateForkedInstanceForTool(newTitle, newGroupPath string, opts *ClaudeOptions) (*Instance, string, error) {
+	var (
+		forked *Instance
+		cmd    string
+		err    error
+	)
 	switch {
 	case i.Tool == "opencode":
 		workDir := i.ProjectPath
@@ -9741,14 +9748,18 @@ func (i *Instance) CreateForkedInstanceForTool(newTitle, newGroupPath string, op
 			repoRoot = opts.WorktreeRepoRoot
 			branch = opts.WorktreeBranch
 		}
-		return i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, nil, workDir, repoRoot, branch)
+		forked, cmd, err = i.CreateForkedOpenCodeInstanceWithOptionsAndWorkDir(newTitle, newGroupPath, nil, workDir, repoRoot, branch)
 	case i.Tool == "pi":
-		return i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedPiInstanceWithOptions(newTitle, newGroupPath, opts)
 	case IsCodexCompatible(i.Tool):
-		return i.CreateForkedCodexInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedCodexInstanceWithOptions(newTitle, newGroupPath, opts)
 	default:
-		return i.CreateForkedInstanceWithOptions(newTitle, newGroupPath, opts)
+		forked, cmd, err = i.CreateForkedInstanceWithOptions(newTitle, newGroupPath, opts)
 	}
+	if err == nil && forked != nil {
+		forked.TitleLocked = true
+	}
+	return forked, cmd, err
 }
 
 // ForkOpenCode returns the command to create a forked OpenCode session.

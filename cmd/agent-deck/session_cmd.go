@@ -1241,12 +1241,10 @@ func handleSessionFork(profile string, args []string) {
 		os.Exit(1)
 	}
 
-	// Default title if not provided. An explicitly passed -t/--title is user
-	// intent and gets TitleLocked below (mirrors the TUI fork dialog); the
-	// auto-generated "<title>-fork" default keeps the #572 name sync enabled
-	// (mirrors quick fork).
-	explicitTitle := forkTitle != ""
-	if !explicitTitle {
+	// Default title if not provided. The shared fork constructor locks both this
+	// generated identity and an explicit -t/--title so a provider's inherited
+	// parent name cannot later make the two sessions indistinguishable.
+	if forkTitle == "" {
 		forkTitle = inst.Title + "-fork"
 	}
 
@@ -1508,9 +1506,6 @@ func handleSessionFork(profile string, args []string) {
 	if err != nil {
 		out.Error(fmt.Sprintf("failed to create fork: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
-	}
-	if explicitTitle {
-		forkedInst.TitleLocked = true
 	}
 
 	if worktreeType != "" {
