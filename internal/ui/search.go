@@ -136,8 +136,8 @@ func (s *Search) SetItems(items []*session.Instance) {
 	s.localItems = localItems
 	if s.scope == SearchScopeLocal {
 		s.allItems = s.localItems
+		s.updateResults()
 	}
-	s.updateResults()
 }
 
 // SetFleetItems replaces the in-memory fleet snapshot. It also derives the

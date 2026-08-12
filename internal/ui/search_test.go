@@ -59,6 +59,25 @@ func TestSearchGlobalScopeDefaultsAndTabTogglesLocal(t *testing.T) {
 	}
 }
 
+func TestSearchGlobalCursorSurvivesLocalSessionReload(t *testing.T) {
+	s := NewSearch()
+	s.SetFleetItems([]*SessionSearchResult{
+		{Source: SearchSourceLocal, SessionID: "local-1", Title: "local session", Tool: "codex"},
+		{Source: SearchSourceHub, SessionID: "hub-1", Title: "hub session", Tool: "codex", HubNodeID: "node-aws"},
+	})
+	s.ShowGlobal()
+	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+
+	s.SetItems([]*session.Instance{{ID: "local-2", Title: "reloaded local", Tool: "codex"}})
+
+	if got := s.cursor; got != 1 {
+		t.Fatalf("global cursor after local reload = %d, want 1", got)
+	}
+	if selected := s.Selected(); selected == nil || selected.SessionID != "hub-1" {
+		t.Fatalf("global selection changed after unrelated local reload: %+v", selected)
+	}
+}
+
 func TestSearchGlobalMatchesAndRendersOwningHost(t *testing.T) {
 	s := NewSearch()
 	s.SetFleetItems([]*SessionSearchResult{{
