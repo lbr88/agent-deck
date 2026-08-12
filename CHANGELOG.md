@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.5] - 2026-08-12
+
+### Fixed
+
+- **Session search now defaults to the complete fleet and opens the selected result directly.** `/` searches local, configured SSH, and hub sessions; `Tab` switches to local-machine-only scope, and `Enter` attaches or restarts through the correct local, SSH, or hub path without merely moving the list cursor.
+- **Forked sessions keep an independent title across every supported provider.** Generated and explicit fork titles are locked at the shared creation boundary, so a child can no longer inherit its parent's native title after startup and become visually indistinguishable from the parent. Explicit title unlocking remains available when provider-driven renaming is wanted.
+
 ## [1.11.4] - 2026-08-07
 
 ### Fixed
