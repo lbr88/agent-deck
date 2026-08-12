@@ -30,17 +30,70 @@ var (
 			Padding(1, 2)
 )
 
+// SearchScope controls which known Agent Deck sessions appear in the search
+// overlay. Global is the fleet snapshot (local + SSH remotes + hub nodes),
+// while Local contains only sessions owned by this machine.
+type SearchScope string
+
+const (
+	SearchScopeGlobal SearchScope = "global"
+	SearchScopeLocal  SearchScope = "local"
+)
+
+// SessionSearchSource identifies the activation path for a search result.
+type SessionSearchSource string
+
+const (
+	SearchSourceLocal  SessionSearchSource = "local"
+	SearchSourceRemote SessionSearchSource = "remote"
+	SearchSourceHub    SessionSearchSource = "hub"
+)
+
+// SessionSearchResult is a searchable, fleet-aware session identity. It keeps
+// stable IDs instead of retaining pointers into reloadable session snapshots.
+type SessionSearchResult struct {
+	Source      SessionSearchSource
+	SessionID   string
+	Title       string
+	ProjectPath string
+	GroupPath   string
+	Tool        string
+	Status      session.Status
+	Host        string
+
+	RemoteName string
+	HubNodeID  string
+}
+
+func localSessionSearchResult(inst *session.Instance, host string) *SessionSearchResult {
+	if inst == nil {
+		return nil
+	}
+	return &SessionSearchResult{
+		Source:      SearchSourceLocal,
+		SessionID:   inst.ID,
+		Title:       inst.GetTitleThreadSafe(),
+		ProjectPath: inst.ProjectPath,
+		GroupPath:   inst.GroupPath,
+		Tool:        inst.GetToolThreadSafe(),
+		Status:      inst.GetStatusThreadSafe(),
+		Host:        host,
+	}
+}
+
 // Search represents the search overlay component
 type Search struct {
-	input          textinput.Model
-	results        []*session.Instance
-	cursor         int
-	width          int
-	height         int
-	visible        bool
-	allItems       []*session.Instance
-	switchToGlobal bool   // Flag to signal switch to global search
-	scopedGroup    string // Non-empty => filter items to this exact GroupPath (v1.7.60)
+	input       textinput.Model
+	results     []*SessionSearchResult
+	cursor      int
+	width       int
+	height      int
+	visible     bool
+	scope       SearchScope
+	allItems    []*SessionSearchResult
+	localItems  []*SessionSearchResult
+	fleetItems  []*SessionSearchResult
+	scopedGroup string // Non-empty => filter items to this exact GroupPath (v1.7.60)
 }
 
 // NewSearch creates a new search overlay
@@ -53,9 +106,10 @@ func NewSearch() *Search {
 
 	return &Search{
 		input:   ti,
-		results: []*session.Instance{},
+		results: []*SessionSearchResult{},
 		cursor:  0,
 		visible: false,
+		scope:   SearchScopeLocal,
 	}
 }
 
@@ -64,16 +118,42 @@ func NewSearch() *Search {
 // storage so background reloads do not leak out-of-group sessions into a
 // scoped in-group search session.
 func (s *Search) SetItems(items []*session.Instance) {
+	localItems := make([]*SessionSearchResult, 0, len(items))
+	for _, inst := range items {
+		if result := localSessionSearchResult(inst, "local"); result != nil {
+			localItems = append(localItems, result)
+		}
+	}
 	if s.scopedGroup != "" {
-		filtered := make([]*session.Instance, 0, len(items))
-		for _, it := range items {
-			if it != nil && it.GroupPath == s.scopedGroup {
+		filtered := make([]*SessionSearchResult, 0, len(localItems))
+		for _, it := range localItems {
+			if it.GroupPath == s.scopedGroup {
 				filtered = append(filtered, it)
 			}
 		}
-		s.allItems = filtered
+		localItems = filtered
+	}
+	s.localItems = localItems
+	if s.scope == SearchScopeLocal {
+		s.allItems = s.localItems
+	}
+	s.updateResults()
+}
+
+// SetFleetItems replaces the in-memory fleet snapshot. It also derives the
+// Local pool from the same rows so Tab never needs a disk or network refresh.
+func (s *Search) SetFleetItems(items []*SessionSearchResult) {
+	s.fleetItems = append(s.fleetItems[:0], items...)
+	s.localItems = s.localItems[:0]
+	for _, item := range s.fleetItems {
+		if item != nil && item.Source == SearchSourceLocal {
+			s.localItems = append(s.localItems, item)
+		}
+	}
+	if s.scope == SearchScopeGlobal {
+		s.allItems = s.fleetItems
 	} else {
-		s.allItems = items
+		s.allItems = s.localItems
 	}
 	s.updateResults()
 }
@@ -89,22 +169,38 @@ func (s *Search) SetSize(width, height int) {
 	s.height = height
 }
 
-// Show makes the search overlay visible
+// Show preserves the historical local-search behavior for callers such as
+// Alt+/. Ordinary / uses ShowGlobal explicitly.
 func (s *Search) Show() {
+	s.ShowLocal()
+}
+
+// ShowGlobal opens search over the complete fleet snapshot.
+func (s *Search) ShowGlobal() {
+	s.show(SearchScopeGlobal)
+}
+
+// ShowLocal opens search over sessions owned by this machine.
+func (s *Search) ShowLocal() {
+	s.show(SearchScopeLocal)
+}
+
+func (s *Search) show(scope SearchScope) {
+	s.scope = scope
+	if scope == SearchScopeGlobal {
+		s.allItems = s.fleetItems
+	} else {
+		s.allItems = s.localItems
+	}
 	s.visible = true
 	s.input.Focus()
 	s.input.SetValue("")
 	s.updateResults()
-	s.switchToGlobal = false
 }
 
-// WantsSwitchToGlobal returns true if user pressed Tab to switch to global search
-func (s *Search) WantsSwitchToGlobal() bool {
-	if s.switchToGlobal {
-		s.switchToGlobal = false
-		return true
-	}
-	return false
+// Scope returns the active search scope.
+func (s *Search) Scope() SearchScope {
+	return s.scope
 }
 
 // Hide hides the search overlay and clears any group scope.
@@ -122,7 +218,7 @@ func (s *Search) IsVisible() bool {
 }
 
 // Selected returns the currently selected item
-func (s *Search) Selected() *session.Instance {
+func (s *Search) Selected() *SessionSearchResult {
 	if len(s.results) == 0 {
 		return nil
 	}
@@ -166,8 +262,19 @@ func (s *Search) Update(msg tea.Msg) (*Search, tea.Cmd) {
 			return s, nil
 
 		case "tab":
-			// Signal to switch to global search
-			s.switchToGlobal = true
+			// Alt+/ is intentionally group-local; ordinary fleet search toggles
+			// between the complete snapshot and this machine's rows.
+			if s.scopedGroup != "" {
+				return s, nil
+			}
+			if s.scope == SearchScopeGlobal {
+				s.scope = SearchScopeLocal
+				s.allItems = s.localItems
+			} else {
+				s.scope = SearchScopeGlobal
+				s.allItems = s.fleetItems
+			}
+			s.updateResults()
 			return s, nil
 
 		default:
@@ -184,9 +291,43 @@ func (s *Search) Update(msg tea.Msg) (*Search, tea.Cmd) {
 
 // updateResults filters the items based on the current input
 func (s *Search) updateResults() {
-	query := s.input.Value()
-	s.results = session.FilterByQuery(s.allItems, query)
+	s.results = filterSessionSearchResults(s.allItems, s.input.Value())
 	s.cursor = 0
+}
+
+func filterSessionSearchResults(items []*SessionSearchResult, query string) []*SessionSearchResult {
+	if strings.TrimSpace(query) == "" {
+		return append([]*SessionSearchResult(nil), items...)
+	}
+
+	// Reuse the established local title/path/tool/status and fuzzy semantics by
+	// adapting each fleet result to the same search surface. Host and group are
+	// appended to ProjectPath so they participate without changing session's
+	// generic query API.
+	proxies := make([]*session.Instance, 0, len(items))
+	byProxy := make(map[*session.Instance]*SessionSearchResult, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		proxy := &session.Instance{
+			Title:       item.Title,
+			ProjectPath: strings.Join([]string{item.ProjectPath, item.GroupPath, item.Host}, " "),
+			Tool:        item.Tool,
+			Status:      item.Status,
+		}
+		proxies = append(proxies, proxy)
+		byProxy[proxy] = item
+	}
+
+	matches := session.FilterByQuery(proxies, query)
+	results := make([]*SessionSearchResult, 0, len(matches))
+	for _, match := range matches {
+		if item := byProxy[match]; item != nil {
+			results = append(results, item)
+		}
+	}
+	return results
 }
 
 // View renders the search overlay
@@ -196,10 +337,14 @@ func (s *Search) View() string {
 	}
 
 	// Header
+	headerText := "🔍 Global Search (all Agent Deck sessions)"
+	if s.scope == SearchScopeLocal {
+		headerText = "🔍 Local Search (this machine)"
+	}
 	header := lipgloss.NewStyle().
 		Foreground(ColorAccent).
 		Bold(true).
-		Render("🔍 Local Search (Agent Deck sessions)")
+		Render(headerText)
 
 	// Build search input box
 	searchBox := searchBoxStyle.Render(s.input.View())
@@ -207,19 +352,24 @@ func (s *Search) View() string {
 	// Build results list
 	var resultsStr strings.Builder
 	maxResults := 10
-	if len(s.results) > maxResults {
-		s.results = s.results[:maxResults]
+	shown := s.results
+	if len(shown) > maxResults {
+		shown = shown[:maxResults]
 	}
 
-	for i, item := range s.results {
+	for i, item := range shown {
+		label := item.Title + " (" + item.Tool + ")"
+		if s.scope == SearchScopeGlobal && strings.TrimSpace(item.Host) != "" {
+			label += "  · " + item.Host
+		}
 		var line string
 		if i == s.cursor {
-			line = selectedResultStyle.Render("› " + item.Title + " (" + item.Tool + ")")
+			line = selectedResultStyle.Render("› " + label)
 		} else {
-			line = resultItemStyle.Render("  " + item.Title + " (" + item.Tool + ")")
+			line = resultItemStyle.Render("  " + label)
 		}
 		resultsStr.WriteString(line)
-		if i < len(s.results)-1 {
+		if i < len(shown)-1 {
 			resultsStr.WriteString("\n")
 		}
 	}
@@ -239,9 +389,15 @@ func (s *Search) View() string {
 	}
 
 	// Keyboard shortcuts hint
-	keysHint := lipgloss.NewStyle().
-		Foreground(ColorComment).
-		Render("  [Enter] Select  [↑↓] Navigate  [Tab] Global  [Esc] Cancel")
+	keys := "  [Enter] Open  [↑↓] Navigate  [Esc] Cancel"
+	if s.scopedGroup == "" {
+		nextScope := "Local"
+		if s.scope == SearchScopeLocal {
+			nextScope = "Global"
+		}
+		keys = "  [Enter] Open  [↑↓] Navigate  [Tab] " + nextScope + "  [Esc] Cancel"
+	}
+	keysHint := lipgloss.NewStyle().Foreground(ColorComment).Render(keys)
 
 	// Combine everything
 	var content string

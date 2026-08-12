@@ -186,7 +186,7 @@ func (h *Home) jumpToIndex(idx int) {
 func (h *Home) openInGroupSearch() {
 	groupPath := h.currentGroupPath()
 	if groupPath == "" {
-		h.search.Show()
+		h.openFleetSearch()
 		return
 	}
 	h.search.SetScopedGroup(groupPath)
@@ -196,5 +196,5 @@ func (h *Home) openInGroupSearch() {
 	copy(items, h.instances)
 	h.instancesMu.RUnlock()
 	h.search.SetItems(items)
-	h.search.Show()
+	h.search.ShowLocal()
 }
