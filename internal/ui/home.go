@@ -9752,23 +9752,10 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		selected := h.search.Selected()
 		if selected != nil {
-			h.pinSearchResultSession(selected.ID)
-			// Ensure the session's group AND all parent groups are expanded so it's visible
-			if selected.GroupPath != "" {
-				h.groupTree.ExpandGroupWithParents(selected.GroupPath)
-			}
-			h.rebuildFlatItems()
-
-			// Find the session in flatItems (not instances) and set cursor
-			for i, item := range h.flatItems {
-				if item.Type == session.ItemTypeSession && item.Session != nil && item.Session.ID == selected.ID {
-					h.cursor = i
-					h.syncViewport() // Ensure the cursor is visible in the viewport
-					break
-				}
-			}
+			h.focusSearchResult(selected)
+			h.search.Hide()
+			return h, h.activateSearchResult(selected)
 		}
-		h.search.Hide()
 		return h, nil
 	case "esc":
 		h.search.Hide()
@@ -9777,16 +9764,6 @@ func (h *Home) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	h.search, cmd = h.search.Update(msg)
-
-	// Check if user wants to switch to global search
-	if h.search.WantsSwitchToGlobal() {
-		if h.globalSearchIndex != nil {
-			h.search.Hide()
-			h.globalSearch.SetSize(h.width, h.height)
-			h.globalSearch.Show()
-		}
-	}
-
 	return h, cmd
 }
 
@@ -11111,13 +11088,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "G": // Open global search (fall back to local search if index not available)
-		if h.globalSearchIndex != nil {
-			h.globalSearch.SetSize(h.width, h.height)
-			h.globalSearch.Show()
-		} else {
-			h.search.Show()
-		}
+	case "G": // Open fleet-wide session search.
+		h.openFleetSearch()
 		return h, nil
 
 	// Group-scoped navigation layer (v1.7.60): Alt+* keys navigate only within
@@ -11741,13 +11713,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case "/":
-		// Open global search first if available, otherwise local search
-		if h.globalSearchIndex != nil {
-			h.globalSearch.SetSize(h.width, h.height)
-			h.globalSearch.Show()
-		} else {
-			h.search.Show()
-		}
+		h.openFleetSearch()
 		return h, nil
 
 	case "?":

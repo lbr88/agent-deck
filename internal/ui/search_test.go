@@ -1,10 +1,124 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestSearchGlobalScopeDefaultsAndTabTogglesLocal(t *testing.T) {
+	s := NewSearch()
+	local := &session.Instance{ID: "local-1", Title: "local session", ProjectPath: "/work/local", Tool: "codex", Status: session.StatusWaiting}
+	s.SetFleetItems([]*SessionSearchResult{
+		{
+			Source:      SearchSourceLocal,
+			SessionID:   local.ID,
+			Title:       local.Title,
+			ProjectPath: local.ProjectPath,
+			Tool:        local.Tool,
+			Status:      local.Status,
+			Host:        "work-laptop",
+		},
+		{
+			Source:      SearchSourceRemote,
+			SessionID:   "remote-1",
+			Title:       "remote session",
+			ProjectPath: "/work/remote",
+			Tool:        "claude",
+			Status:      session.StatusRunning,
+			Host:        "aws-workstation",
+			RemoteName:  "aws",
+		},
+	})
+
+	s.ShowGlobal()
+	if got := s.Scope(); got != SearchScopeGlobal {
+		t.Fatalf("scope after ShowGlobal = %q, want %q", got, SearchScopeGlobal)
+	}
+	if got := len(s.results); got != 2 {
+		t.Fatalf("global results = %d, want 2", got)
+	}
+
+	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := s.Scope(); got != SearchScopeLocal {
+		t.Fatalf("scope after Tab = %q, want %q", got, SearchScopeLocal)
+	}
+	if got := len(s.results); got != 1 {
+		t.Fatalf("local results = %d, want 1", got)
+	}
+	if got := s.results[0].SessionID; got != local.ID {
+		t.Fatalf("local result ID = %q, want %q", got, local.ID)
+	}
+
+	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := s.Scope(); got != SearchScopeGlobal {
+		t.Fatalf("scope after second Tab = %q, want %q", got, SearchScopeGlobal)
+	}
+}
+
+func TestSearchGlobalCursorSurvivesLocalSessionReload(t *testing.T) {
+	s := NewSearch()
+	s.SetFleetItems([]*SessionSearchResult{
+		{Source: SearchSourceLocal, SessionID: "local-1", Title: "local session", Tool: "codex"},
+		{Source: SearchSourceHub, SessionID: "hub-1", Title: "hub session", Tool: "codex", HubNodeID: "node-aws"},
+	})
+	s.ShowGlobal()
+	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+
+	s.SetItems([]*session.Instance{{ID: "local-2", Title: "reloaded local", Tool: "codex"}})
+
+	if got := s.cursor; got != 1 {
+		t.Fatalf("global cursor after local reload = %d, want 1", got)
+	}
+	if selected := s.Selected(); selected == nil || selected.SessionID != "hub-1" {
+		t.Fatalf("global selection changed after unrelated local reload: %+v", selected)
+	}
+}
+
+func TestSearchGlobalMatchesAndRendersOwningHost(t *testing.T) {
+	s := NewSearch()
+	s.SetFleetItems([]*SessionSearchResult{{
+		Source:      SearchSourceHub,
+		SessionID:   "hub-1",
+		Title:       "duplicate title",
+		ProjectPath: "/srv/app",
+		GroupPath:   "ops",
+		Tool:        "codex",
+		Status:      session.StatusWaiting,
+		Host:        "aws-workstation",
+		HubNodeID:   "node-aws",
+	}})
+	s.SetSize(120, 40)
+	s.ShowGlobal()
+	s.input.SetValue("aws-workstation")
+	s.updateResults()
+
+	if got := len(s.results); got != 1 {
+		t.Fatalf("host query results = %d, want 1", got)
+	}
+	selected := s.Selected()
+	if selected == nil || selected.HubNodeID != "node-aws" {
+		t.Fatalf("selected result lost hub identity: %+v", selected)
+	}
+	if view := s.View(); !strings.Contains(view, "aws-workstation") {
+		t.Fatalf("global search view missing owning host:\n%s", view)
+	}
+}
+
+func TestSearchLocalItemsDoNotMatchSyntheticHostLabel(t *testing.T) {
+	s := NewSearch()
+	s.SetItems([]*session.Instance{{ID: "local-1", Title: "api session", Tool: "codex"}})
+	s.ShowLocal()
+	s.input.SetValue("local")
+	s.updateResults()
+
+	if got := len(s.results); got != 0 {
+		t.Fatalf("synthetic local host label produced %d false matches: %+v", got, s.results)
+	}
+}
 
 func TestNewSearch(t *testing.T) {
 	s := NewSearch()
@@ -126,5 +240,32 @@ func TestSearchView(t *testing.T) {
 	view = s.View()
 	if view == "" {
 		t.Error("View should not be empty when visible")
+	}
+}
+
+func TestSearchViewKeepsSelectedResultVisiblePastFirstPage(t *testing.T) {
+	s := NewSearch()
+	items := make([]*SessionSearchResult, 12)
+	for i := range items {
+		items[i] = &SessionSearchResult{
+			Source:    SearchSourceLocal,
+			SessionID: fmt.Sprintf("session-%02d", i),
+			Title:     fmt.Sprintf("session-%02d", i),
+			Tool:      "codex",
+		}
+	}
+	s.SetFleetItems(items)
+	s.SetSize(100, 40)
+	s.ShowGlobal()
+	for range 11 {
+		_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+
+	view := s.View()
+	if !strings.Contains(view, "session-11") {
+		t.Fatalf("selected result scrolled out of the visible search window:\n%s", view)
+	}
+	if strings.Contains(view, "session-00") {
+		t.Fatalf("search window remained pinned to the first page:\n%s", view)
 	}
 }

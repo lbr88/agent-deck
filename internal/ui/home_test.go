@@ -1723,46 +1723,7 @@ func TestHomeGlobalSearchInitialized(t *testing.T) {
 	// globalSearchIndex may be nil if not enabled in config, that's OK
 }
 
-func TestHomeSearchOpensGlobalWhenAvailable(t *testing.T) {
-	home := NewHome()
-	home.width = 100
-	home.height = 30
-
-	// Create a mock index
-	tmpDir := t.TempDir()
-	searchEnabled := true
-	config := session.GlobalSearchSettings{
-		Enabled:        &searchEnabled,
-		Tier:           "instant",
-		MemoryLimitMB:  100,
-		IndexRateLimit: 100,
-	}
-	index, err := session.NewGlobalSearchIndex(tmpDir, config)
-	if err != nil {
-		t.Fatalf("Failed to create test index: %v", err)
-	}
-	defer index.Close()
-
-	home.globalSearchIndex = index
-	home.globalSearch.SetIndex(index)
-
-	// Press / to open search - should open global search when index is available
-	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
-	model, _ := home.Update(msg)
-
-	h, ok := model.(*Home)
-	if !ok {
-		t.Fatal("Update should return *Home")
-	}
-	if !h.globalSearch.IsVisible() {
-		t.Error("Global search should be visible after pressing / when index is available")
-	}
-	if h.search.IsVisible() {
-		t.Error("Local search should NOT be visible when global search opens")
-	}
-}
-
-func TestHomeSearchOpensLocalWhenNoIndex(t *testing.T) {
+func TestHomeSearchOpensGlobalWithoutTranscriptIndex(t *testing.T) {
 	home := NewHome()
 	home.width = 100
 	home.height = 30
@@ -1770,7 +1731,7 @@ func TestHomeSearchOpensLocalWhenNoIndex(t *testing.T) {
 	// Ensure no global search index
 	home.globalSearchIndex = nil
 
-	// Press / to open search - should fall back to local search
+	// Press / to open fleet search; it never depends on the transcript index.
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
 	model, _ := home.Update(msg)
 
@@ -1782,91 +1743,45 @@ func TestHomeSearchOpensLocalWhenNoIndex(t *testing.T) {
 		t.Error("Global search should NOT be visible when index is nil")
 	}
 	if !h.search.IsVisible() {
-		t.Error("Local search should be visible when global index is not available")
+		t.Error("fleet search should be visible when transcript index is unavailable")
+	}
+	if got := h.search.Scope(); got != SearchScopeGlobal {
+		t.Fatalf("session search scope = %q, want %q", got, SearchScopeGlobal)
 	}
 }
 
-func TestHomeLocalSearchTabWithoutGlobalIndexKeepsSearchVisible(t *testing.T) {
+func TestHomeSearchTabTogglesScopeWithoutTranscriptIndex(t *testing.T) {
 	home := NewHome()
 	home.width = 100
 	home.height = 30
 	home.globalSearchIndex = nil
-	home.search.Show()
+	home.openFleetSearch()
 
 	model, _ := home.Update(tea.KeyMsg{Type: tea.KeyTab})
 	h := model.(*Home)
 
 	if !h.search.IsVisible() {
-		t.Fatal("local search should stay visible when Tab cannot switch to global search")
+		t.Fatal("session search should stay visible when Tab switches scope")
 	}
 	if h.globalSearch.IsVisible() {
-		t.Fatal("global search should remain hidden when no global index exists")
+		t.Fatal("transcript search should remain hidden when Tab switches scope")
+	}
+	if got := h.search.Scope(); got != SearchScopeLocal {
+		t.Fatalf("scope after Tab = %q, want %q", got, SearchScopeLocal)
 	}
 }
 
-func TestHomeLocalSearchTabWithGlobalIndexSwitchesToGlobal(t *testing.T) {
+func TestHomeFleetSearchEscape(t *testing.T) {
 	home := NewHome()
 	home.width = 100
 	home.height = 30
 
-	tmpDir := t.TempDir()
-	searchEnabled := true
-	config := session.GlobalSearchSettings{
-		Enabled:        &searchEnabled,
-		Tier:           "instant",
-		MemoryLimitMB:  100,
-		IndexRateLimit: 100,
-	}
-	index, err := session.NewGlobalSearchIndex(tmpDir, config)
-	if err != nil {
-		t.Fatalf("Failed to create test index: %v", err)
-	}
-	defer index.Close()
-
-	home.globalSearchIndex = index
-	home.globalSearch.SetIndex(index)
-	home.search.Show()
-
-	model, _ := home.Update(tea.KeyMsg{Type: tea.KeyTab})
-	h := model.(*Home)
-
-	if h.search.IsVisible() {
-		t.Fatal("local search should hide when Tab switches to global search")
-	}
-	if !h.globalSearch.IsVisible() {
-		t.Fatal("global search should be visible after Tab when global index exists")
-	}
-}
-
-func TestHomeGlobalSearchEscape(t *testing.T) {
-	home := NewHome()
-	home.width = 100
-	home.height = 30
-
-	// Create a mock index
-	tmpDir := t.TempDir()
-	searchEnabled := true
-	config := session.GlobalSearchSettings{
-		Enabled:        &searchEnabled,
-		Tier:           "instant",
-		MemoryLimitMB:  100,
-		IndexRateLimit: 100,
-	}
-	index, err := session.NewGlobalSearchIndex(tmpDir, config)
-	if err != nil {
-		t.Fatalf("Failed to create test index: %v", err)
-	}
-	defer index.Close()
-
-	home.globalSearchIndex = index
-	home.globalSearch.SetIndex(index)
-
-	// Open global search with /
+	// Open fleet session search with /.
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
 	home.Update(msg)
 
-	if !home.globalSearch.IsVisible() {
-		t.Fatal("Global search should be visible after pressing /")
+	if !home.search.IsVisible() {
+		t.Fatal("fleet search should be visible after pressing /")
 	}
 
 	// Press Escape to close
@@ -1877,8 +1792,8 @@ func TestHomeGlobalSearchEscape(t *testing.T) {
 	if !ok {
 		t.Fatal("Update should return *Home")
 	}
-	if h.globalSearch.IsVisible() {
-		t.Error("Global search should be hidden after pressing Escape")
+	if h.search.IsVisible() {
+		t.Error("fleet search should be hidden after pressing Escape")
 	}
 }
 
@@ -4376,10 +4291,16 @@ func TestSearchSelectionPinsSessionHiddenByOpenFilterUntilCursorMoves(t *testing
 	}
 
 	h.search.Show()
-	h.search.results = []*session.Instance{stopped}
+	h.search.results = []*SessionSearchResult{localSessionSearchResult(stopped, "local")}
 	h.search.cursor = 0
-	model, _ := h.handleSearchKey(tea.KeyMsg{Type: tea.KeyEnter})
+	model, cmd := h.handleSearchKey(tea.KeyMsg{Type: tea.KeyEnter})
 	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("Enter on a stopped local search result returned no restart/attach command")
+	}
+	if _, restarting := h.resumingSessions[stopped.ID]; !restarting {
+		t.Fatal("Enter on a stopped local search result did not begin resume")
+	}
 
 	if h.searchPinnedSessionID != stopped.ID {
 		t.Fatalf("searchPinnedSessionID = %q, want %q", h.searchPinnedSessionID, stopped.ID)
