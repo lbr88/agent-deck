@@ -73,7 +73,7 @@ Much of the requested surface is already built. The gap for layer 2 is largely
 | `--title-lock` / `--no-title-sync` on `agent-deck launch` | per session, at creation | `cmd/agent-deck/launch_cmd.go:63` |
 | `agent-deck session set-title-lock <id> <on\|off>` | per session, at runtime | `cmd/agent-deck/session_cmd.go:2452` |
 | `sync_title = false` | whole installation | `UserConfig.GetSyncTitle()`, `internal/session/userconfig.go:1331` (default `true`) — [#1254](https://github.com/asheshgoplani/agent-deck/issues/1254) |
-| Fork inherits an explicit title lock | forked sessions | `cmd/agent-deck/session_cmd.go:1225` |
+| Every generated or explicit fork title is locked | forked sessions | `internal/session/instance.go` (`CreateForkedInstanceForTool`) |
 
 Two related behaviours are also already correct and worth stating because they rule out
 whole classes of suspected bug:

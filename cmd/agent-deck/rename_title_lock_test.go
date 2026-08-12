@@ -1,15 +1,16 @@
-// rename_title_lock_test.go — CLI contract tests for title locking on
-// explicit renames and explicitly titled forks (PR #1355 review follow-up).
+// rename_title_lock_test.go — CLI contract tests for title locking on explicit
+// renames (PR #1355 review follow-up). Fork title locking is covered through
+// the shared cross-provider constructor and CLI Pi fork behavior tests.
 //
-// An explicit rename or fork title is user intent: it must set TitleLocked so
-// the #572 Claude-name sync (e.g. an auto-assigned plan title) can't revert
-// it on the next hook event. Direct `inst.Title = ...` assignments bypass the
-// SetField mutator that applies the lock.
+// An explicit rename is user intent: it must set TitleLocked so the #572
+// Claude-name sync (e.g. an auto-assigned plan title) can't revert it on the
+// next hook event. Direct `inst.Title = ...` assignments bypass the SetField
+// mutator that applies the lock.
 //
 // Why structural assertions instead of end-to-end handler invocation:
-// handleRename and handleSessionFork call os.Exit on every error path, and
-// there is no runMain/TestHelperProcess subprocess harness in this package.
-// We follow the extractFuncBody precedent from session_remove_kill_test.go.
+// handleRename calls os.Exit on every error path, and there is no
+// runMain/TestHelperProcess subprocess harness in this package. We follow the
+// extractFuncBody precedent from session_remove_kill_test.go.
 
 package main
 
@@ -90,20 +91,5 @@ func TestHandleSessionSetTitle_SyncsClaudeNameAfterSuccessfulSave(t *testing.T) 
 	}
 	if !(saveIdx < gateIdx && gateIdx < syncIdx && syncIdx < successIdx) {
 		t.Fatalf("Claude name sync must run after SaveWithGroups and before success output, gated to title (save=%d gate=%d sync=%d success=%d)", saveIdx, gateIdx, syncIdx, successIdx)
-	}
-}
-
-// TestHandleSessionFork_LocksExplicitTitle: `agent-deck session fork -t X`
-// must lock the fork's title, while the auto-generated "<title>-fork" default
-// keeps the #572 name sync enabled (mirrors the TUI dialog-vs-quick-fork
-// split).
-func TestHandleSessionFork_LocksExplicitTitle(t *testing.T) {
-	body := foldSpaces(mustExtractFuncBody(t, "session_cmd.go", "handleSessionFork"))
-
-	if !strings.Contains(body, `explicitTitle := forkTitle != ""`) {
-		t.Error("handleSessionFork must record whether -t/--title was explicitly passed before applying the default")
-	}
-	if !strings.Contains(body, "if explicitTitle { forkedInst.TitleLocked = true }") {
-		t.Error("handleSessionFork must set forkedInst.TitleLocked when -t/--title was explicitly passed")
 	}
 }

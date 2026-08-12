@@ -1526,7 +1526,10 @@ func (b LocalActionBackend) ForkWithOptions(ctx context.Context, req ForkSession
 		worktree.rollback()
 		return "", fmt.Errorf("create fork: %w", err)
 	}
-	forked.TitleLocked = strings.TrimSpace(req.Title) != ""
+	// A generated "(fork)" suffix is part of the child's independent identity,
+	// not a temporary placeholder. Keep the shared fork-title invariant explicit
+	// at this persistence boundary so future request-option changes cannot unlock it.
+	forked.TitleLocked = true
 	if worktree.backendType != "" {
 		forked.WorktreeType = worktree.backendType
 	}

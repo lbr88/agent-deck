@@ -45,7 +45,7 @@ func TestSessionFork_PiUsesNativeForkBeforeStart(t *testing.T) {
 	}
 	t.Cleanup(func() { sessionForkBeforeStartHook = oldHook })
 
-	handleSessionFork(profile, []string{"pi-parent", "-t", "pi-child"})
+	handleSessionFork(profile, []string{"pi-parent"})
 
 	if capturedParent == nil || capturedParent.ID != parent.ID {
 		t.Fatalf("hook captured parent = %+v, want parent %s", capturedParent, parent.ID)
@@ -58,6 +58,9 @@ func TestSessionFork_PiUsesNativeForkBeforeStart(t *testing.T) {
 	}
 	if capturedFork.Command != "pi" {
 		t.Fatalf("capturedFork.Command = %q, want base pi command", capturedFork.Command)
+	}
+	if capturedFork.Title != "pi-parent-fork" || !capturedFork.TitleLocked {
+		t.Fatalf("captured default fork title/lock = %q/%v, want %q/true", capturedFork.Title, capturedFork.TitleLocked, "pi-parent-fork")
 	}
 	if !capturedFork.IsForkAwaitingStart || capturedFork.ForkStartCommand == "" {
 		t.Fatalf("captured Pi fork should carry first-start command, got awaiting=%v command=%q", capturedFork.IsForkAwaitingStart, capturedFork.ForkStartCommand)

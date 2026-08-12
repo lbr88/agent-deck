@@ -153,6 +153,7 @@ Try different approaches without losing context. Fork Claude, OpenCode, Pi, and 
 
 - Press `f` for quick fork, `F` to customize name/group
 - Fork your forks to explore as many branches as you need
+- Fork titles are locked by default, including the generated `(fork)` suffix, so inherited provider names cannot make a child indistinguishable from its parent. Unlock one explicitly with `agent-deck session set-title-lock <id> off` when provider-driven title sync is preferred.
 - Codex forking requires a codex CLI with `codex fork <session-id>` support (verified with `codex-cli 0.137.0`)
 
 ### MCP Manager

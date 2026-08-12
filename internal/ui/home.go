@@ -15099,9 +15099,8 @@ func (h *Home) quickForkSession(source *session.Instance) tea.Cmd {
 			WithIgnored: in.Plan.WithIgnored,
 			Sandbox:     in.Plan.Sandbox,
 			// ExplicitWorktree stays false: quick fork worktree is
-			// config-default, not an explicit toggle (#1185). LockTitle stays
-			// false: the auto-generated "<title> (fork)" name is not user
-			// intent, so the #572 name sync stays enabled.
+			// config-default, not an explicit toggle (#1185). The shared fork
+			// constructor locks the generated "<title> (fork)" identity.
 		},
 		opts,
 		source.ParentSessionID, source.ParentProjectPath,
@@ -15542,11 +15541,9 @@ func defaultForkInstanceDeps() forkInstanceDeps {
 // it rolls back the new worktree+branch. Free function: it needs nothing from
 // *Home.
 //
-// toggles.LockTitle marks the new instance TitleLocked: a forked Claude
-// session inherits the parent's session name (e.g. an auto-assigned plan
-// title), so without the lock the #572 name sync clobbers the title the user
-// typed in the fork dialog on the fork's first hook event. Quick fork leaves
-// it false — its "<title> (fork)" name is auto-generated, not user intent.
+// The shared fork constructor locks every generated or explicit fork title.
+// toggles.LockTitle retains defense in depth for explicit-title call sites and
+// injected test dependencies that do not route through that constructor.
 func completeFork(
 	source *session.Instance,
 	title, groupPath string,
@@ -15619,8 +15616,8 @@ type forkToggles struct {
 	// ExplicitWorktree marks Worktree as an explicit user toggle rather than a
 	// config default, gating the #1185 non-repo fallback.
 	ExplicitWorktree bool
-	// LockTitle sets TitleLocked on the fork: the title is explicit user
-	// intent (fork dialog), so the #572 Claude-name sync must not clobber it.
+	// LockTitle reinforces the shared fork-title invariant for explicit-title
+	// call sites and injected dependencies.
 	LockTitle bool
 }
 
