@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -208,5 +209,32 @@ func TestSearchView(t *testing.T) {
 	view = s.View()
 	if view == "" {
 		t.Error("View should not be empty when visible")
+	}
+}
+
+func TestSearchViewKeepsSelectedResultVisiblePastFirstPage(t *testing.T) {
+	s := NewSearch()
+	items := make([]*SessionSearchResult, 12)
+	for i := range items {
+		items[i] = &SessionSearchResult{
+			Source:    SearchSourceLocal,
+			SessionID: fmt.Sprintf("session-%02d", i),
+			Title:     fmt.Sprintf("session-%02d", i),
+			Tool:      "codex",
+		}
+	}
+	s.SetFleetItems(items)
+	s.SetSize(100, 40)
+	s.ShowGlobal()
+	for range 11 {
+		_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+
+	view := s.View()
+	if !strings.Contains(view, "session-11") {
+		t.Fatalf("selected result scrolled out of the visible search window:\n%s", view)
+	}
+	if strings.Contains(view, "session-00") {
+		t.Fatalf("search window remained pinned to the first page:\n%s", view)
 	}
 }

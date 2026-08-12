@@ -352,24 +352,27 @@ func (s *Search) View() string {
 	// Build results list
 	var resultsStr strings.Builder
 	maxResults := 10
-	shown := s.results
-	if len(shown) > maxResults {
-		shown = shown[:maxResults]
+	start := 0
+	if s.cursor >= maxResults {
+		start = s.cursor - maxResults + 1
 	}
+	end := min(start+maxResults, len(s.results))
+	shown := s.results[start:end]
 
-	for i, item := range shown {
+	for offset, item := range shown {
+		resultIndex := start + offset
 		label := item.Title + " (" + item.Tool + ")"
 		if s.scope == SearchScopeGlobal && strings.TrimSpace(item.Host) != "" {
 			label += "  · " + item.Host
 		}
 		var line string
-		if i == s.cursor {
+		if resultIndex == s.cursor {
 			line = selectedResultStyle.Render("› " + label)
 		} else {
 			line = resultItemStyle.Render("  " + label)
 		}
 		resultsStr.WriteString(line)
-		if i < len(shown)-1 {
+		if offset < len(shown)-1 {
 			resultsStr.WriteString("\n")
 		}
 	}
