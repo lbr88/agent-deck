@@ -108,6 +108,18 @@ func TestSearchGlobalMatchesAndRendersOwningHost(t *testing.T) {
 	}
 }
 
+func TestSearchLocalItemsDoNotMatchSyntheticHostLabel(t *testing.T) {
+	s := NewSearch()
+	s.SetItems([]*session.Instance{{ID: "local-1", Title: "api session", Tool: "codex"}})
+	s.ShowLocal()
+	s.input.SetValue("local")
+	s.updateResults()
+
+	if got := len(s.results); got != 0 {
+		t.Fatalf("synthetic local host label produced %d false matches: %+v", got, s.results)
+	}
+}
+
 func TestNewSearch(t *testing.T) {
 	s := NewSearch()
 

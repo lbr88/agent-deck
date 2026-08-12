@@ -120,7 +120,7 @@ func NewSearch() *Search {
 func (s *Search) SetItems(items []*session.Instance) {
 	localItems := make([]*SessionSearchResult, 0, len(items))
 	for _, inst := range items {
-		if result := localSessionSearchResult(inst, "local"); result != nil {
+		if result := localSessionSearchResult(inst, ""); result != nil {
 			localItems = append(localItems, result)
 		}
 	}

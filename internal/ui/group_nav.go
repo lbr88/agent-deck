@@ -181,8 +181,8 @@ func (h *Home) jumpToIndex(idx int) {
 }
 
 // openInGroupSearch shows the local Search overlay scoped to the current
-// group. If no current group can be determined, falls back to the normal
-// unscoped search flow so the user never gets a silent no-op.
+// group. If no current group can be determined, it falls back to Global fleet
+// search so the user never gets a silent no-op.
 func (h *Home) openInGroupSearch() {
 	groupPath := h.currentGroupPath()
 	if groupPath == "" {
