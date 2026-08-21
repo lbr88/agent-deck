@@ -11,6 +11,7 @@ func TestShouldDebounceTmuxFlipForTool(t *testing.T) {
 		"hermes":   true,
 		"cursor":   true,
 		"pi":       false,
+		"omp":      false,
 		"shell":    false,
 		"opencode": false,
 	}

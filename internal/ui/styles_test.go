@@ -50,6 +50,7 @@ func TestToolIcon(t *testing.T) {
 		{"kiro", IconKiro},
 		{"cursor", "📝"},
 		{"pi", IconPi},
+		{"omp", IconOMP},
 		{"shell", IconShell},
 		{"unknown", IconShell},
 	}

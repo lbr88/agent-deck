@@ -14945,6 +14945,8 @@ func createSessionTool(command string) (string, string) {
 		tool = "kiro"
 	case "pi":
 		tool = "pi"
+	case "omp":
+		tool = "omp"
 	case "copilot":
 		tool = "copilot"
 	case "crush":

@@ -471,8 +471,8 @@ func TestDisplayCommandPreset(t *testing.T) {
 func TestDialogPresetCommands(t *testing.T) {
 	d := NewNewDialog()
 
-	// Should have shell (empty), claude, gemini, opencode, codex, kiro, pi, copilot, crush, cursor, hermes
-	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "copilot", "crush", "cursor", "hermes"}
+	// Should have shell and every built-in session tool.
+	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes"}
 
 	if len(d.presetCommands) != len(expectedCommands) {
 		t.Errorf("Expected %d preset commands, got %d", len(expectedCommands), len(d.presetCommands))

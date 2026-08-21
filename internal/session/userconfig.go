@@ -52,7 +52,7 @@ var ErrRefusingConfigSectionDrop = fmt.Errorf("session: refusing to save config.
 // TestSaveUserConfig_ZeroValueConfigProducesNoSections enforces this invariant.
 type UserConfig struct {
 	// DefaultTool is the pre-selected AI tool when creating new sessions
-	// Valid values: "claude", "gemini", "opencode", "codex", "kiro", "pi", or any custom tool name
+	// Valid values include built-in tool names such as "claude", "codex", "pi", and "omp", or any custom tool name
 	// If empty or invalid, defaults to "shell" (no pre-selection)
 	DefaultTool string `toml:"default_tool,omitempty"`
 
@@ -3484,7 +3484,7 @@ func GetToolDef(toolName string) *ToolDef {
 }
 
 // GetCustomToolNames returns sorted custom tool names from config.toml,
-// excluding names that shadow built-in tools (claude, gemini, opencode, codex, kiro, pi, shell, cursor, aider).
+// excluding names that shadow built-in tools.
 // Returns nil if no custom tools are configured.
 func GetCustomToolNames() []string {
 	return currentRegistry().CustomNames()
@@ -3567,6 +3567,8 @@ func GetToolIcon(toolName string) string {
 		return "☤"
 	case "pi":
 		return "π"
+	case "omp":
+		return "⌥"
 	case "shell":
 		return "🐚"
 	default:
@@ -4202,7 +4204,7 @@ func CreateExampleConfig() error {
 
 # Default AI tool for new sessions
 # When creating a new session (pressing 'n'), this tool will be pre-selected
-# Valid values: "claude", "gemini", "opencode", "codex", "kiro", "pi", or any custom tool name
+# Valid values include built-in names such as "claude", "codex", "pi", and "omp", or any custom tool name
 # Leave commented out or empty to default to shell (no pre-selection)
 # default_tool = "claude"
 
@@ -4568,8 +4570,8 @@ auto_cleanup = true
 # ============================================================================
 # Status Detection Pattern Overrides (Advanced)
 # ============================================================================
-# Built-in tools (claude, gemini, opencode, codex, kiro, pi) have default detection
-# patterns that work out of the box. You can extend them with *_extra fields
+# Built-in tools have default detection patterns that work out of the box.
+# You can extend them with *_extra fields
 # (appended to defaults) or replace them entirely with the base fields.
 # Patterns prefixed with "re:" are compiled as regex.
 #

@@ -4889,8 +4889,8 @@ func (i *Instance) StartWithMessage(message string) error {
 	// must pin the telegram plugin off for workers.
 	i.prepareWorkerScratchConfigDirForSpawn() // also runs plugin auto-install per fix C1
 
-	// Start session normally (no embedded message logic)
-	// Priority: built-in tools (claude, gemini, opencode, codex) → custom tools from config.toml → raw command
+	// Start the session normally. Built-in tools dispatch first, followed by
+	// custom tools from config.toml and finally the raw command.
 	var command string
 	// Codex takes its initial prompt as a positional argument instead of having it
 	// typed into the TUI; when that happens there is nothing left to send.

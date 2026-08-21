@@ -151,7 +151,7 @@ func GetProjectSkillsDir(tool string) (string, bool) {
 	switch {
 	case IsClaudeCompatible(tool):
 		return projectClaudeSkillsDir, true
-	case tool == "gemini" || tool == "codex" || tool == "pi":
+	case tool == "gemini" || tool == "codex" || tool == "pi" || tool == "omp":
 		return projectAgentsSkillsDir, true
 	case tool == "hermes":
 		return projectHermesSkillsDir, true

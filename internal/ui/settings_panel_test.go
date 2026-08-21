@@ -163,6 +163,7 @@ func TestSettingsPanel_LoadConfig_DefaultTool(t *testing.T) {
 		{"opencode", "opencode", "opencode"},
 		{"codex", "codex", "codex"},
 		{"pi", "pi", "pi"},
+		{"omp", "omp", "omp"},
 		{"copilot", "copilot", "copilot"},
 		{"crush", "crush", "crush"},
 		{"cursor", "cursor", "cursor"},
@@ -199,8 +200,8 @@ func TestSettingsPanel_LoadConfig_CustomTools(t *testing.T) {
 
 	panel.LoadConfig(config)
 
-	wantNames := []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "Copilot", "Crush", "Cursor", "Hermes", "Openclaw", "Zeta", "None"}
-	wantValues := []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "copilot", "crush", "cursor", "hermes", "openclaw", "zeta", ""}
+	wantNames := []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "OMP", "Copilot", "Crush", "Cursor", "Hermes", "Openclaw", "Zeta", "None"}
+	wantValues := []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "openclaw", "zeta", ""}
 
 	if !reflect.DeepEqual(panel.toolNames, wantNames) {
 		t.Fatalf("toolNames = %#v, want %#v", panel.toolNames, wantNames)
@@ -358,6 +359,7 @@ func TestSettingsPanel_GetConfig_ToolMapping(t *testing.T) {
 		{"opencode", "opencode", "opencode"},
 		{"codex", "codex", "codex"},
 		{"pi", "pi", "pi"},
+		{"omp", "omp", "omp"},
 		{"copilot", "copilot", "copilot"},
 		{"crush", "crush", "crush"},
 		{"cursor", "cursor", "cursor"},

@@ -919,6 +919,13 @@ func TestCreateSessionTool_Pi(t *testing.T) {
 	}
 }
 
+func TestCreateSessionTool_Omp(t *testing.T) {
+	tool, command := createSessionTool("omp")
+	if tool != "omp" || command != "omp" {
+		t.Fatalf("createSessionTool(\"omp\") = (%q, %q), want (\"omp\", \"omp\")", tool, command)
+	}
+}
+
 // TUI session creation must produce Tool="copilot" rather than
 // Tool="shell" with Command="copilot", matching the tmux/userconfig
 // wiring already present since v1.7.26.

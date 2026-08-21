@@ -79,7 +79,7 @@ func TestInstalled_FilterDropsMissing(t *testing.T) {
 	withStubbedProbe(t, []string{"claude", "codex"}, func() {
 		r := InitFiltered(nil, true, nil)
 
-		// All() is the UNFILTERED data view — still the full 11.
+		// All() remains the complete unfiltered canonical list.
 		if got := len(r.All()); got != len(canonicalBuiltins) {
 			t.Errorf("All() = %d, want %d (All must stay unfiltered)", got, len(canonicalBuiltins))
 		}
@@ -313,6 +313,9 @@ func TestPickerToolNames_MapsShellAlias(t *testing.T) {
 	got := PickerToolNames()
 	if len(got) == 0 || got[0] != "shell" {
 		t.Fatalf("PickerToolNames() = %v, want shell first", got)
+	}
+	if !slices.Contains(got, "omp") {
+		t.Fatalf("PickerToolNames() = %v, want omp built-in", got)
 	}
 	for _, name := range got {
 		if name == "gemini" {
