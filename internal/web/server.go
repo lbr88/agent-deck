@@ -42,6 +42,7 @@ type Config struct {
 	PushVAPIDPrivateKey string
 	PushVAPIDSubject    string
 	PushTestInterval    time.Duration
+	RemoteFleet         RemoteFleetLoader
 }
 
 // confirmLinkOpen resolves Config.ConfirmLinkOpen, defaulting to true so an
@@ -212,6 +213,7 @@ type Server struct {
 	skills          SkillsService
 	plugins         PluginManager
 	mcpMgr          MCPManager
+	remoteFleet     RemoteFleetLoader
 	mutationLimiter *rate.Limiter
 
 	// hookStatusLoader returns the latest hook payload for every instance
@@ -240,12 +242,16 @@ func NewServer(cfg Config) *Server {
 	s := &Server{
 		cfg:              cfg,
 		menuData:         menuData,
+		remoteFleet:      cfg.RemoteFleet,
 		menuSubscribers:  make(map[chan struct{}]struct{}),
 		mutationLimiter:  mutationLimiter,
 		hookStatusLoader: defaultLoadHookStatuses,
 	}
 	if mmd, ok := menuData.(*MemoryMenuData); ok {
 		mmd.SetOnChange(s.notifyMenuChangedWithoutInvalidation)
+	}
+	if s.remoteFleet == nil {
+		s.remoteFleet = session.NewRemoteFleetScanner()
 	}
 	s.baseCtx, s.cancelBase = context.WithCancel(context.Background())
 	webLog := logging.ForComponent(logging.CompWeb)
@@ -299,6 +305,7 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("POST /api/hub/trust/{id}/deny", s.handleHubTrustDecisionAdmin)
 	mux.HandleFunc("/api/session/", s.handleSessionByID)
 	mux.HandleFunc("/api/sessions", s.handleSessionsCollection)
+	mux.HandleFunc("/api/remotes", s.handleRemotes)
 	// /api/sessions/undelete is a collection-level action (Chrome-style
 	// ctrl+z undo). Register before the subtree pattern so Go 1.22+
 	// ServeMux precedence routes it cleanly instead of treating
@@ -382,6 +389,9 @@ func (s *Server) Start() error {
 	if err := s.checkBindSecurity(); err != nil {
 		return err
 	}
+	if s.remoteFleet != nil {
+		s.remoteFleet.Start(s.baseCtx)
+	}
 
 	webLog := logging.ForComponent(logging.CompWeb)
 	if watcher, err := session.NewStatusFileWatcher(func() {
@@ -405,6 +415,9 @@ func (s *Server) Start() error {
 		s.hookWatcher = nil
 	}
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if s.cancelBase != nil {
+			s.cancelBase()
+		}
 		return err
 	}
 	return nil

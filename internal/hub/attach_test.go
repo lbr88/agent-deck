@@ -63,7 +63,7 @@ func TestHubTmuxAttachCommandForcesSaneTERM(t *testing.T) {
 	t.Setenv("TERM", "dumb")
 
 	cmd := hubTmuxAttachCommand(context.Background(), "agentdeck", "agentdeck_session")
-	wantArgs := []string{"tmux", "-L", "agentdeck", "-u", "attach-session", "-t", "agentdeck_session"}
+	wantArgs := []string{"tmux", "-u", "-L", "agentdeck", "attach-session", "-t", "agentdeck_session"}
 	if strings.Join(cmd.Args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("attach argv = %v, want %v", cmd.Args, wantArgs)
 	}

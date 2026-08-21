@@ -345,6 +345,7 @@ func TestRestartPolicyFor(t *testing.T) {
 	restartFields := []string{
 		FieldCommand, FieldWrapper, FieldTool, FieldChannels,
 		FieldExtraArgs, FieldPath, FieldSkipPermissions, FieldAutoMode,
+		FieldToolSessionID, // resume argv baked into next spawn
 	}
 	for _, f := range liveFields {
 		if got := RestartPolicyFor(f); got != FieldLive {

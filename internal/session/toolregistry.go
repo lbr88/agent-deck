@@ -151,13 +151,17 @@ func (r *Registry) runInstalledProbe() {
 			r.installed[name] = true // shell is always shown
 			continue
 		}
-		// Most built-ins probe by their tool name. Kiro's canonical Agent Deck
-		// tool id is "kiro", while the installed executable is "kiro-cli".
-		probeName := name
-		if name == "kiro" {
-			probeName = "kiro-cli"
+		ok := false
+		switch name {
+		case "kiro":
+			ok = probeInstalled("kiro-cli")
+		case "cursor":
+			ok = cursorCommandInstalled()
+		case "deepseek":
+			ok = DeepSeekInstalled(GetToolCommand("deepseek"))
+		default:
+			ok = probeInstalled(name)
 		}
-		ok := probeInstalled(probeName)
 		r.installed[name] = ok
 		if ok {
 			nonShellInstalled++
@@ -440,7 +444,7 @@ func ConfiguredHiddenToolNames() []string {
 }
 
 // pickerPresetOrder matches buildPresetCommands in internal/ui/newdialog.go.
-var pickerPresetOrder = []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes"}
+var pickerPresetOrder = []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "deepseek"}
 
 // PickerToolNames returns tool names for the new-session picker after applying
 // hidden_tools and show_only_installed_tools. The empty command "" is mapped

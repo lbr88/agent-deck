@@ -182,8 +182,8 @@ func TestBuildWebServer_WiresMutator(t *testing.T) {
 	if !server.HasMutator() {
 		t.Fatal("buildWebServer returned a Server with no mutator wired — main.go's POST/PATCH/DELETE handlers will 503 NOT_IMPLEMENTED at runtime")
 	}
-	if !server.HasMCPManager() {
-		t.Fatal("buildWebServer returned a Server with no MCP manager wired — MCP endpoints will 503 NOT_IMPLEMENTED at runtime")
+	if server.HasMCPManager() {
+		t.Fatal("tokenless server wired MCP manager; MCP config writes must remain unavailable without authentication")
 	}
 	if !server.HasSkillsService() {
 		t.Fatal("buildWebServer returned a Server with no skills service wired — skill endpoints would mutate local state for hub sessions")
@@ -193,10 +193,26 @@ func TestBuildWebServer_WiresMutator(t *testing.T) {
 	}
 }
 
-// TestBuildWebServer_NilMutator_StaysUnwired verifies the mutator test-only
-// escape hatch: passing nil leaves HasMutator() false. MCP endpoints still get
-// the default manager because they are safe production endpoints independent of
-// the session mutator seam.
+// TestBuildWebServer_WiresMCPManagerWhenAuthenticated is a regression guard
+// for authenticated headless web MCP access. The server registers /api/mcps
+// unconditionally, but the production manager must only be available when a
+// bearer token protects the endpoint.
+func TestBuildWebServer_WiresMCPManagerWhenAuthenticated(t *testing.T) {
+	withTempHomeAndConfig(t, "")
+
+	server, err := buildWebServer("test-profile", []string{"--listen", "127.0.0.1:0", "--token", "secret"}, nil, noopMutator{})
+	if err != nil {
+		t.Fatalf("buildWebServer: %v", err)
+	}
+	if !server.HasMCPManager() {
+		t.Fatal("buildWebServer returned a Server with no MCP manager wired; /api/mcps will return 503")
+	}
+}
+
+// TestBuildWebServer_NilMutator_StaysUnwired verifies the test-only escape
+// hatch: passing nil leaves HasMutator() false. Documents that production
+// callers must pass a real mutator; the nil branch exists for tests that
+// don't exercise mutations.
 func TestBuildWebServer_NilMutator_StaysUnwired(t *testing.T) {
 	withTempHomeAndConfig(t, "")
 
@@ -207,8 +223,8 @@ func TestBuildWebServer_NilMutator_StaysUnwired(t *testing.T) {
 	if server.HasMutator() {
 		t.Fatal("buildWebServer wired a mutator when nil was passed — nil should be a no-op for the test escape hatch")
 	}
-	if !server.HasMCPManager() {
-		t.Fatal("buildWebServer should wire the default MCP manager even when the session mutator is nil")
+	if server.HasMCPManager() {
+		t.Fatal("tokenless server wired the default MCP manager")
 	}
 	if !server.HasPluginManager() {
 		t.Fatal("buildWebServer should wire the default plugin manager even when the session mutator is nil")

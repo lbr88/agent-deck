@@ -1714,20 +1714,27 @@ func (m *WebMutator) ListCatalog() []web.MCPCatalogEntry {
 	return web.NewDefaultMCPManager().ListCatalog()
 }
 
-func (m *WebMutator) ListAttached(sessionID, projectPath string) (map[string][]string, error) {
-	state, err := m.ListSessionMCPs(sessionID, projectPath)
+func (m *WebMutator) ListAttached(target web.MCPTarget) (map[string][]string, error) {
+	state, err := m.listSessionMCPs(target)
 	if err != nil {
 		return nil, err
 	}
 	return map[string][]string{
-		"local":  append([]string(nil), state.Local...),
-		"global": append([]string(nil), state.Global...),
-		"user":   append([]string(nil), state.User...),
+		"local":   append([]string(nil), state.Local...),
+		"project": append([]string(nil), state.Project...),
+		"global":  append([]string(nil), state.Global...),
+		"user":    append([]string(nil), state.User...),
 	}, nil
 }
 
+// ListSessionMCPs preserves the hub-facing convenience API used by the local
+// control surfaces while MCPManager itself passes the complete target.
 func (m *WebMutator) ListSessionMCPs(sessionID, projectPath string) (web.SessionMCPsResponse, error) {
-	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(sessionID); ok {
+	return m.listSessionMCPs(web.MCPTarget{SessionID: sessionID, ProjectPath: projectPath})
+}
+
+func (m *WebMutator) listSessionMCPs(target web.MCPTarget) (web.SessionMCPsResponse, error) {
+	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(target.SessionID); ok {
 		raw, err := m.hubCommand(nodeID, "mcp_list", hub.MCPListRequest{SessionID: hubSessionID})
 		if err != nil {
 			return web.SessionMCPsResponse{}, err
@@ -1737,31 +1744,30 @@ func (m *WebMutator) ListSessionMCPs(sessionID, projectPath string) (web.Session
 			return web.SessionMCPsResponse{}, fmt.Errorf("decode hub mcp list response: %w", err)
 		}
 		return web.SessionMCPsResponse{
-			SessionID: sessionID,
+			SessionID: target.SessionID,
 			Local:     appendSortedStringCopy(result.Local),
 			Global:    appendSortedStringCopy(result.Global),
 			User:      appendSortedStringCopy(result.User),
+			Scopes:    []string{"local", "global", "user"},
 			Catalog:   webMCPCatalogFromHub(result.Catalog),
 		}, nil
 	}
-	if provider, ok := web.NewDefaultMCPManager().(web.SessionMCPStateProvider); ok {
-		return provider.ListSessionMCPs(sessionID, projectPath)
-	}
-	attached, err := web.NewDefaultMCPManager().ListAttached(sessionID, projectPath)
+	attached, err := web.NewDefaultMCPManager().ListAttached(target)
 	if err != nil {
 		return web.SessionMCPsResponse{}, err
 	}
 	return web.SessionMCPsResponse{
-		SessionID: sessionID,
+		SessionID: target.SessionID,
 		Local:     appendSortedStringCopy(attached["local"]),
+		Project:   appendSortedStringCopy(attached["project"]),
 		Global:    appendSortedStringCopy(attached["global"]),
 		User:      appendSortedStringCopy(attached["user"]),
 		Catalog:   web.NewDefaultMCPManager().ListCatalog(),
 	}, nil
 }
 
-func (m *WebMutator) Attach(sessionID, projectPath, name, scope string) error {
-	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(sessionID); ok {
+func (m *WebMutator) Attach(target web.MCPTarget, name, scope string) error {
+	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(target.SessionID); ok {
 		_, err := m.hubCommand(nodeID, "mcp_attach", hub.MCPMutateRequest{
 			SessionID: hubSessionID,
 			Name:      strings.TrimSpace(name),
@@ -1769,11 +1775,11 @@ func (m *WebMutator) Attach(sessionID, projectPath, name, scope string) error {
 		})
 		return err
 	}
-	return web.NewDefaultMCPManager().Attach(sessionID, projectPath, name, scope)
+	return web.NewDefaultMCPManager().Attach(target, name, scope)
 }
 
-func (m *WebMutator) Detach(sessionID, projectPath, name, scope string) error {
-	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(sessionID); ok {
+func (m *WebMutator) Detach(target web.MCPTarget, name, scope string) error {
+	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(target.SessionID); ok {
 		_, err := m.hubCommand(nodeID, "mcp_detach", hub.MCPMutateRequest{
 			SessionID: hubSessionID,
 			Name:      strings.TrimSpace(name),
@@ -1781,11 +1787,11 @@ func (m *WebMutator) Detach(sessionID, projectPath, name, scope string) error {
 		})
 		return err
 	}
-	return web.NewDefaultMCPManager().Detach(sessionID, projectPath, name, scope)
+	return web.NewDefaultMCPManager().Detach(target, name, scope)
 }
 
-func (m *WebMutator) Move(sessionID, projectPath, name, fromScope, toScope string) error {
-	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(sessionID); ok {
+func (m *WebMutator) Move(target web.MCPTarget, name, fromScope, toScope string) error {
+	if nodeID, hubSessionID, ok := web.ParseHubSessionWebID(target.SessionID); ok {
 		_, err := m.hubCommand(nodeID, "mcp_move", hub.MCPMoveRequest{
 			SessionID: hubSessionID,
 			Name:      strings.TrimSpace(name),
@@ -1794,7 +1800,7 @@ func (m *WebMutator) Move(sessionID, projectPath, name, fromScope, toScope strin
 		})
 		return err
 	}
-	return web.NewDefaultMCPManager().Move(sessionID, projectPath, name, fromScope, toScope)
+	return web.NewDefaultMCPManager().Move(target, name, fromScope, toScope)
 }
 
 func webMCPCatalogFromHub(entries []hub.MCPCatalogEntry) []web.MCPCatalogEntry {

@@ -80,7 +80,10 @@ func GetCodexHomeDir() string {
 // GetCodexHomeDirForCommand also honors an inline CODEX_HOME assignment in a
 // Codex command override.
 func GetCodexHomeDirForCommand(command string) string {
-	return getCodexHomeDirForCommand(command)
+	if codexHome := codexHomeFromCommand(command); codexHome != "" {
+		return codexHome
+	}
+	return getCodexHomeDir()
 }
 
 // ListCodexIndex reads CODEX_HOME/session_index.jsonl and returns the latest

@@ -13,7 +13,9 @@ name: PR Intake Gate (observe-only)
 
 on:
   pull_request_target: # zizmor: ignore[dangerous-triggers] Metadata-only job; it never checks out or executes pull-request code.
-    types: [opened, edited, ready_for_review]
+    # synchronize/reopened matter because the ruleset requires `intake` on the
+    # current tip; without them, a push can leave a PR blocked indefinitely.
+    types: [opened, edited, ready_for_review, synchronize, reopened]
 
 permissions:
   contents: read

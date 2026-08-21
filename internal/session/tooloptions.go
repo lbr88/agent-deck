@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // ToolOptions is the interface for tool-specific launch options
@@ -388,6 +389,102 @@ func UnmarshalKiroOptions(data json.RawMessage) (*KiroOptions, error) {
 		return nil, err
 	}
 
+	return &opts, nil
+}
+
+// OmpOptions holds Oh My Pi launch options.
+type OmpOptions struct {
+	Model         string   `json:"model,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	SmolModel     string   `json:"smol_model,omitempty"`
+	SlowModel     string   `json:"slow_model,omitempty"`
+	PlanModel     string   `json:"plan_model,omitempty"`
+	ApprovalMode  string   `json:"approval_mode,omitempty"`
+	Profile       string   `json:"profile,omitempty"`
+	MaxTime       string   `json:"max_time,omitempty"`
+	AutoApprove   bool     `json:"auto_approve,omitempty"`
+	PrintThoughts bool     `json:"print_thoughts,omitempty"`
+	NoSession     bool     `json:"no_session,omitempty"`
+	FromClaude    bool     `json:"from_claude,omitempty"`
+	FromCodex     bool     `json:"from_codex,omitempty"`
+}
+
+func (o *OmpOptions) ToolName() string { return "omp" }
+
+func (o *OmpOptions) ToArgs() []string {
+	if o == nil {
+		return nil
+	}
+	var args []string
+	appendValue := func(flag, value string) {
+		if value != "" {
+			args = append(args, flag, value)
+		}
+	}
+	appendValue("--model", o.Model)
+	if len(o.Models) > 0 {
+		appendValue("--models", strings.Join(o.Models, ","))
+	}
+	appendValue("--smol", o.SmolModel)
+	appendValue("--slow", o.SlowModel)
+	appendValue("--plan", o.PlanModel)
+	switch o.ApprovalMode {
+	case "always-ask", "write", "yolo":
+		appendValue("--approval-mode", o.ApprovalMode)
+	}
+	appendValue("--profile", o.Profile)
+	appendValue("--max-time", o.MaxTime)
+	if o.AutoApprove {
+		args = append(args, "--auto-approve")
+	}
+	if o.PrintThoughts {
+		args = append(args, "--print-thoughts")
+	}
+	if o.NoSession {
+		args = append(args, "--no-session")
+	}
+	switch {
+	case o.FromClaude:
+		args = append(args, "--from-claude")
+	case o.FromCodex:
+		args = append(args, "--from-codex")
+	}
+	return args
+}
+
+func NewOmpOptions(config *UserConfig) *OmpOptions {
+	opts := &OmpOptions{}
+	if config == nil {
+		return opts
+	}
+	opts.Model = config.Omp.DefaultModel
+	opts.Models = append([]string(nil), config.Omp.Models...)
+	opts.SmolModel = config.Omp.SmolModel
+	opts.SlowModel = config.Omp.SlowModel
+	opts.PlanModel = config.Omp.PlanModel
+	opts.ApprovalMode = config.Omp.ApprovalMode
+	opts.Profile = config.Omp.DefaultProfile
+	opts.MaxTime = config.Omp.MaxTime
+	opts.AutoApprove = config.Omp.AutoApprove
+	opts.PrintThoughts = config.Omp.PrintThoughts
+	return opts
+}
+
+func UnmarshalOmpOptions(data json.RawMessage) (*OmpOptions, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var wrapper ToolOptionsWrapper
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return nil, err
+	}
+	if wrapper.Tool != "omp" {
+		return nil, nil
+	}
+	var opts OmpOptions
+	if err := json.Unmarshal(wrapper.Options, &opts); err != nil {
+		return nil, err
+	}
 	return &opts, nil
 }
 

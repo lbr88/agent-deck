@@ -251,10 +251,10 @@ type dialogSnapshot struct {
 
 // displayCommandPreset returns the visible label for a built-in preset slot.
 // The stored preset for Cursor remains "cursor" (tool id); the pill shows the
-// actual CLI users run ("cursor agent").
+// host-resolved CLI entrypoint (`agent` or `cursor agent`).
 func displayCommandPreset(cmd string) string {
 	if cmd == "cursor" {
-		return "cursor agent"
+		return session.DefaultCursorCommand()
 	}
 	return cmd
 }
@@ -267,7 +267,7 @@ func displayCommandPreset(cmd string) string {
 // flag off FilterVisibleToolNames is a no-op, so the list is byte-identical to
 // before.
 func buildPresetCommands() []string {
-	presets := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes"}
+	presets := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "deepseek"}
 	if customTools := session.GetCustomToolNames(); len(customTools) > 0 {
 		presets = append(presets, customTools...)
 	}

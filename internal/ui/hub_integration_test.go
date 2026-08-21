@@ -2210,6 +2210,7 @@ func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
 	h, client := newHubActionHome(t)
 	mutator := NewWebMutator(h)
 	hubSessionID := web.HubSessionWebID("node_server", "r1")
+	target := web.MCPTarget{SessionID: hubSessionID, ProjectPath: "/srv/app"}
 
 	client.commandResult = mustJSON(t, hub.MCPListResponse{
 		SessionID: "r1",
@@ -2218,7 +2219,7 @@ func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
 		User:      []string{"github"},
 		Catalog:   []hub.MCPCatalogEntry{{Name: "remote-search", Description: "remote catalog", Transport: "stdio", Command: "npx"}},
 	})
-	attached, err := mutator.ListAttached(hubSessionID, "/srv/app")
+	attached, err := mutator.ListAttached(target)
 	if err != nil {
 		t.Fatalf("ListAttached hub: %v", err)
 	}
@@ -2243,7 +2244,7 @@ func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
 	client.commands = nil
 
 	client.commandResult = mustJSON(t, hub.MCPMutateResponse{SessionID: "r1", Name: "exa", Scope: "local"})
-	if err := mutator.Attach(hubSessionID, "/srv/app", "exa", "local"); err != nil {
+	if err := mutator.Attach(target, "exa", "local"); err != nil {
 		t.Fatalf("Attach hub: %v", err)
 	}
 	attachReq, ok := client.commands[0].payload.(hub.MCPMutateRequest)
@@ -2255,7 +2256,7 @@ func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
 	}
 
 	client.commandResult = mustJSON(t, hub.MCPMutateResponse{SessionID: "r1", Name: "exa", Scope: "local"})
-	if err := mutator.Detach(hubSessionID, "/srv/app", "exa", "local"); err != nil {
+	if err := mutator.Detach(target, "exa", "local"); err != nil {
 		t.Fatalf("Detach hub: %v", err)
 	}
 	detachReq, ok := client.commands[1].payload.(hub.MCPMutateRequest)
@@ -2267,7 +2268,7 @@ func TestWebMutatorRoutesHubMCPActionsThroughHubClient(t *testing.T) {
 	}
 
 	client.commandResult = mustJSON(t, hub.MCPMoveResponse{SessionID: "r1", Name: "exa", FromScope: "local", ToScope: "global"})
-	if err := mutator.Move(hubSessionID, "/srv/app", "exa", "local", "global"); err != nil {
+	if err := mutator.Move(target, "exa", "local", "global"); err != nil {
 		t.Fatalf("Move hub: %v", err)
 	}
 	moveReq, ok := client.commands[2].payload.(hub.MCPMoveRequest)

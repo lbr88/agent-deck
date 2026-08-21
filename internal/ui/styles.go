@@ -526,6 +526,7 @@ func initStyles() {
 		"kiro":     lipgloss.NewStyle().Foreground(ColorYellow),
 		"copilot":  lipgloss.NewStyle().Foreground(ColorAccent),
 		"hermes":   lipgloss.NewStyle().Foreground(ColorYellow),
+		"deepseek": lipgloss.NewStyle().Foreground(ColorCyan),
 		"pi":       lipgloss.NewStyle().Foreground(ColorAccent),
 		"omp":      lipgloss.NewStyle().Foreground(ColorAccent),
 		"aider":    lipgloss.NewStyle().Foreground(ColorRed),
@@ -616,6 +617,8 @@ func ToolIcon(tool string) string {
 		return "📝"
 	case "hermes":
 		return "☤"
+	case "deepseek":
+		return "🐋"
 	case "pi":
 		return IconPi
 	case "omp":
@@ -645,6 +648,8 @@ func ToolColor(tool string) lipgloss.Color {
 		return ColorAccent // Blue for Cursor
 	case "hermes":
 		return ColorYellow // Gold for Hermes Agent
+	case "deepseek":
+		return ColorCyan // DeepSeek Harness
 	case "pi":
 		return ColorAccent
 	case "omp":

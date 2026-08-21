@@ -5,12 +5,10 @@ import (
 	"testing"
 )
 
-// canonicalBuiltins is the canonical built-in list, in the precedence order that
-// Registry.Match() (and the legacy detectTool() switch) walk. omp sits directly
-// after pi because both short names use token matching.
+// canonicalBuiltins is the canonical built-in set, in Registry.Match precedence order.
 var canonicalBuiltins = []string{
-	"claude", "opencode", "gemini", "codex", "kiro",
-	"pi", "omp", "copilot", "crush", "cursor", "hermes", "aider", "shell",
+	"claude", "opencode", "gemini", "codex", "kiro", "pi", "omp",
+	"copilot", "crush", "cursor", "hermes", "deepseek", "aider", "shell",
 }
 
 func TestRegistry_AllReturnsCanonicalBuiltins(t *testing.T) {
@@ -63,6 +61,15 @@ func TestRegistry_MatchAllBranches(t *testing.T) {
 		{"crush bare", "crush", "crush"},
 		// cursor
 		{"cursor agent subcommand", "cursor agent", "cursor"},
+		{"standalone agent binary", "agent", "cursor"},
+		{"standalone agent with flags", "agent --continue", "cursor"},
+		// The "agent" arm is a whitespace-token match for exactly this reason:
+		// as a substring it would swallow agent-deck's own commands and label
+		// every one of them a Cursor session. builtinTools says so in a comment;
+		// these cases are what stop a later change from folding "agent" back
+		// into detectSubstrings with every test still green.
+		{"cursor no false match in agent-deck", "agent-deck", "shell"},
+		{"cursor no false match in agent-deck subcommand", "agent-deck session send x", "shell"},
 		// hermes
 		{"hermes bare", "hermes", "hermes"},
 		// aider has NO detect arm — commands containing "aider" map to shell

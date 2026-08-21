@@ -457,8 +457,15 @@ func TestRenderLaunchModelInfoLines_ShowsModelAndVersion(t *testing.T) {
 }
 
 func TestDisplayCommandPreset(t *testing.T) {
-	if got := displayCommandPreset("cursor"); got != "cursor agent" {
-		t.Errorf("cursor → %q, want cursor agent", got)
+	// Both DefaultCursorCommand PATH outcomes are covered in
+	// session.TestDefaultCursorCommand_*; here we pin the UI wrapper and the
+	// two legal labels explicitly.
+	want := session.DefaultCursorCommand()
+	if want != "agent" && want != "cursor agent" {
+		t.Fatalf("DefaultCursorCommand() = %q, want agent or cursor agent", want)
+	}
+	if got := displayCommandPreset("cursor"); got != want {
+		t.Errorf("cursor → %q, want %q", got, want)
 	}
 	if got := displayCommandPreset("claude"); got != "claude" {
 		t.Errorf("claude passthrough: got %q", got)
@@ -471,8 +478,8 @@ func TestDisplayCommandPreset(t *testing.T) {
 func TestDialogPresetCommands(t *testing.T) {
 	d := NewNewDialog()
 
-	// Should have shell and every built-in session tool.
-	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes"}
+	// Every built-in session tool appears in picker order.
+	expectedCommands := []string{"", "claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "deepseek"}
 
 	if len(d.presetCommands) != len(expectedCommands) {
 		t.Errorf("Expected %d preset commands, got %d", len(expectedCommands), len(d.presetCommands))

@@ -57,7 +57,7 @@ import { ToastContainer, addToast } from './Toast.js'
 import { ToastHistoryDrawer } from './ToastHistoryDrawer.js'
 import { SettingsPanel } from './SettingsPanel.js'
 import { KeyboardShortcuts } from './KeyboardShortcuts.js'
-import { apiFetch } from './api.js'
+import { apiFetch, authHeaders } from './api.js'
 import { refreshMenuSnapshot } from './menuRefresh.js'
 import { shortcutsOverlaySignal, jumpModeSignal, globalSearchModeSignal } from './state.js'
 
@@ -328,7 +328,7 @@ export function AppShell() {
   // Also hydrates the show_only_installed_tools filter (issue #1259) so the
   // new-session dialog can hide tools whose command is not on PATH.
   useEffect(() => {
-    fetch('/api/settings')
+    fetch('/api/settings', { headers: authHeaders() })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return
@@ -370,7 +370,7 @@ export function AppShell() {
   // dropdown options and uses the `current` field to seed profileSignal
   // (UI-side selection) on first load.
   useEffect(() => {
-    fetch('/api/profiles')
+    fetch('/api/profiles', { headers: authHeaders() })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data && Array.isArray(data.profiles)) {
@@ -387,7 +387,7 @@ export function AppShell() {
   useEffect(() => {
     let cancelled = false
     const fetchStats = () => {
-      fetch('/api/system/stats')
+      fetch('/api/system/stats', { headers: authHeaders() })
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (!cancelled && data) systemStatsSignal.value = data })
         .catch(() => {})

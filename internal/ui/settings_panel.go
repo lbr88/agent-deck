@@ -122,8 +122,8 @@ type SettingsPanel struct {
 // builtinToolNames and builtinToolValues are the built-in tools. Custom tools
 // from config are appended dynamically in LoadConfig.
 var (
-	builtinToolNames  = []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "OMP", "Copilot", "Crush", "Cursor", "Hermes"}
-	builtinToolValues = []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes"}
+	builtinToolNames  = []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "OMP", "Copilot", "Crush", "Cursor", "Hermes", "DeepSeek"}
+	builtinToolValues = []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "deepseek"}
 )
 
 // Search tier names for radio selection
@@ -356,6 +356,7 @@ func (s *SettingsPanel) buildToolLists(config *session.UserConfig) {
 			"claude": true, "gemini": true, "opencode": true,
 			"codex": true, "kiro": true, "pi": true, "omp": true, "crush": true, "copilot": true,
 			"shell": true, "cursor": true, "aider": true, "hermes": true,
+			"deepseek": true,
 		}
 		var custom []string
 		for name := range config.Tools {

@@ -146,6 +146,9 @@ type UserConfig struct {
 	// Kiro defines Kiro CLI integration settings
 	Kiro KiroSettings `toml:"kiro,omitempty"`
 
+	// Omp defines Oh My Pi integration settings.
+	Omp OmpSettings `toml:"omp,omitempty"`
+
 	// Cursor defines Cursor Agent CLI integration settings (Issue #1672)
 	Cursor CursorSettings `toml:"cursor,omitempty"`
 
@@ -157,6 +160,9 @@ type UserConfig struct {
 
 	// Hermes defines Hermes Agent CLI integration settings
 	Hermes HermesSettings `toml:"hermes,omitempty"`
+
+	// DeepSeek defines DeepSeek Harness (`dsh`) integration settings
+	DeepSeek DeepSeekSettings `toml:"deepseek,omitempty"`
 
 	// Worktree defines git worktree preferences
 	Worktree WorktreeSettings `toml:"worktree,omitempty"`
@@ -773,6 +779,12 @@ type RemoteConfig struct {
 
 	// Profile is the remote profile to use (default: "default")
 	Profile string `toml:"profile,omitempty"`
+
+	// CommandTimeoutSeconds bounds each remote agent-deck command (default 30).
+	// Raise it for remotes whose session fleets make `list --json` slow; the
+	// old hardcoded 10s silently killed fetches from hosts with many sessions,
+	// making the whole remote look unavailable (#1859 family).
+	CommandTimeoutSeconds int `toml:"command_timeout_seconds,omitempty"`
 }
 
 // GetAgentDeckPath returns the agent-deck binary path, defaulting to "agent-deck".
@@ -781,6 +793,15 @@ func (rc RemoteConfig) GetAgentDeckPath() string {
 		return rc.AgentDeckPath
 	}
 	return "agent-deck"
+}
+
+// GetCommandTimeout returns the per-command timeout for this remote,
+// defaulting to 30s and rejecting non-positive values.
+func (rc RemoteConfig) GetCommandTimeout() time.Duration {
+	if rc.CommandTimeoutSeconds > 0 {
+		return time.Duration(rc.CommandTimeoutSeconds) * time.Second
+	}
+	return 30 * time.Second
 }
 
 // GetProfile returns the remote profile, defaulting to "default".
@@ -797,6 +818,8 @@ type ProfileSettings struct {
 	Claude ProfileClaudeSettings `toml:"claude,omitempty"`
 	// Codex defines Codex CLI overrides for a specific profile.
 	Codex ProfileCodexSettings `toml:"codex,omitempty"`
+	// DeepSeek defines DeepSeek Harness overrides for a specific profile.
+	DeepSeek ProfileDeepSeekSettings `toml:"deepseek,omitempty"`
 	// Costs defines profile-specific cost-tracking overrides.
 	// Nil pointer means "no [profiles.<name>.costs] block in TOML"; the
 	// resolver falls through to global [costs] settings.
@@ -815,6 +838,17 @@ type ProfileCodexSettings struct {
 	ConfigDir string `toml:"config_dir,omitempty"`
 }
 
+// ProfileDeepSeekSettings defines profile-specific DeepSeek Harness overrides.
+//
+// A profile here is an agent-deck account slot, not a dsh profile: this block
+// selects which $DSH_HOME (and therefore which credentials, sessions, and
+// plugin set) a session bound to that account launches against. Which dsh
+// profile to boot is [deepseek].profile.
+type ProfileDeepSeekSettings struct {
+	// ConfigDir overrides [deepseek].config_dir (DSH_HOME) for this profile only.
+	ConfigDir string `toml:"config_dir,omitempty"`
+}
+
 // GroupSettings defines per-group configuration overrides.
 type GroupSettings struct {
 	// Create ensures the group exists on startup.
@@ -825,6 +859,8 @@ type GroupSettings struct {
 	Claude GroupClaudeSettings `toml:"claude,omitempty"`
 	// Hermes defines Hermes overrides for a specific group.
 	Hermes GroupHermesSettings `toml:"hermes,omitempty"`
+	// DeepSeek defines DeepSeek Harness overrides for a specific group.
+	DeepSeek GroupDeepSeekSettings `toml:"deepseek,omitempty"`
 }
 
 // GroupDefaultsSettings carries [group_defaults] — defaults stamped onto new
@@ -894,6 +930,21 @@ type GroupHermesSettings struct {
 	APITokenEnv  string `toml:"api_token_env,omitempty"`
 }
 
+// GroupDeepSeekSettings defines group-specific DeepSeek Harness overrides.
+// Mirrors GroupHermesSettings; keys use omitempty so SaveUserConfig does not
+// emit zero-value fields into every group stanza (issue #1360).
+type GroupDeepSeekSettings struct {
+	// Command overrides [deepseek].command for sessions in this group.
+	Command string `toml:"command,omitempty"`
+	// EnvFile overrides [deepseek].env_file for sessions in this group.
+	EnvFile string `toml:"env_file,omitempty"`
+	// ConfigDir overrides [deepseek].config_dir (DSH_HOME) for this group.
+	ConfigDir string `toml:"config_dir,omitempty"`
+	// Profile overrides [deepseek].profile — the $DSH_HOME/profiles/<name>
+	// this group's sessions boot.
+	Profile string `toml:"profile,omitempty"`
+}
+
 // ConductorOverrides defines per-conductor configuration overrides.
 // Mirrors GroupSettings — conductors are first-class entities keyed by
 // conductor name (derived from Instance.Title via strings.TrimPrefix at the
@@ -908,6 +959,21 @@ type ConductorOverrides struct {
 	Claude ConductorClaudeSettings `toml:"claude,omitempty"`
 	// Hermes defines Hermes overrides for a specific conductor.
 	Hermes ConductorHermesSettings `toml:"hermes,omitempty"`
+	// DeepSeek defines DeepSeek Harness overrides for a specific conductor.
+	DeepSeek ConductorDeepSeekSettings `toml:"deepseek,omitempty"`
+}
+
+// ConductorDeepSeekSettings defines conductor-specific DeepSeek Harness
+// overrides. Semantics mirror GroupDeepSeekSettings; conductor beats group.
+type ConductorDeepSeekSettings struct {
+	// Command overrides [deepseek].command for this conductor only.
+	Command string `toml:"command,omitempty"`
+	// EnvFile is sourced before dsh exec for this conductor.
+	EnvFile string `toml:"env_file,omitempty"`
+	// ConfigDir overrides [deepseek].config_dir (DSH_HOME) for this conductor.
+	ConfigDir string `toml:"config_dir,omitempty"`
+	// Profile overrides [deepseek].profile for this conductor.
+	Profile string `toml:"profile,omitempty"`
 }
 
 // ConductorClaudeSettings defines conductor-specific Claude overrides.
@@ -1199,6 +1265,24 @@ type NotificationsConfig struct {
 	// Default: true (nil = true). Set to false to suppress dispatch globally.
 	// Per-session override: Instance.NoTransitionNotify
 	TransitionEvents *bool `toml:"transition_events,omitempty"`
+
+	// Desktop raises an OS notification (cmux's notification panel when
+	// available, otherwise a macOS banner) when a session starts waiting for
+	// input or errors out.
+	//
+	// Opt-in (default: false) because it is the only agent-deck signal that
+	// interrupts you outside the TUI, and the right cadence depends on how many
+	// sessions you run. TransitionEvents covers the agent-to-agent case and is
+	// on by default; this covers the operator, including TOP-LEVEL sessions with
+	// no parent, which the transition path cannot reach at all.
+	Desktop bool `toml:"desktop,omitempty"`
+}
+
+// GetDesktopEnabled reports whether desktop notifications are enabled.
+// Defaults to false: this is the one notification path that interrupts the
+// operator outside the TUI, so it must be asked for.
+func (n NotificationsConfig) GetDesktopEnabled() bool {
+	return n.Desktop
 }
 
 // GetTransitionEventsEnabled returns whether transition event dispatch is enabled.
@@ -1926,6 +2010,20 @@ type KiroSettings struct {
 	TrustTools []string `toml:"trust_tools,omitempty"`
 }
 
+// OmpSettings defines Oh My Pi defaults for new sessions.
+type OmpSettings struct {
+	DefaultModel   string   `toml:"default_model,omitempty"`
+	Models         []string `toml:"models,omitempty"`
+	DefaultProfile string   `toml:"default_profile,omitempty"`
+	ApprovalMode   string   `toml:"approval_mode,omitempty"`
+	SmolModel      string   `toml:"smol_model,omitempty"`
+	SlowModel      string   `toml:"slow_model,omitempty"`
+	PlanModel      string   `toml:"plan_model,omitempty"`
+	MaxTime        string   `toml:"max_time,omitempty"`
+	AutoApprove    bool     `toml:"auto_approve,omitempty"`
+	PrintThoughts  bool     `toml:"print_thoughts,omitempty"`
+}
+
 // GetProfileCodexConfigDir returns the profile-specific Codex config directory, if configured.
 func (c *UserConfig) GetProfileCodexConfigDir(profile string) string {
 	if c == nil || profile == "" || c.Profiles == nil {
@@ -1938,8 +2036,199 @@ func (c *UserConfig) GetProfileCodexConfigDir(profile string) string {
 	return ExpandPath(profileCfg.Codex.ConfigDir)
 }
 
+// GetProfileDeepSeekConfigDir returns the profile-specific DSH_HOME, if configured.
+func (c *UserConfig) GetProfileDeepSeekConfigDir(profile string) string {
+	if c == nil || profile == "" || c.Profiles == nil {
+		return ""
+	}
+	profileCfg, ok := c.Profiles[profile]
+	if !ok || profileCfg.DeepSeek.ConfigDir == "" {
+		return ""
+	}
+	return ExpandPath(profileCfg.DeepSeek.ConfigDir)
+}
+
+// GetGroupDeepSeekConfigDir returns the group-specific DSH_HOME, walking
+// ancestor groups when the exact path has no override. Mirrors
+// GetGroupClaudeConfigDir's inheritance semantics.
+func (c *UserConfig) GetGroupDeepSeekConfigDir(groupPath string) string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.DeepSeek.ConfigDir != "" {
+			return ExpandPath(groupCfg.DeepSeek.ConfigDir)
+		}
+	}
+	return ""
+}
+
+// GetGroupDeepSeekProfile returns the group-specific dsh profile name, walking
+// ancestor groups. No path expansion — a profile is a name under
+// $DSH_HOME/profiles, not a path.
+func (c *UserConfig) GetGroupDeepSeekProfile(groupPath string) string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.DeepSeek.Profile != "" {
+			return groupCfg.DeepSeek.Profile
+		}
+	}
+	return ""
+}
+
+// GetGroupDeepSeekEnvFile returns the group-specific dsh env_file, walking
+// ancestor groups. No expansion here; resolvePath handles it at the spawn site.
+func (c *UserConfig) GetGroupDeepSeekEnvFile(groupPath string) string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.DeepSeek.EnvFile != "" {
+			return groupCfg.DeepSeek.EnvFile
+		}
+	}
+	return ""
+}
+
+// GetGroupDeepSeekCommand returns the group-specific dsh command, walking
+// ancestor groups. No expansion — a command may be a bare name, a wrapper, or an
+// absolute path, and the spawn builder treats a non-bare value as passthrough.
+func (c *UserConfig) GetGroupDeepSeekCommand(groupPath string) string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.DeepSeek.Command != "" {
+			return groupCfg.DeepSeek.Command
+		}
+	}
+	return ""
+}
+
+// GetConductorDeepSeekCommand returns the conductor-specific dsh command.
+func (c *UserConfig) GetConductorDeepSeekCommand(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok {
+		return ""
+	}
+	return conductorCfg.DeepSeek.Command
+}
+
+// GetConductorDeepSeekConfigDir returns the conductor-specific DSH_HOME.
+func (c *UserConfig) GetConductorDeepSeekConfigDir(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok || conductorCfg.DeepSeek.ConfigDir == "" {
+		return ""
+	}
+	return ExpandPath(conductorCfg.DeepSeek.ConfigDir)
+}
+
+// GetConductorDeepSeekProfile returns the conductor-specific dsh profile name.
+func (c *UserConfig) GetConductorDeepSeekProfile(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok {
+		return ""
+	}
+	return conductorCfg.DeepSeek.Profile
+}
+
+// GetConductorDeepSeekEnvFile returns the conductor-specific dsh env_file.
+func (c *UserConfig) GetConductorDeepSeekEnvFile(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok {
+		return ""
+	}
+	return conductorCfg.DeepSeek.EnvFile
+}
+
+// DeepSeekSettings defines DeepSeek Harness (`dsh`) integration configuration.
+//
+// Binary: `dsh` from npm @deepseek-ai/dsh (github.com/deepseek-ai/deepseek-harness,
+// MIT). Verified against 0.1.0-rc.6. See internal/session/deepseek.go for the
+// full invocation grammar this block feeds.
+type DeepSeekSettings struct {
+	// Command is the dsh command or invocation to use. Supports a wrapper
+	// (e.g. "my-dsh" or an absolute path). A value other than the bare binary
+	// name is treated as a passthrough and receives no flag injection.
+	// Default: "dsh"
+	Command string `toml:"command,omitempty"`
+
+	// EnvFile is a .env file specific to DeepSeek sessions, sourced before the
+	// `dsh` command runs (like [gemini].env_file). Optional. This is where a
+	// DEEPSEEK_API_KEY belongs when it should not live in the user's shell.
+	EnvFile string `toml:"env_file,omitempty"`
+
+	// ConfigDir is the DSH_HOME exported for DeepSeek sessions — the single
+	// user-data root holding profiles, credentials, and session bodies.
+	// Default: "" (dsh resolves $DSH_HOME, then ~/.dsh, itself)
+	ConfigDir string `toml:"config_dir,omitempty"`
+
+	// Profile is the $DSH_HOME/profiles/<name> to boot. The shipped profiles
+	// are "web" (long-lived HTTP server, auto-initialized on first use) and
+	// "headless" (one-shot: answer one task, print it, exit). Any other name
+	// must be created with `dsh plugin --profile <name> add <package>`.
+	// Default: "web"
+	Profile string `toml:"profile,omitempty"`
+
+	// Patches are extra `--patch <path>` overlay files applied after the
+	// profile's own layer, in order. Repeatable upstream.
+	Patches []string `toml:"patches,omitempty"`
+
+	// Host and Port are the web profile's --host/--port. Ignored for other
+	// profiles, whose apps own their own flags. Upstream refuses
+	// --host 0.0.0.0 with a usage error; agent-deck passes the value through
+	// rather than second-guessing it, so the error surfaces in the pane.
+	//
+	// Port is a pointer because 0 is MEANINGFUL upstream ("let the OS pick a
+	// free one"), so it cannot double as "unset". nil omits --port entirely and
+	// lets the composed profile decide (3080 by default).
+	Host string `toml:"host,omitempty"`
+	Port *int   `toml:"port,omitempty"`
+
+	// TrustedHosts are repeatable `--trusted-host` authorities accepted by the
+	// web profile's /api browser-trust fence.
+	TrustedHosts []string `toml:"trusted_hosts,omitempty"`
+
+	// ResumeFlag is the app-owned flag used to reopen a previous conversation
+	// on restart, e.g. "--resume". Empty (the default) disables resume: NEITHER
+	// shipped profile accepts a resume flag in 0.1.0-rc.6, and emitting one
+	// would make dsh exit with a usage error instead of booting. Set this only
+	// when the configured profile installs an app that documents such a flag;
+	// agent-deck then discovers the session ID from $DSH_HOME's workspace index
+	// and appends `<resume_flag> <id>` as an app argument.
+	ResumeFlag string `toml:"resume_flag,omitempty"`
+
+	// ExtraArgs are appended verbatim after every flag agent-deck derives, for
+	// app flag families agent-deck does not model.
+	ExtraArgs []string `toml:"extra_args,omitempty"`
+}
+
 // CursorSettings defines Cursor Agent CLI integration configuration (Issue #1672).
 type CursorSettings struct {
+	// Command overrides the default binary/invocation for Cursor sessions.
+	// Supports flags (e.g., "agent --force", "cursor agent"). When empty,
+	// DefaultCursorCommand() prefers `agent` when present on PATH, else
+	// `cursor agent`.
+	Command string `toml:"command,omitempty"`
+
+	// EnvFile is a .env file specific to Cursor sessions (sourced before
+	// the agent command runs, like [gemini].env_file). Optional.
+	EnvFile string `toml:"env_file,omitempty"`
+
 	// HooksEnabled enables Cursor Agent CLI hooks for real-time status detection.
 	// When enabled, agent-deck silently injects lifecycle hooks into
 	// ~/.cursor/hooks.json on TUI startup whenever the cursor binary is on PATH.
@@ -3498,6 +3787,12 @@ func GetToolCommand(toolName string) string {
 		if toolName == "kiro" {
 			return "kiro-cli chat --tui"
 		}
+		if toolName == "cursor" {
+			return DefaultCursorCommand()
+		}
+		if toolName == "deepseek" {
+			return deepSeekBinary
+		}
 		return toolName
 	}
 	switch toolName {
@@ -3530,6 +3825,19 @@ func GetToolCommand(toolName string) string {
 		if config.Hermes.Command != "" {
 			return config.Hermes.Command
 		}
+	case "deepseek":
+		// The tool is named for the vendor; the binary it launches is `dsh`.
+		// Returning the tool name here (the default tail of this function)
+		// would spawn a nonexistent `deepseek` command.
+		if config.DeepSeek.Command != "" {
+			return config.DeepSeek.Command
+		}
+		return deepSeekBinary
+	case "cursor":
+		if config.Cursor.Command != "" {
+			return config.Cursor.Command
+		}
+		return DefaultCursorCommand()
 	}
 	return toolName
 }
@@ -3565,6 +3873,8 @@ func GetToolIcon(toolName string) string {
 		return "📝"
 	case "hermes":
 		return "☤"
+	case "deepseek":
+		return "🐋"
 	case "pi":
 		return "π"
 	case "omp":
@@ -4317,6 +4627,57 @@ func CreateExampleConfig() error {
 # trust_all_tools = false
 # Trust selected tools by default (adds repeated --trust-tools values)
 # trust_tools = ["shell", "git"]
+
+# Oh My Pi defaults
+# [omp]
+# default_model = "claude-opus-4-8"
+# models = ["claude-opus-4-8", "gpt-5.5"]
+# default_profile = "work"
+# approval_mode = "write" # always-ask | write | yolo
+# smol_model = "gemini-3-flash"
+# slow_model = "claude-opus-4-8"
+# plan_model = "gpt-5.5"
+# max_time = "1h"
+# auto_approve = false
+# print_thoughts = false
+
+# DeepSeek Harness settings — the dsh binary from npm @deepseek-ai/dsh
+# (github.com/deepseek-ai/deepseek-harness). Install: npm install -g @deepseek-ai/dsh
+# Full guide: docs/tools/deepseek.md
+# [deepseek]
+# The dsh command or a wrapper/absolute path (default: "dsh" — NOT "deepseek")
+# Overridable per group/conductor, like profile/config_dir/env_file
+# command = "dsh"
+# DSH_HOME: the single user-data root holding profiles, credentials, and sessions
+# Default: "" (dsh resolves $DSH_HOME, then ~/.dsh, itself)
+# config_dir = "~/.dsh"
+# Which $DSH_HOME/profiles/<name> to boot. Shipped: "web" (browser UI served from
+# the pane) and "headless" (answer one task, print it, exit). Others are installed
+# with: dsh plugin --profile <name> add <package>   (default: "web")
+# profile = "web"
+# A .env sourced before dsh runs — where a DEEPSEEK_API_KEY belongs if it should
+# not live in your shell
+# env_file = "~/.config/deepseek.env"
+# Extra --patch overlay files applied after the profile's own layer, in order
+# patches = ["~/.dsh/extra.cordis.yml"]
+# web profile only: --host / --port / repeatable --trusted-host
+# host = "127.0.0.1"
+# port = 3080          # 0 means "let the OS pick a free port"; omit to use the profile default
+# trusted_hosts = ["deck.local:8080"]
+# Resume flag used on restart. EMPTY BY DEFAULT and deliberately so: neither
+# shipped profile accepts one in 0.1.0-rc.6, and emitting it would make dsh exit
+# with a usage error. Set it only for a profile whose app documents one; agent-deck
+# then discovers the session id from $DSH_HOME's workspace index.
+# resume_flag = "--resume"
+# Appended verbatim after every flag agent-deck derives
+# extra_args = []
+# Optional per-account override — one DSH_HOME per account slot
+# [profiles.work.deepseek]
+# config_dir = "~/.dsh-work"
+# Per-group / per-conductor overrides resolve conductor -> group -> global:
+# [groups."clients/acme".deepseek]
+# command = "/opt/acme/bin/dsh-wrapper"
+# profile = "headless"
 
 # Log file management
 # Agent-deck logs session output to ~/.agent-deck/logs/ for status detection

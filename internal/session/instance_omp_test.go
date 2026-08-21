@@ -2,6 +2,7 @@ package session
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -94,5 +95,96 @@ func TestResolveDynamicToolUpgradesShellToOmp(t *testing.T) {
 	// (same wrapped-tool upgrade the other builtin CLIs get).
 	if got := resolveDynamicTool("shell", "omp", false); got != "omp" {
 		t.Errorf("resolveDynamicTool(shell, omp) = %q, want omp", got)
+	}
+}
+
+func TestBuildOmpCommand_EmitsConfiguredOptions(t *testing.T) {
+	inst := &Instance{ID: "omp-options", Tool: "omp"}
+	err := inst.SetOmpOptions(&OmpOptions{
+		Model: "opus", Models: []string{"opus", "gpt-5.5"},
+		SmolModel: "flash", SlowModel: "opus", PlanModel: "gpt-5.5",
+		ApprovalMode: "write", Profile: "work", MaxTime: "1h",
+		AutoApprove: true, PrintThoughts: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := inst.buildOmpCommand("omp")
+	for _, want := range []string{
+		"--model opus", "--models opus,gpt-5.5", "--smol flash",
+		"--slow opus", "--plan gpt-5.5", "--approval-mode write",
+		"--profile work", "--max-time 1h", "--auto-approve", "--print-thoughts",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("buildOmpCommand() missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestBuildOmpCommand_NoSessionIsEphemeral(t *testing.T) {
+	inst := &Instance{ID: "ephemeral", Tool: "omp"}
+	if err := inst.SetOmpOptions(&OmpOptions{NoSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	got := inst.buildOmpCommand("omp")
+	if strings.Contains(got, "--continue") || strings.Contains(got, "--session-dir") {
+		t.Fatalf("ephemeral OMP command persisted a session: %s", got)
+	}
+	if !strings.Contains(got, "--no-session") {
+		t.Fatalf("ephemeral OMP command missing --no-session: %s", got)
+	}
+}
+
+func TestBuildOmpCommand_ImportIsOneShot(t *testing.T) {
+	inst := &Instance{ID: "import", Tool: "omp"}
+	if err := inst.SetOmpOptions(&OmpOptions{FromClaude: true}); err != nil {
+		t.Fatal(err)
+	}
+	first := inst.buildOmpCommand("omp")
+	second := inst.buildOmpCommand("omp")
+	if !strings.Contains(first, "--from-claude") || strings.Contains(first, "--continue") {
+		t.Fatalf("first import command = %s", first)
+	}
+	if strings.Contains(second, "--from-claude") || !strings.Contains(second, "--continue") {
+		t.Fatalf("restart replayed import instead of resuming: %s", second)
+	}
+}
+
+func TestBuildOmpCommand_FreshRestartRemovesScopedHistory(t *testing.T) {
+	inst := &Instance{ID: "fresh", Tool: "omp", ompFreshStart: true}
+	got := inst.buildOmpCommand("omp")
+	if !strings.Contains(got, `rm -rf -- "$session_dir"`) || strings.Contains(got, "--continue") {
+		t.Fatalf("fresh OMP command = %s", got)
+	}
+	if inst.ompFreshStart {
+		t.Fatal("fresh marker was not consumed")
+	}
+}
+
+func TestCanForkOmpAndBuildFork(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	parent := &Instance{ID: "parent", Tool: "omp", Command: "omp", ProjectPath: t.TempDir()}
+	dir := filepath.Join(home, ".omp", "agent-deck", parent.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !parent.CanForkOmp() {
+		t.Fatal("OMP parent with JSONL should be forkable")
+	}
+	child, cmd, err := parent.CreateForkedOmpInstanceWithOptions("child", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Tool != "omp" || !child.IsForkAwaitingStart || child.ForkStartCommand != cmd {
+		t.Fatalf("invalid OMP fork child: %+v", child)
+	}
+	for _, want := range []string{"cp -- \"$source_file\"", "omp --continue", ".omp/agent-deck/parent"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("OMP fork command missing %q: %s", want, cmd)
+		}
 	}
 }

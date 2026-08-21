@@ -200,8 +200,8 @@ func TestSettingsPanel_LoadConfig_CustomTools(t *testing.T) {
 
 	panel.LoadConfig(config)
 
-	wantNames := []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "OMP", "Copilot", "Crush", "Cursor", "Hermes", "Openclaw", "Zeta", "None"}
-	wantValues := []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "openclaw", "zeta", ""}
+	wantNames := []string{"Claude", "Gemini", "OpenCode", "Codex", "Kiro", "Pi", "OMP", "Copilot", "Crush", "Cursor", "Hermes", "DeepSeek", "Openclaw", "Zeta", "None"}
+	wantValues := []string{"claude", "gemini", "opencode", "codex", "kiro", "pi", "omp", "copilot", "crush", "cursor", "hermes", "deepseek", "openclaw", "zeta", ""}
 
 	if !reflect.DeepEqual(panel.toolNames, wantNames) {
 		t.Fatalf("toolNames = %#v, want %#v", panel.toolNames, wantNames)
