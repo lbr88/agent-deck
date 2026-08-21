@@ -48,6 +48,8 @@ func handleSession(profile string, args []string) {
 		handleSessionUnarchive(profile, args[1:])
 	case "restart":
 		handleSessionRestart(profile, args[1:])
+	case "restart-fresh":
+		handleSessionRestartFresh(profile, args[1:])
 	case "revive":
 		handleSessionRevive(profile, args[1:])
 	case "fork":
@@ -126,8 +128,9 @@ func printSessionHelp() {
 	fmt.Println("  archive <id|title>      Stop session and hide it from active lists (retained in storage)")
 	fmt.Println("  unarchive <id|title>    Restore an archived session (does not restart it)")
 	fmt.Println("  restart [id] [--all] [--env KEY=VALUE]  Restart session (Claude: reload MCPs)")
+	fmt.Println("  restart-fresh <id>      Restart without resuming the existing tool conversation")
 	fmt.Println("  revive [--all|--name]   Rebuild dead control pipes for errored sessions")
-	fmt.Println("  fork <id>               Fork Claude, OpenCode, Pi, or Codex session with context")
+	fmt.Println("  fork <id>               Fork Claude, OpenCode, Pi, OMP, or Codex session with context")
 	fmt.Println("  import-codex <id|name>  Import an existing saved Codex session")
 	fmt.Println("  import-claude <id|name> Import an existing Claude Code session")
 	fmt.Println("  import-opencode <id|title>  Import an existing saved OpenCode session")
@@ -1023,6 +1026,55 @@ func handleSessionRestart(profile string, args []string) {
 		data["warning"] = warning
 	}
 	out.Success(fmt.Sprintf("Restarted session: %s", inst.Title), data)
+}
+
+// handleSessionRestartFresh explicitly discards the current tool conversation
+// binding before recreating the session.
+func handleSessionRestartFresh(profile string, args []string) {
+	fs := flag.NewFlagSet("session restart-fresh", flag.ExitOnError)
+	jsonOutput := fs.Bool("json", false, "Output as JSON")
+	quiet := fs.Bool("quiet", false, "Minimal output")
+	quietShort := fs.Bool("q", false, "Minimal output (short)")
+	if err := fs.Parse(normalizeArgs(fs, args)); err != nil {
+		os.Exit(1)
+	}
+	out := NewCLIOutput(*jsonOutput, *quiet || *quietShort)
+	identifier := fs.Arg(0)
+	if identifier == "" {
+		out.Error("session identifier required", ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	storage, instances, groups, err := loadSessionData(profile)
+	if err != nil {
+		out.Error(err.Error(), ErrCodeNotFound)
+		os.Exit(1)
+	}
+	inst, errMsg, errCode := ResolveSession(identifier, instances)
+	if inst == nil {
+		out.Error(errMsg, errCode)
+		if errCode == ErrCodeNotFound {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	}
+	if !inst.CanRestartFresh() {
+		out.Error(fmt.Sprintf("fresh restart is not supported for %s sessions", inst.Tool), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	if err := inst.RestartFresh(); err != nil {
+		out.Error(fmt.Sprintf("failed to restart session fresh: %v", err), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	inst.LastStartedAt = time.Now()
+	if err := saveSessionData(storage, instances, groups); err != nil {
+		out.Error(fmt.Sprintf("failed to save session state: %v", err), ErrCodeInvalidOperation)
+		os.Exit(1)
+	}
+	out.Success(fmt.Sprintf("Restarted session fresh: %s", inst.Title), map[string]interface{}{
+		"success": true,
+		"id":      inst.ID,
+		"title":   inst.Title,
+	})
 }
 
 // restartAllSessions restarts every active session, paced and gated by
