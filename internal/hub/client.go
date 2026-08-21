@@ -1926,13 +1926,37 @@ func authenticatedAPIURL(rawURL, nodeID, path string) (string, error) {
 	return u.String(), nil
 }
 
+// ClientTLSConfig builds the TLS policy shared by WebSocket and authenticated
+// HTTP hub clients.
+func ClientTLSConfig(cfg ClientConfig) (*tls.Config, error) {
+	return clientTLSConfig(cfg)
+}
+
 func clientTLSConfig(cfg ClientConfig) (*tls.Config, error) {
+	roots, err := hubClientRootPool(cfg.CAPemFile)
+	if err != nil {
+		return nil, err
+	}
+
 	if strings.TrimSpace(cfg.PinnedCertSHA256) != "" {
 		pinned := strings.TrimSpace(cfg.PinnedCertSHA256)
-		tlsConfig := &tls.Config{}
-		// #nosec G402 -- certificate chain validation is replaced by exact SHA-256 pin validation below.
+		serverName := strings.TrimSpace(cfg.ServerName)
+		if serverName == "" {
+			if parsed, parseErr := url.Parse(strings.TrimSpace(cfg.URL)); parseErr == nil {
+				serverName = parsed.Hostname()
+			}
+		}
+		tlsConfig := &tls.Config{ServerName: serverName, RootCAs: roots}
+		// #nosec G402 -- VerifyConnection performs normal PKI verification
+		// first and falls back to the explicit pin for self-signed hubs.
 		tlsConfig.InsecureSkipVerify = true
 		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if !cfg.TLSSkipVerify && verifyHubCertificateChain(state, roots, serverName) == nil {
+				// Public/custom-CA trust is stable across routine certificate
+				// renewal; a leaf pin stored during join must not take a
+				// CA-valid hub offline when that leaf rotates.
+				return nil
+			}
 			rawCerts := make([][]byte, 0, len(state.PeerCertificates))
 			for _, cert := range state.PeerCertificates {
 				rawCerts = append(rawCerts, cert.Raw)
@@ -1941,29 +1965,50 @@ func clientTLSConfig(cfg ClientConfig) (*tls.Config, error) {
 		}
 		return tlsConfig, nil
 	}
+
 	tlsConfig := &tls.Config{
 		ServerName: cfg.ServerName,
+		RootCAs:    roots,
 	}
 	if cfg.TLSSkipVerify {
 		// #nosec G402 -- explicit user-configured option for private/self-managed hubs.
 		tlsConfig.InsecureSkipVerify = true
 	}
-	if cfg.CAPemFile == "" {
-		return tlsConfig, nil
-	}
-	pemData, err := os.ReadFile(cfg.CAPemFile)
-	if err != nil {
-		return nil, fmt.Errorf("read hub CA PEM file: %w", err)
-	}
+	return tlsConfig, nil
+}
+
+func hubClientRootPool(caPEMFile string) (*x509.CertPool, error) {
 	pool, err := x509.SystemCertPool()
 	if err != nil {
 		pool = x509.NewCertPool()
 	}
+	if strings.TrimSpace(caPEMFile) == "" {
+		return pool, nil
+	}
+	pemData, err := os.ReadFile(caPEMFile)
+	if err != nil {
+		return nil, fmt.Errorf("read hub CA PEM file: %w", err)
+	}
 	if !pool.AppendCertsFromPEM(pemData) {
 		return nil, fmt.Errorf("no certificates found in hub CA PEM file")
 	}
-	tlsConfig.RootCAs = pool
-	return tlsConfig, nil
+	return pool, nil
+}
+
+func verifyHubCertificateChain(state tls.ConnectionState, roots *x509.CertPool, serverName string) error {
+	if len(state.PeerCertificates) == 0 {
+		return fmt.Errorf("hub server did not present a certificate")
+	}
+	intermediates := x509.NewCertPool()
+	for _, cert := range state.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{
+		DNSName:       serverName,
+		Roots:         roots,
+		Intermediates: intermediates,
+	})
+	return err
 }
 
 func (cfg ClientConfig) heartbeatInterval() time.Duration {

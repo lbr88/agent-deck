@@ -588,6 +588,7 @@ func createRemoteHubInvite(settings session.HubSettings, nodeName string, ttl ti
 		return hubInviteResult{}, err
 	}
 	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		HubURL:           rawHubURL,
 		TLSSkipVerify:    settings.TLSSkipVerify,
 		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
 		ServerName:       strings.TrimSpace(settings.ServerName),
@@ -688,6 +689,7 @@ func hubRemoteJSON(settings session.HubSettings, method, path string, requestBod
 		body = bytes.NewReader(data)
 	}
 	client, _, err := hubJoinHTTPClient(hubJoinTLSOptions{
+		HubURL:           strings.TrimSpace(settings.URL),
 		TLSSkipVerify:    settings.TLSSkipVerify,
 		CAPemFile:        strings.TrimSpace(settings.CAPemFile),
 		ServerName:       strings.TrimSpace(settings.ServerName),
@@ -1923,6 +1925,7 @@ func validateHubJoinURL(raw string) error {
 }
 
 type hubJoinTLSOptions struct {
+	HubURL           string
 	TLSSkipVerify    bool
 	CAPemFile        string
 	ServerName       string
@@ -1940,6 +1943,7 @@ func exchangeHubInvite(rawHubURL string, req hubJoinRequest, tlsOptions hubJoinT
 		return hubJoinResult{}, err
 	}
 
+	tlsOptions.HubURL = strings.TrimSpace(rawHubURL)
 	client, acceptedCertFingerprint, err := hubJoinHTTPClient(tlsOptions)
 	if err != nil {
 		return hubJoinResult{}, err
@@ -2015,15 +2019,15 @@ func hubJoinHTTPClient(opts hubJoinTLSOptions) (*http.Client, *string, error) {
 		tlsConfig.InsecureSkipVerify = true
 	}
 	if strings.TrimSpace(opts.PinnedCertSHA256) != "" {
-		pinned := strings.TrimSpace(opts.PinnedCertSHA256)
-		// #nosec G402 -- certificate chain validation is replaced by exact SHA-256 pin validation below.
-		tlsConfig.InsecureSkipVerify = true
-		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
-			rawCerts := make([][]byte, 0, len(state.PeerCertificates))
-			for _, cert := range state.PeerCertificates {
-				rawCerts = append(rawCerts, cert.Raw)
-			}
-			return hub.VerifyPinnedCertificate(rawCerts, pinned)
+		tlsConfig, err := hub.ClientTLSConfig(hub.ClientConfig{
+			URL:              opts.HubURL,
+			TLSSkipVerify:    opts.TLSSkipVerify,
+			CAPemFile:        strings.TrimSpace(opts.CAPemFile),
+			ServerName:       strings.TrimSpace(opts.ServerName),
+			PinnedCertSHA256: strings.TrimSpace(opts.PinnedCertSHA256),
+		})
+		if err != nil {
+			return nil, nil, err
 		}
 		return &http.Client{
 			Transport: &http.Transport{TLSClientConfig: tlsConfig},

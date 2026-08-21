@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-08-21
+
+### Fixed
+
+- **Hub connections survive normal TLS certificate renewal.** A fingerprint saved when joining a self-signed hub remains the fallback trust path, but a hub certificate that validates through the system or configured CA is no longer rejected merely because its leaf fingerprint rotated. WebSocket and authenticated HTTP hub clients now share this policy, preventing publicly trusted hubs from appearing permanently offline after certificate renewal.
+
 ## [1.13.1] - 2026-08-21
 
 ### Added

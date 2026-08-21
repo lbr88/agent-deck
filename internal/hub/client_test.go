@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -1842,6 +1843,32 @@ func TestClientTLSConfigRejectsChangedPinnedCertificate(t *testing.T) {
 	}
 	if err := tlsConfig.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{badCert}}); err == nil {
 		t.Fatal("VerifyConnection accepted changed certificate")
+	}
+}
+
+func TestClientTLSConfigAcceptsCAValidCertificateAfterLeafPinRotation(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer server.Close()
+
+	cert := server.Certificate()
+	caPath := filepath.Join(t.TempDir(), "hub-ca.pem")
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	if err := os.WriteFile(caPath, pemData, 0o600); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+	tlsConfig, err := clientTLSConfig(ClientConfig{
+		URL:              "wss://example.com",
+		ServerName:       "example.com",
+		CAPemFile:        caPath,
+		PinnedCertSHA256: strings.Repeat("0", 64),
+	})
+	if err != nil {
+		t.Fatalf("clientTLSConfig: %v", err)
+	}
+	if err := tlsConfig.VerifyConnection(tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{cert},
+	}); err != nil {
+		t.Fatalf("CA-valid renewed certificate rejected because the old leaf pin changed: %v", err)
 	}
 }
 
