@@ -111,6 +111,42 @@ printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_RESUME"
 	}
 }
 
+func TestBuildOmpCommandStopsWhenSessionDirCreationFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	blockedParent := filepath.Join(home, ".omp", "agent-deck")
+	if err := os.MkdirAll(filepath.Dir(blockedParent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(home, "omp-invoked")
+	fakeOmp := `#!/bin/sh
+touch "$OMP_INVOKED_MARKER"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OMP_INVOKED_MARKER", marker)
+
+	inst := &Instance{ID: "blocked-instance", Tool: "omp", Command: "omp"}
+	run := exec.Command("bash", "-c", inst.buildOmpCommand("omp"))
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err == nil {
+		t.Fatalf("OMP launch succeeded after session directory creation failed:\n%s", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("OMP was invoked after session directory creation failed: %v", err)
+	}
+}
+
 func TestBuildOmpCommand_QuotesInstanceIDPathComponent(t *testing.T) {
 	inst := &Instance{ID: "test instance'id", Tool: "omp"}
 	got := inst.buildOmpCommand("omp")
@@ -328,5 +364,48 @@ printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_SOURCE"
 		t.Fatal(err)
 	} else if len(matches) != 0 {
 		t.Fatalf("Agent Deck cloned the parent's OMP identity into the child: %v", matches)
+	}
+}
+
+func TestOmpForkStopsWhenTargetSessionDirCreationFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	parent := &Instance{ID: "parent", Tool: "omp", Command: "omp", ProjectPath: t.TempDir()}
+	parentDir := filepath.Join(home, ".omp", "agent-deck", parent.ID)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "session.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd, err := parent.CreateForkedOmpInstanceWithOptions("child", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "mkdir"), []byte("#!/bin/sh\nexit 73\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(home, "omp-invoked")
+	fakeOmp := `#!/bin/sh
+touch "$OMP_INVOKED_MARKER"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OMP_INVOKED_MARKER", marker)
+
+	run := exec.Command("bash", "-c", cmd)
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err == nil {
+		t.Fatalf("OMP fork succeeded after target directory creation failed:\n%s", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("OMP fork was invoked after target directory creation failed: %v", err)
 	}
 }

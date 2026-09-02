@@ -2724,7 +2724,7 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		// the transcript inside this instance's directory and pass its path
 		// explicitly so restarts cannot cross session identities.
 		return envPrefix + fmt.Sprintf(
-			"session_dir=%s; mkdir -p \"$session_dir\" && source_file=; for candidate in \"$session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -n \"$source_file\" ]; then %s --resume \"$source_file\" --session-dir \"$session_dir\"%s; else %s --session-dir \"$session_dir\"%s; fi",
+			"session_dir=%s; mkdir -p \"$session_dir\" && { source_file=; for candidate in \"$session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -n \"$source_file\" ]; then %s --resume \"$source_file\" --session-dir \"$session_dir\"%s; else %s --session-dir \"$session_dir\"%s; fi; }",
 			sessionDir, commandPrefix, args, commandPrefix, args)
 	}
 
@@ -2756,7 +2756,7 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	parentSessionDir := ompAgentDeckSessionDirExpr(i.ID)
 	sessionDir := ompAgentDeckSessionDirExpr(target.ID)
 	return target.buildEnvSourceCommand() + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; rm -rf -- \"$session_dir\"; mkdir -p \"$session_dir\" && source_file=; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s",
+		"parent_session_dir=%s; session_dir=%s; rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\" && { source_file=; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s; }",
 		parentSessionDir, sessionDir, shellescape.Quote(target.ID),
 		shellescape.Quote(sessionProfileEnvValue()), cmd, args), nil
 }
