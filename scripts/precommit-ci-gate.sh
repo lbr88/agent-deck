@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.12}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.25.13}"
 export PERF_BUDGET_MULTIPLIER="${PERF_BUDGET_MULTIPLIER:-2.0}"
 
 # Keep local CI scratch out of /tmp and out of the repository. Full race/web
