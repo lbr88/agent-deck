@@ -2718,17 +2718,23 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		_ = i.SetOmpOptions(opts)
 	}
 
+	if !fresh && !importing {
+		// --continue is terminal-breadcrumb-first in OMP and can therefore
+		// resume a conversation owned by a different Agent Deck pane. Resolve
+		// the transcript inside this instance's directory and pass its path
+		// explicitly so restarts cannot cross session identities.
+		return envPrefix + fmt.Sprintf(
+			"session_dir=%s; mkdir -p \"$session_dir\" && source_file=$(find \"$session_dir\" -maxdepth 1 -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -n \"$source_file\" ]; then %s --resume \"$source_file\" --session-dir \"$session_dir\"%s; else %s --session-dir \"$session_dir\"%s; fi",
+			sessionDir, commandPrefix, args, commandPrefix, args)
+	}
+
 	setup := "mkdir -p \"$session_dir\""
-	lifecycle := " --continue"
 	if fresh {
 		setup = "rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\""
-		lifecycle = ""
-	} else if importing {
-		lifecycle = ""
 	}
 	return envPrefix + fmt.Sprintf(
-		"session_dir=%s; %s && %s%s --session-dir \"$session_dir\"%s",
-		sessionDir, setup, commandPrefix, lifecycle, args)
+		"session_dir=%s; %s && %s --session-dir \"$session_dir\"%s",
+		sessionDir, setup, commandPrefix, args)
 }
 
 func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand string) (string, error) {
@@ -2750,7 +2756,7 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	parentSessionDir := ompAgentDeckSessionDirExpr(i.ID)
 	sessionDir := ompAgentDeckSessionDirExpr(target.ID)
 	return target.buildEnvSourceCommand() + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; rm -rf -- \"$session_dir\"; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; cp -- \"$source_file\" \"$session_dir/\" && AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --continue --session-dir \"$session_dir\"%s",
+		"parent_session_dir=%s; session_dir=%s; rm -rf -- \"$session_dir\"; mkdir -p \"$session_dir\" && source_file=$(find \"$parent_session_dir\" -type f -name '*.jsonl' -exec ls -t {} + 2>/dev/null | head -n 1); if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s",
 		parentSessionDir, sessionDir, shellescape.Quote(target.ID),
 		shellescape.Quote(sessionProfileEnvValue()), cmd, args), nil
 }
@@ -11072,8 +11078,10 @@ func (i *Instance) CreateForkedPiInstanceWithOptions(
 	return forked, cmd, nil
 }
 
-// CreateForkedOmpInstanceWithOptions copies the latest parent transcript into
-// the child instance directory, then starts OMP with --continue.
+// CreateForkedOmpInstanceWithOptions asks OMP to fork the latest parent
+// transcript into the child instance directory. OMP mints the child's session
+// ID and records its lineage; copying the JSONL would duplicate the parent's
+// identity and allow both Agent Deck instances to operate on one conversation.
 func (i *Instance) CreateForkedOmpInstanceWithOptions(
 	newTitle, newGroupPath string,
 	opts *ClaudeOptions,
