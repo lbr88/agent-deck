@@ -2,9 +2,11 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"al.essio.dev/pkg/shellescape"
 )
@@ -23,11 +25,140 @@ func TestBuildOmpCommand_UsesInstanceScopedSessionDir(t *testing.T) {
 		"session_dir=" + wantSessionDir,
 		"mkdir -p \"$session_dir\"",
 		"AGENTDECK_INSTANCE_ID=test-instance-id",
-		"omp --continue --session-dir \"$session_dir\"",
+		"omp --resume \"$source_file\" --session-dir \"$session_dir\"",
+		"omp --session-dir \"$session_dir\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("buildOmpCommand output missing %q\ngot: %s", want, got)
 		}
+	}
+	if strings.Contains(got, "--continue") {
+		t.Fatalf("buildOmpCommand must not use terminal-breadcrumb-based --continue: %s", got)
+	}
+}
+
+func TestBuildOmpCommandResumesOnlyOwnedTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inst := &Instance{ID: "owned-instance", Tool: "omp", Command: "omp"}
+	sessionDir := filepath.Join(home, ".omp", "agent-deck", inst.ID)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownedSession := filepath.Join(sessionDir, "owned-session.jsonl")
+	if err := os.WriteFile(ownedSession, []byte("{\"type\":\"session\",\"id\":\"owned-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	olderSession := filepath.Join(sessionDir, "older-session.jsonl")
+	if err := os.WriteFile(olderSession, []byte("{\"type\":\"session\",\"id\":\"older-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(olderSession, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	// OMP stores task/subagent transcripts inside a companion directory named
+	// after the owning root transcript. They are not resumable root sessions.
+	nestedDir := filepath.Join(sessionDir, "owned-session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "newer-subagent.jsonl"), []byte("{\"type\":\"session\",\"id\":\"subagent-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeOmp := `#!/bin/sh
+set -eu
+resume_file=
+session_dir=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --resume)
+      shift
+      resume_file="${1-}"
+      ;;
+    --session-dir)
+      shift
+      session_dir="${1-}"
+      ;;
+    --continue)
+      echo "unexpected --continue" >&2
+      exit 20
+      ;;
+  esac
+  shift
+done
+[ "$resume_file" = "$EXPECTED_OMP_RESUME" ] || { echo "wrong resume file: $resume_file" >&2; exit 21; }
+[ "$session_dir" = "$EXPECTED_OMP_TARGET" ] || { echo "wrong session dir: $session_dir" >&2; exit 22; }
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("EXPECTED_OMP_RESUME", ownedSession)
+	t.Setenv("EXPECTED_OMP_TARGET", sessionDir)
+
+	run := exec.Command("bash", "-c", inst.buildOmpCommand("omp"))
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("OMP resume launch failed: %v\n%s", err, output)
+	}
+}
+
+func TestCanForkOmpRejectsNestedSubagentTranscriptWithoutRootTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inst := &Instance{ID: "nested-only", Tool: "omp", Command: "omp"}
+	nestedDir := filepath.Join(home, ".omp", "agent-deck", inst.ID, "root-session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "subagent.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if inst.CanForkOmp() {
+		t.Fatal("nested task transcript without a top-level OMP session must not be forkable")
+	}
+}
+
+func TestBuildOmpCommandStopsWhenSessionDirCreationFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	blockedParent := filepath.Join(home, ".omp", "agent-deck")
+	if err := os.MkdirAll(filepath.Dir(blockedParent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(home, "omp-invoked")
+	fakeOmp := `#!/bin/sh
+touch "$OMP_INVOKED_MARKER"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OMP_INVOKED_MARKER", marker)
+
+	inst := &Instance{ID: "blocked-instance", Tool: "omp", Command: "omp"}
+	run := exec.Command("bash", "-c", inst.buildOmpCommand("omp"))
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err == nil {
+		t.Fatalf("OMP launch succeeded after session directory creation failed:\n%s", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("OMP was invoked after session directory creation failed: %v", err)
 	}
 }
 
@@ -52,7 +183,7 @@ func TestBuildOmpCommand_WrongTool(t *testing.T) {
 func TestBuildOmpCommand_DefaultsBinary(t *testing.T) {
 	inst := &Instance{ID: "tid", Tool: "omp"}
 	got := inst.buildOmpCommand("")
-	if !strings.Contains(got, " omp --continue") {
+	if !strings.Contains(got, " omp --resume") || !strings.Contains(got, " omp --session-dir") {
 		t.Errorf("empty command must default to omp binary, got %q", got)
 	}
 }
@@ -145,7 +276,7 @@ func TestBuildOmpCommand_ImportIsOneShot(t *testing.T) {
 	if !strings.Contains(first, "--from-claude") || strings.Contains(first, "--continue") {
 		t.Fatalf("first import command = %s", first)
 	}
-	if strings.Contains(second, "--from-claude") || !strings.Contains(second, "--continue") {
+	if strings.Contains(second, "--from-claude") || !strings.Contains(second, "--resume") {
 		t.Fatalf("restart replayed import instead of resuming: %s", second)
 	}
 }
@@ -161,15 +292,31 @@ func TestBuildOmpCommand_FreshRestartRemovesScopedHistory(t *testing.T) {
 	}
 }
 
-func TestCanForkOmpAndBuildFork(t *testing.T) {
+func TestOmpForkLaunchesNativeForkWithoutCloningParentIdentity(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	parent := &Instance{ID: "parent", Tool: "omp", Command: "omp", ProjectPath: t.TempDir()}
-	dir := filepath.Join(home, ".omp", "agent-deck", parent.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	parentDir := filepath.Join(home, ".omp", "agent-deck", parent.ID)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte("{}\n"), 0o600); err != nil {
+	sourceFile := filepath.Join(parentDir, "session.jsonl")
+	if err := os.WriteFile(sourceFile, []byte("{\"type\":\"session\",\"id\":\"parent-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	olderSource := filepath.Join(parentDir, "older-session.jsonl")
+	if err := os.WriteFile(olderSource, []byte("{\"type\":\"session\",\"id\":\"older-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(olderSource, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	nestedDir := filepath.Join(parentDir, "session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "newer-subagent.jsonl"), []byte("{\"type\":\"session\",\"id\":\"subagent-id\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if !parent.CanForkOmp() {
@@ -182,9 +329,98 @@ func TestCanForkOmpAndBuildFork(t *testing.T) {
 	if child.Tool != "omp" || !child.IsForkAwaitingStart || child.ForkStartCommand != cmd {
 		t.Fatalf("invalid OMP fork child: %+v", child)
 	}
-	for _, want := range []string{"cp -- \"$source_file\"", "omp --continue", ".omp/agent-deck/parent"} {
-		if !strings.Contains(cmd, want) {
-			t.Errorf("OMP fork command missing %q: %s", want, cmd)
-		}
+
+	childDir := filepath.Join(home, ".omp", "agent-deck", child.ID)
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeOmp := `#!/bin/sh
+set -eu
+source_file=
+session_dir=
+native_fork=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fork)
+      native_fork=true
+      shift
+      source_file="${1-}"
+      ;;
+    --session-dir)
+      shift
+      session_dir="${1-}"
+      ;;
+    --continue)
+      echo "unexpected --continue" >&2
+      exit 20
+      ;;
+  esac
+  shift
+done
+[ "$native_fork" = true ] || { echo "missing --fork" >&2; exit 21; }
+[ "$source_file" = "$EXPECTED_OMP_SOURCE" ] || { echo "wrong fork source: $source_file" >&2; exit 22; }
+[ "$session_dir" = "$EXPECTED_OMP_TARGET" ] || { echo "wrong session dir: $session_dir" >&2; exit 23; }
+[ ! -e "$session_dir/$(basename "$source_file")" ] || { echo "parent transcript was copied before native fork" >&2; exit 24; }
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("EXPECTED_OMP_SOURCE", sourceFile)
+	t.Setenv("EXPECTED_OMP_TARGET", childDir)
+
+	run := exec.Command("bash", "-c", cmd)
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("OMP fork launch failed: %v\n%s", err, output)
+	}
+	if matches, err := filepath.Glob(filepath.Join(childDir, "*.jsonl")); err != nil {
+		t.Fatal(err)
+	} else if len(matches) != 0 {
+		t.Fatalf("Agent Deck cloned the parent's OMP identity into the child: %v", matches)
+	}
+}
+
+func TestOmpForkStopsWhenTargetSessionDirCreationFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	parent := &Instance{ID: "parent", Tool: "omp", Command: "omp", ProjectPath: t.TempDir()}
+	parentDir := filepath.Join(home, ".omp", "agent-deck", parent.ID)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentDir, "session.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd, err := parent.CreateForkedOmpInstanceWithOptions("child", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "mkdir"), []byte("#!/bin/sh\nexit 73\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(home, "omp-invoked")
+	fakeOmp := `#!/bin/sh
+touch "$OMP_INVOKED_MARKER"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OMP_INVOKED_MARKER", marker)
+
+	run := exec.Command("bash", "-c", cmd)
+	run.Env = os.Environ()
+	if output, err := run.CombinedOutput(); err == nil {
+		t.Fatalf("OMP fork succeeded after target directory creation failed:\n%s", output)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("OMP fork was invoked after target directory creation failed: %v", err)
 	}
 }
