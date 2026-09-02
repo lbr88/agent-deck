@@ -40,7 +40,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/web"
 )
 
-var Version = "1.13.2" // overridden at build time via -ldflags "-X main.Version=..."
+var Version = "1.13.3" // overridden at build time via -ldflags "-X main.Version=..."
 var Commit = ""        // overridden at build time via -ldflags "-X main.Commit=..."
 
 // Table column widths for list command output

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-09-02
+
+### Fixed
+
+- **Forked OMP sessions now have independent conversation identities.** Agent Deck uses OMP's native fork operation instead of copying the parent's transcript, so a fork can no longer open, rename, or continue the same conversation as its parent.
+- **Restarting an OMP session resumes only its own root transcript.** Restarts no longer follow OMP's terminal breadcrumb into another pane, and nested task/subagent transcripts are excluded from root-session selection.
+- **The local pre-commit gate uses the repository's Go 1.25.13 toolchain pin.** The pin-consistency test now covers the gate itself, preventing another stale toolchain from blocking valid commits.
+
 ## [1.13.2] - 2026-08-21
 
 ### Fixed
