@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"al.essio.dev/pkg/shellescape"
 )
@@ -48,6 +49,14 @@ func TestBuildOmpCommandResumesOnlyOwnedTranscript(t *testing.T) {
 	if err := os.WriteFile(ownedSession, []byte("{\"type\":\"session\",\"id\":\"owned-omp-id\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	olderSession := filepath.Join(sessionDir, "older-session.jsonl")
+	if err := os.WriteFile(olderSession, []byte("{\"type\":\"session\",\"id\":\"older-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(olderSession, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
 
 	fakeBin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -80,7 +89,18 @@ done
 	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate find(1) splitting -exec ... {} + into multiple independently
+	// sorted batches: the older batch leader can appear before the newer file.
+	// A correct lookup must compare every transcript globally, not pipe these
+	// batch-local results through head(1).
+	fakeFind := `#!/bin/sh
+printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_RESUME"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "find"), []byte(fakeFind), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("EXPECTED_OMP_OLDER", olderSession)
 	t.Setenv("EXPECTED_OMP_RESUME", ownedSession)
 	t.Setenv("EXPECTED_OMP_TARGET", sessionDir)
 
@@ -233,6 +253,14 @@ func TestOmpForkLaunchesNativeForkWithoutCloningParentIdentity(t *testing.T) {
 	if err := os.WriteFile(sourceFile, []byte("{\"type\":\"session\",\"id\":\"parent-omp-id\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	olderSource := filepath.Join(parentDir, "older-session.jsonl")
+	if err := os.WriteFile(olderSource, []byte("{\"type\":\"session\",\"id\":\"older-omp-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(olderSource, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
 	if !parent.CanForkOmp() {
 		t.Fatal("OMP parent with JSONL should be forkable")
 	}
@@ -280,7 +308,14 @@ done
 	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	fakeFind := `#!/bin/sh
+printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_SOURCE"
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "find"), []byte(fakeFind), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("EXPECTED_OMP_OLDER", olderSource)
 	t.Setenv("EXPECTED_OMP_SOURCE", sourceFile)
 	t.Setenv("EXPECTED_OMP_TARGET", childDir)
 
