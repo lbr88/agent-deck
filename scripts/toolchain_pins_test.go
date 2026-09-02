@@ -27,6 +27,7 @@ func TestOperationalToolchainPinsMatchGoMod(t *testing.T) {
 		".github/workflows/lighthouse-ci.yml",
 		".flox/env/manifest.toml",
 		".flox/env/manifest.lock",
+		"scripts/precommit-ci-gate.sh",
 		"scripts/verify-preview-ansi-bleed.sh",
 		"scripts/verify-watcher-framework.sh",
 		"tests/web/helpers/global-setup.js",

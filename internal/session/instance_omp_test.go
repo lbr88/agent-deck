@@ -57,6 +57,15 @@ func TestBuildOmpCommandResumesOnlyOwnedTranscript(t *testing.T) {
 	if err := os.Chtimes(olderSession, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
+	// OMP stores task/subagent transcripts inside a companion directory named
+	// after the owning root transcript. They are not resumable root sessions.
+	nestedDir := filepath.Join(sessionDir, "owned-session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "newer-subagent.jsonl"), []byte("{\"type\":\"session\",\"id\":\"subagent-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	fakeBin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -89,18 +98,7 @@ done
 	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate find(1) splitting -exec ... {} + into multiple independently
-	// sorted batches: the older batch leader can appear before the newer file.
-	// A correct lookup must compare every transcript globally, not pipe these
-	// batch-local results through head(1).
-	fakeFind := `#!/bin/sh
-printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_RESUME"
-`
-	if err := os.WriteFile(filepath.Join(fakeBin, "find"), []byte(fakeFind), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("EXPECTED_OMP_OLDER", olderSession)
 	t.Setenv("EXPECTED_OMP_RESUME", ownedSession)
 	t.Setenv("EXPECTED_OMP_TARGET", sessionDir)
 
@@ -108,6 +106,23 @@ printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_RESUME"
 	run.Env = os.Environ()
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("OMP resume launch failed: %v\n%s", err, output)
+	}
+}
+
+func TestCanForkOmpRejectsNestedSubagentTranscriptWithoutRootTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inst := &Instance{ID: "nested-only", Tool: "omp", Command: "omp"}
+	nestedDir := filepath.Join(home, ".omp", "agent-deck", inst.ID, "root-session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "subagent.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if inst.CanForkOmp() {
+		t.Fatal("nested task transcript without a top-level OMP session must not be forkable")
 	}
 }
 
@@ -297,6 +312,13 @@ func TestOmpForkLaunchesNativeForkWithoutCloningParentIdentity(t *testing.T) {
 	if err := os.Chtimes(olderSource, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
+	nestedDir := filepath.Join(parentDir, "session")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "newer-subagent.jsonl"), []byte("{\"type\":\"session\",\"id\":\"subagent-id\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if !parent.CanForkOmp() {
 		t.Fatal("OMP parent with JSONL should be forkable")
 	}
@@ -344,14 +366,7 @@ done
 	if err := os.WriteFile(filepath.Join(fakeBin, "omp"), []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	fakeFind := `#!/bin/sh
-printf '%s\n' "$EXPECTED_OMP_OLDER" "$EXPECTED_OMP_SOURCE"
-`
-	if err := os.WriteFile(filepath.Join(fakeBin, "find"), []byte(fakeFind), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("EXPECTED_OMP_OLDER", olderSource)
 	t.Setenv("EXPECTED_OMP_SOURCE", sourceFile)
 	t.Setenv("EXPECTED_OMP_TARGET", childDir)
 

@@ -10666,7 +10666,9 @@ func (i *Instance) CanForkPi() bool {
 	return true
 }
 
-// CanForkOmp reports whether an instance-scoped OMP transcript can be copied.
+// CanForkOmp reports whether an instance-scoped root OMP transcript can be
+// forked. OMP stores task/subagent transcripts in nested companion directories;
+// those are not valid root sessions for Agent Deck to fork.
 func (i *Instance) CanForkOmp() bool {
 	if i.Tool != "omp" || i.ID == "" || i.resolvedOmpOptions().NoSession {
 		return false
@@ -10677,15 +10679,16 @@ func (i *Instance) CanForkOmp() bool {
 			return false
 		}
 		sessionDir := filepath.Join(home, ".omp", "agent-deck", i.ID)
-		found := false
-		_ = filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error {
-			if err == nil && d != nil && !d.IsDir() && strings.EqualFold(filepath.Ext(path), ".jsonl") {
-				found = true
-				return filepath.SkipAll
+		entries, err := os.ReadDir(sessionDir)
+		if err != nil {
+			return false
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".jsonl") {
+				return true
 			}
-			return nil
-		})
-		return found
+		}
+		return false
 	}
 	return true
 }
