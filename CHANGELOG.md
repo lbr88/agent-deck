@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.4] - 2026-09-07
+
+### Fixed
+
+- **OMP resumes cannot cross Agent Deck session identities.** Agent Deck resumes the sole root transcript by explicit path, automatically re-keys legacy copied identities through OMP's native fork, and refuses ambiguous histories instead of guessing and opening another session.
+- **Legacy OMP identity migration is crash-safe.** The original transcript and companion artifacts remain recoverable until the replacement is durable, and interrupted artifact copies are repaired before the unique session resumes.
+
 ## [1.13.3] - 2026-09-02
 
 ### Fixed
