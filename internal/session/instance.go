@@ -2722,10 +2722,40 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		// --continue is terminal-breadcrumb-first in OMP and can therefore
 		// resume a conversation owned by a different Agent Deck pane. Resolve
 		// the transcript inside this instance's directory and pass its path
-		// explicitly so restarts cannot cross session identities.
-		return envPrefix + fmt.Sprintf(
-			"session_dir=%s; mkdir -p \"$session_dir\" && { source_file=; for candidate in \"$session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -n \"$source_file\" ]; then %s --resume \"$source_file\" --session-dir \"$session_dir\"%s; else %s --session-dir \"$session_dir\"%s; fi; }",
-			sessionDir, commandPrefix, args, commandPrefix, args)
+		// explicitly so restarts cannot cross session identities. Legacy Agent
+		// Deck releases copied OMP JSONL files when forking, leaving the same OMP
+		// session id active in multiple instance directories. Re-key such a
+		// transcript through OMP's native fork before opening it. OMP publishes the
+		// replacement JSONL before its artifact copy finishes, so Agent Deck also
+		// completes that copy idempotently before archiving the copied root and
+		// clearing the durable migration marker. The source companion stays in place
+		// for interrupted-copy recovery; nested JSONL inside it is never resumable.
+		// Multiple distinct roots are ambiguous and must fail closed rather than
+		// guess by mtime.
+		resumeCommand := fmt.Sprintf(`%s --resume "$source_file" --session-dir "$session_dir"%s`,
+			commandPrefix, args)
+		forkCommand := fmt.Sprintf(`%s --fork "$source_file" --session-dir "$session_dir"%s`,
+			commandPrefix, args)
+		freshCommand := fmt.Sprintf(`%s --session-dir "$session_dir"%s`, commandPrefix, args)
+		script := strings.Join([]string{
+			`session_dir=%s;`,
+			`mkdir -p "$session_dir" && {`,
+			`migration_marker="$session_dir/.agent-deck-legacy-migration";`,
+			`scan_omp_roots() { source_file=; root_count=0; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ]; then source_file="$candidate"; root_count=$((root_count + 1)); fi; done; };`,
+			`find_forked_file() { forked_file=; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ] && [ "$candidate" != "$source_file" ]; then if [ -n "$forked_file" ]; then return 1; fi; forked_file="$candidate"; fi; done; [ -n "$forked_file" ] || return 2; return 0; };`,
+			`legacy_artifacts_complete() { source_artifacts=${source_file%%.jsonl}; forked_artifacts=${forked_file%%.jsonl}; if [ -e "$source_artifacts" ] && [ ! -d "$source_artifacts" ]; then echo "Failed to verify OMP legacy artifacts: $source_artifacts is not a directory" >&2; return 1; fi; if [ ! -d "$source_artifacts" ]; then return 0; fi; if [ ! -d "$forked_artifacts" ]; then return 2; fi; diff -qr "$source_artifacts" "$forked_artifacts" >/dev/null 2>&1; diff_status=$?; if [ "$diff_status" -eq 0 ]; then return 0; elif [ "$diff_status" -eq 1 ]; then return 2; fi; echo "Failed to verify OMP legacy artifacts in $forked_artifacts" >&2; return 1; };`,
+			`copy_legacy_artifacts() { source_artifacts=${source_file%%.jsonl}; forked_artifacts=${forked_file%%.jsonl}; if [ -e "$source_artifacts" ] && [ ! -d "$source_artifacts" ]; then echo "Failed to copy OMP legacy artifacts: $source_artifacts is not a directory" >&2; return 1; fi; if [ -d "$source_artifacts" ]; then if ! mkdir -p "$forked_artifacts" || ! cp -a "$source_artifacts/." "$forked_artifacts/"; then echo "Failed to copy OMP legacy artifacts from $source_artifacts to $forked_artifacts" >&2; return 1; fi; fi; return 0; };`,
+			`archive_legacy_root() { if [ -f "$source_file" ]; then archive_dir="$session_dir/.agent-deck-legacy-collisions/$session_id"; if [ -e "$archive_dir/$source_name" ]; then archive_dir="$archive_dir-$(date +%%Y%%m%%d%%H%%M%%S)-$$"; fi; if ! mkdir -p "$archive_dir"; then echo "Failed to create OMP legacy archive $archive_dir; preserved $source_file" >&2; return 1; fi; if ! mv "$source_file" "$archive_dir/$source_name"; then echo "Failed to archive copied OMP transcript $source_file" >&2; return 1; fi; fi; if ! rm -f "$migration_marker"; then echo "Failed to clear OMP legacy migration marker $migration_marker" >&2; return 1; fi; return 0; };`,
+			`finalize_legacy_migration() { if [ -z "${forked_file:-}" ]; then find_forked_file || { find_status=$?; if [ "$find_status" -eq 1 ]; then echo "Refusing to finalize OMP legacy migration: multiple replacement transcripts found in $session_dir" >&2; return 1; fi; return 2; }; fi; copy_legacy_artifacts || return 1; archive_legacy_root; };`,
+			`observe_completed_legacy_migration() { forked_file=; find_forked_file || { find_status=$?; if [ "$find_status" -eq 1 ]; then echo "Refusing to finalize OMP legacy migration: multiple replacement transcripts found in $session_dir" >&2; return 1; fi; return 2; }; legacy_artifacts_complete; artifacts_status=$?; if [ "$artifacts_status" -ne 0 ]; then return "$artifacts_status"; fi; archive_legacy_root; };`,
+			`scan_omp_roots;`,
+			`if [ -f "$migration_marker" ]; then IFS= read -r source_name < "$migration_marker" || source_name=; case "$source_name" in ""|*/*) echo "Refusing to resume OMP: invalid legacy migration marker in $session_dir" >&2; exit 1;; esac; active_file="$source_file"; source_file="$session_dir/$source_name"; session_id=${source_name%%.jsonl}; session_id=${session_id##*_}; if [ "$root_count" -eq 0 ]; then echo "Refusing to resume OMP: interrupted legacy migration has no active root transcript in $session_dir" >&2; exit 1; elif [ "$root_count" -gt 2 ]; then echo "Refusing to resume OMP: interrupted legacy migration has multiple replacement transcripts in $session_dir" >&2; exit 1; elif [ "$root_count" -eq 1 ] && [ "$active_file" = "$source_file" ]; then if ! rm -f "$migration_marker"; then echo "Refusing to resume OMP: could not clear unstarted legacy migration marker in $session_dir" >&2; exit 1; fi; scan_omp_roots; else forked_file=; if [ "$root_count" -eq 1 ]; then forked_file="$active_file"; elif [ ! -f "$source_file" ] || ! find_forked_file; then echo "Refusing to resume OMP: could not identify interrupted legacy migration transcripts in $session_dir" >&2; exit 1; fi; finalize_legacy_migration; migration_status=$?; if [ "$migration_status" -ne 0 ]; then echo "Refusing to resume OMP: could not recover interrupted legacy migration in $session_dir" >&2; exit 1; fi; scan_omp_roots; fi; fi;`,
+			`if [ "$root_count" -gt 1 ]; then echo "Refusing to resume OMP: multiple OMP root transcripts found in $session_dir" >&2; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ]; then echo " - $candidate" >&2; fi; done; exit 1; fi;`,
+			`if [ -n "$source_file" ]; then source_name=${source_file##*/}; session_id=${source_name%%.jsonl}; session_id=${session_id##*_}; agent_deck_root=${session_dir%%/*}; collision_file=; for candidate in "$agent_deck_root"/*/*.jsonl; do if [ -f "$candidate" ] && [ "$candidate" != "$source_file" ]; then candidate_name=${candidate##*/}; candidate_id=${candidate_name%%.jsonl}; candidate_id=${candidate_id##*_}; if [ "$candidate_id" = "$session_id" ]; then collision_file="$candidate"; break; fi; fi; done;`,
+			`if [ -n "$collision_file" ]; then echo "Detected copied legacy OMP identity $session_id in $collision_file; creating a unique native fork for this Agent Deck session" >&2; marker_tmp="$migration_marker.$$"; if ! printf '%%s\n' "$source_name" > "$marker_tmp" || ! mv "$marker_tmp" "$migration_marker"; then rm -f "$marker_tmp"; echo "Failed to record OMP legacy migration; preserved $source_file" >&2; exit 1; fi; migration_result="$session_dir/.agent-deck-legacy-migration-result.$$"; migration_stop="$session_dir/.agent-deck-legacy-migration-stop.$$"; ( while [ ! -e "$migration_stop" ]; do observe_completed_legacy_migration; migration_status=$?; if [ "$migration_status" -ne 2 ]; then printf '%%s\n' "$migration_status" > "$migration_result"; exit "$migration_status"; fi; sleep 0.05; done; exit 2 ) & migration_pid=$!; %s; omp_status=$?; if ! : > "$migration_stop"; then kill "$migration_pid" 2>/dev/null; wait "$migration_pid" 2>/dev/null; echo "Failed to stop OMP legacy migration watcher; inspect $migration_marker before restarting" >&2; exit 1; fi; wait "$migration_pid" 2>/dev/null; if [ -f "$migration_result" ]; then IFS= read -r migration_status < "$migration_result" || migration_status=1; else forked_file=; finalize_legacy_migration; migration_status=$?; fi; if ! rm -f "$migration_result" "$migration_stop"; then echo "Failed to clean OMP legacy migration state in $session_dir" >&2; exit 1; fi; if [ "$migration_status" -eq 2 ]; then echo "OMP did not create a replacement transcript for copied identity $session_id; preserved $source_file" >&2; exit 1; elif [ "$migration_status" -ne 0 ]; then echo "Failed to complete copied OMP identity migration $session_id; inspect $migration_marker before restarting" >&2; exit 1; fi; exit "$omp_status"; else %s; fi; else %s; fi;`,
+			`}`,
+		}, " ")
+		return envPrefix + fmt.Sprintf(script, sessionDir, forkCommand, resumeCommand, freshCommand)
 	}
 
 	setup := "mkdir -p \"$session_dir\""
@@ -2756,7 +2786,7 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	parentSessionDir := ompAgentDeckSessionDirExpr(i.ID)
 	sessionDir := ompAgentDeckSessionDirExpr(target.ID)
 	return target.buildEnvSourceCommand() + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\" && { source_file=; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ] && { [ -z \"$source_file\" ] || [ \"$candidate\" -nt \"$source_file\" ]; }; then source_file=\"$candidate\"; fi; done; if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s; }",
+		"parent_session_dir=%s; session_dir=%s; { source_file=; root_count=0; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ]; then source_file=\"$candidate\"; root_count=$((root_count + 1)); fi; done; if [ \"$root_count\" -gt 1 ]; then echo \"Refusing to fork OMP: multiple OMP root transcripts found in $parent_session_dir\" >&2; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ]; then echo \" - $candidate\" >&2; fi; done; exit 1; fi; if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\" && AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s; }",
 		parentSessionDir, sessionDir, shellescape.Quote(target.ID),
 		shellescape.Quote(sessionProfileEnvValue()), cmd, args), nil
 }
@@ -10683,12 +10713,13 @@ func (i *Instance) CanForkOmp() bool {
 		if err != nil {
 			return false
 		}
+		rootCount := 0
 		for _, entry := range entries {
 			if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".jsonl") {
-				return true
+				rootCount++
 			}
 		}
-		return false
+		return rootCount == 1
 	}
 	return true
 }
