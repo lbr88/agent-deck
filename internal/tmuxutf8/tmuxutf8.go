@@ -72,11 +72,8 @@ func Prepend(args []string) []string {
 		copy(out, args)
 		return out
 	}
-	if len(args) == int(^uint(0)>>1) {
-		panic("tmux argument list too large")
-	}
-	out := make([]string, 0, len(args)+1)
-	out = append(out, Flag)
+	// append checks slice growth without an overflowing len(args)+1 capacity.
+	out := []string{Flag}
 	return append(out, args...)
 }
 

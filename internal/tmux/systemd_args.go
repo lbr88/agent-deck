@@ -83,8 +83,8 @@ func protectSystemdRunArgs(args []string) []string {
 		// Unknown clients fail safely: if this flag is unsupported, Start's
 		// existing fallback eventually runs direct tmux with the untouched
 		// arguments. Never guess a scope's version-dependent default.
-		protected := make([]string, 0, len(args)+1)
-		protected = append(protected, args[:commandIndex]...)
+		// Let append perform checked growth; do not compute len(args)+1.
+		protected := append([]string(nil), args[:commandIndex]...)
 		protected = append(protected, "--expand-environment=no")
 		return append(protected, args[commandIndex:]...)
 	}

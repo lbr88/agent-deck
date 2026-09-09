@@ -6122,11 +6122,11 @@ func (s *Session) GetWorkDir() string {
 
 	// Bounded: a wedged server / destroyed target must not hang this poll (see
 	// tmuxPollTimeout). Bare .Output() here was one of the orphan-spin sources.
-	output, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", "#{pane_current_path}")
+	output, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", panePathFormat)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(output))
+	return parsePanePathOutput(string(output))
 }
 
 // IsAltScreen reports whether the pane is currently showing the alternate
@@ -6202,8 +6202,8 @@ func ListAllSessions() ([]*Session, error) {
 				SocketName:  socket,
 			}
 			// Try to get working directory (bounded — see tmuxPollTimeout)
-			if workDirOutput, err := runBoundedOutput(socket, "display-message", "-t", line, "-p", "#{pane_current_path}"); err == nil {
-				sess.WorkDir = strings.TrimSpace(string(workDirOutput))
+			if workDirOutput, err := runBoundedOutput(socket, "display-message", "-t", line, "-p", panePathFormat); err == nil {
+				sess.WorkDir = parsePanePathOutput(string(workDirOutput))
 			}
 			sessions = append(sessions, sess)
 		}
@@ -6895,7 +6895,8 @@ func GetActiveSession() (string, error) {
 // DiscoverAllTmuxSessions returns all tmux sessions (including non-Agent Deck ones)
 func DiscoverAllTmuxSessions() ([]*Session, error) {
 	// Bounded — see tmuxPollTimeout.
-	output, err := runBoundedOutput(DefaultSocketName(), "list-sessions", "-F", "#{session_name}:#{pane_current_path}")
+	output, err := runBoundedOutput(DefaultSocketName(), "list-sessions", "-F",
+		tmuxFmt("#{version}", "#{session_name}:#{pane_current_path}"))
 	if err != nil {
 		// No sessions exist
 		if strings.Contains(err.Error(), "no server running") ||
@@ -6905,15 +6906,19 @@ func DiscoverAllTmuxSessions() ([]*Session, error) {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	lines := strings.Split(strings.Trim(string(output), "\n\r\t\v\f"), "\n")
 	var sessions []*Session
 
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
+		payload, ok := parseVersionedTmuxOutput(line)
+		if !ok {
+			continue
+		}
 
-		parts := strings.SplitN(line, ":", 2)
+		parts := strings.SplitN(payload, ":", 2)
 		sessionName := parts[0]
 		workDir := ""
 		if len(parts) == 2 {

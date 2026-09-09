@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve prior history during fresh starts and retain legacy migration recovery state until the replacement conversation is acknowledged.
 - Report OMP startup, identity-tracking and attach failures through CLI, TUI and hub previews, with bounded diagnostics and execution-host ownership validation.
 - Preserve shell variables through systemd service/scope launches and retain diagnostics from immediately exiting provider processes.
+- Read legacy tmux working-directory reports without confusing escaped dollar signs with deleted or different directories, including session discovery and follow-directory reads.
 - Run bundled tracker tests in local and GitHub gates; respect configured temporary storage during CSS verification and clean isolated test homes.
+- Pin the same Go-compatible vulnerability scanner in local and GitHub checks instead of relying on a stale installed tool locally and an incompatible latest release in CI.
 
 ## [1.13.4] - 2026-09-07
 

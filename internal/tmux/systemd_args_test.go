@@ -137,6 +137,13 @@ func TestSystemdArgumentProtectionVersionCompatibility(t *testing.T) {
 			direct := newSpawnCommand("tmux", stripSystemdRunPrefix(raw)...)
 			require.Equal(t, command, direct.Args[len(direct.Args)-1], "direct fallback must receive unescaped bash source")
 			require.Equal(t, "/work/$literal", argumentAfter(t, direct.Args, "-c"))
+			if tc.wantFlag || tc.mode == "service" {
+				reusable := make([]string, len(raw), len(raw)+4)
+				copy(reusable, raw)
+				protected := protectSystemdRunArgs(reusable)
+				protected[len(protected)-1] = "changed output"
+				require.Equal(t, original, reusable, "protected arguments must not alias the reusable source")
+			}
 		})
 	}
 }
