@@ -100,6 +100,7 @@ if [ "$go_changed" = true ]; then
   run golangci-lint run --timeout=5m
 
   # Match CI's Go-1.25-compatible scanner, regardless of an older binary on PATH.
+  # Go caches its build; a cold cache compiles it without replacing global tools.
   run go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   ensure_go_tool gotestsum gotest.tools/gotestsum@v1.13.0

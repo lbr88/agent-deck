@@ -244,7 +244,9 @@ func sameDirectory(a, b string) bool {
 // server. Upstream source for the behavior and fix:
 //   - https://github.com/tmux/tmux/blob/3.4/utf8.c#L508-L541
 //   - https://github.com/tmux/tmux/blob/3.5/utf8.c#L536-L569
-var panePathFormat = tmuxFmt("#{version}", "#{pane_current_path}")
+const tmuxPathOutputPrefix = "AD_CWD_V1"
+
+var panePathFormat = tmuxFmt(tmuxPathOutputPrefix, "#{version}", "#{pane_current_path}")
 
 // parsePanePathOutput removes only tmux's known pre-3.5 format-output escape.
 // Unknown and modern versions are left byte-for-byte alone so a genuine
@@ -257,14 +259,19 @@ func parsePanePathOutput(output string) string {
 	return payload
 }
 
-// parseVersionedTmuxOutput parses "#{version}|<payload>" and reverses the
+// parseVersionedTmuxOutput parses "AD_CWD_V1|#{version}|<payload>" and reverses the
 // exact output transformation used by tmux 3.0 through 3.4. The printable
-// separator survives tmux's no-client sanitization; SplitN preserves any
-// separator bytes in the payload.
+// marker identifies the response independently of the version spelling, so
+// custom/future versions retain their raw paths without accepting an unframed
+// path that happens to contain a pipe. Cut preserves separator bytes in payload.
 func parseVersionedTmuxOutput(output string) (string, bool) {
 	line := strings.Trim(output, "\n\r\t\v\f")
-	version, payload, ok := strings.Cut(line, tmuxFieldSep)
-	if !ok || !isTmuxVersionField(version) {
+	framed, ok := strings.CutPrefix(line, tmuxPathOutputPrefix+tmuxFieldSep)
+	if !ok {
+		return "", false
+	}
+	version, payload, ok := strings.Cut(framed, tmuxFieldSep)
+	if !ok || version == "" || strings.ContainsAny(version, "\x00\r\n\t") {
 		return "", false
 	}
 	if tmuxVersionEscapesFormatDollars(version) {
@@ -273,31 +280,13 @@ func parseVersionedTmuxOutput(output string) (string, bool) {
 	return payload, true
 }
 
-func isTmuxVersionField(version string) bool {
-	if version == "master" || version == "next" {
-		return true
-	}
-	if strings.HasPrefix(version, "next-") {
-		version = strings.TrimPrefix(version, "next-")
-	}
-	_, _, suffix, ok := splitTmuxVersion(version)
-	if !ok {
-		return false
-	}
-	for i := 0; i < len(suffix); i++ {
-		if suffix[i] < 'a' || suffix[i] > 'z' {
-			return false
-		}
-	}
-	return true
-}
-
 func tmuxVersionEscapesFormatDollars(version string) bool {
 	major, minor, suffix, ok := splitTmuxVersion(version)
 	// Released tmux patch versions use at most one trailing letter (3.2a,
 	// 3.4a). A longer/custom suffix is not one of the source versions whose
 	// serializer we verified, so leave its payload untouched.
-	return ok && major == 3 && minor < 5 && len(suffix) <= 1
+	patch := suffix == "" || (len(suffix) == 1 && suffix[0] >= 'a' && suffix[0] <= 'z')
+	return ok && major == 3 && minor < 5 && patch
 }
 
 // decodeLegacyTmuxFormatDollars reverses the branch in tmux <=3.4's

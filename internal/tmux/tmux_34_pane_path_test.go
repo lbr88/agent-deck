@@ -58,11 +58,26 @@ func TestParsePanePathOutput_Tmux34DollarSerialization(t *testing.T) {
 			output: `3.4custom|/work/real\$slash`,
 			want:   `/work/real\$slash`,
 		},
+		{
+			name:   "vendor fork version keeps its path without guessing its serializer",
+			output: `3.4-vendor.2|/work/real\$slash|extra:part`,
+			want:   `/work/real\$slash|extra:part`,
+		},
+		{
+			name:   "future nonnumeric version keeps its path",
+			output: `vendor-next|/work/real\$slash`,
+			want:   `/work/real\$slash`,
+		},
+		{
+			name:   "custom punctuation suffix is not a stock legacy patch",
+			output: `3.4+|/work/real\$slash`,
+			want:   `/work/real\$slash`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, parsePanePathOutput(tt.output))
+			assert.Equal(t, tt.want, parsePanePathOutput(tmuxPathOutputPrefix+"|"+tt.output))
 		})
 	}
 }
@@ -77,9 +92,9 @@ func TestParsePanePathOutput_DistinguishesBackslashDollarSiblingDirectories(t *t
 	require.NoError(t, os.Mkdir(plain, 0o755))
 	require.NoError(t, os.Mkdir(backslashed, 0o755))
 
-	legacyPlain := parsePanePathOutput("3.4|" + filepath.Join(root, `project \${AD_LITERAL}`))
-	legacyBackslashed := parsePanePathOutput("3.4|" + filepath.Join(root, `project \\${AD_LITERAL}`))
-	modernBackslashed := parsePanePathOutput("3.5|" + filepath.Join(root, `project \${AD_LITERAL}`))
+	legacyPlain := parsePanePathOutput(tmuxPathOutputPrefix + "|3.4|" + filepath.Join(root, `project \${AD_LITERAL}`))
+	legacyBackslashed := parsePanePathOutput(tmuxPathOutputPrefix + "|3.4|" + filepath.Join(root, `project \\${AD_LITERAL}`))
+	modernBackslashed := parsePanePathOutput(tmuxPathOutputPrefix + "|3.5|" + filepath.Join(root, `project \${AD_LITERAL}`))
 
 	assert.Equal(t, plain, legacyPlain)
 	assert.Equal(t, paneCwdOK, classifyPaneCwd(plain, legacyPlain))
@@ -90,13 +105,16 @@ func TestParsePanePathOutput_DistinguishesBackslashDollarSiblingDirectories(t *t
 }
 
 func TestParsePanePathOutput_PreservesPathSpacesAndControlFraming(t *testing.T) {
-	assert.Equal(t, "  /work/trailing  ", parsePanePathOutput("3.4|  /work/trailing  \r\n"))
+	assert.Equal(t, "  /work/trailing  ", parsePanePathOutput(tmuxPathOutputPrefix+"|3.4|  /work/trailing  \r\n"))
 }
 
 func TestParsePanePathOutput_RejectsMissingVersionFrame(t *testing.T) {
 	assert.Empty(t, parsePanePathOutput(`/work/\$literal`))
 	assert.Empty(t, parsePanePathOutput(`/work/name|part`))
 	assert.Empty(t, parsePanePathOutput(`|/work/name`))
+	assert.Empty(t, parsePanePathOutput(`3.4|/work/name`))
+	assert.Empty(t, parsePanePathOutput(tmuxPathOutputPrefix+`||/work/name`))
+	assert.Empty(t, parsePanePathOutput(tmuxPathOutputPrefix+`|3.4`))
 }
 
 // Exercise every production consumer against the installed tmux. GitHub's

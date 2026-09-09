@@ -6896,7 +6896,7 @@ func GetActiveSession() (string, error) {
 func DiscoverAllTmuxSessions() ([]*Session, error) {
 	// Bounded — see tmuxPollTimeout.
 	output, err := runBoundedOutput(DefaultSocketName(), "list-sessions", "-F",
-		tmuxFmt("#{version}", "#{session_name}:#{pane_current_path}"))
+		tmuxFmt(tmuxPathOutputPrefix, "#{version}", "#{session_name}:#{pane_current_path}"))
 	if err != nil {
 		// No sessions exist
 		if strings.Contains(err.Error(), "no server running") ||
