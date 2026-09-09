@@ -12,7 +12,7 @@ import (
 
 func TestOmpExecutionHostIdentityACK(t *testing.T) {
 	for _, route := range []string{"ssh", "docker"} {
-		for _, state := range []string{"loading", "saved", "pending", "title-warning", "identity-error", "wrong-id", "missing-binding", "malformed-status", "empty-status", "NUL-status", "NUL-generation", "trailing-generation"} {
+		for _, state := range []string{"loading", "saved", "pending", "title-warning", "identity-error", "wrong-id", "missing-binding", "malformed-status", "empty-status", "NUL-status", "NUL-generation", "trailing-generation", "missing-newline-generation", "extra-newline-generation"} {
 			t.Run(route+"/"+state, func(t *testing.T) {
 				targetHome := t.TempDir()
 				const id, generation = "remote-ack", "current-ack-generation"
@@ -31,6 +31,10 @@ func TestOmpExecutionHostIdentityACK(t *testing.T) {
 					write(filepath.Join(dir, ".agent-deck-launch-generation"), []byte("current-ack-\x00generation\n"))
 				} else if state == "trailing-generation" {
 					write(filepath.Join(dir, ".agent-deck-launch-generation"), []byte(generation+"\ntrailing-fragment"))
+				} else if state == "missing-newline-generation" {
+					write(filepath.Join(dir, ".agent-deck-launch-generation"), []byte(generation))
+				} else if state == "extra-newline-generation" {
+					write(filepath.Join(dir, ".agent-deck-launch-generation"), []byte(generation+"\n\n"))
 				}
 				file := filepath.Join(dir, "current.jsonl")
 				bindingState := "saved"
@@ -78,7 +82,7 @@ func TestOmpExecutionHostIdentityACK(t *testing.T) {
 					container = "isolated-ack-container"
 				}
 				got := readOmpTargetIdentityHealth(id, host, container)
-				if got.Generation != generation && state != "NUL-generation" && state != "trailing-generation" {
+				if got.Generation != generation && !strings.HasSuffix(state, "-generation") {
 					t.Fatalf("lost exact target launch generation: %+v", got)
 				}
 				switch state {

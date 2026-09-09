@@ -51,6 +51,9 @@ if [ -e "$session_dir/.agent-deck-launch-generation" ] || [ -L "$session_dir/.ag
   [ "$generation_size" -le 16384 ] || { echo 'Invalid OMP launch generation' >&2; exit 1; }
   generation_snapshot=$(head -c 16385 "$generation_file"; printf '.') 2>/dev/null
   [ "$(printf '%s' "$generation_snapshot" | LC_ALL=C wc -c)" -eq "$((generation_size+1))" ] || { echo 'Invalid OMP launch generation bytes' >&2; exit 1; }
+  # The sentinel preserves file newlines above. This command substitution drops
+  # trailing newlines, so size-1 below requires exactly one final LF, not zero/two.
+  # TestOmpExecutionHostIdentityACK executes this script for SSH and Docker.
   current_generation=$(printf '%s' "$generation_snapshot" | head -c "$generation_size")
   [ "$(printf '%s' "$current_generation" | LC_ALL=C wc -c)" -eq "$((generation_size-1))" ] || { echo 'Invalid OMP launch generation framing' >&2; exit 1; }
   case "$current_generation" in ""|*[!A-Za-z0-9._-]*) echo 'Invalid OMP launch generation' >&2; exit 1;; esac
