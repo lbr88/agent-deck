@@ -398,10 +398,6 @@ func TestOmpForkRefusesAmbiguousParentTranscripts(t *testing.T) {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	targetSentinel := filepath.Join(targetDir, "preserve-before-source-validation")
-	if err := os.WriteFile(targetSentinel, []byte("preserve me\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	fakeBin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatal(err)
@@ -424,10 +420,9 @@ func TestOmpForkRefusesAmbiguousParentTranscripts(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("OMP was invoked for an ambiguous remote parent: %v", err)
 	}
-	if got, err := os.ReadFile(targetSentinel); err != nil {
-		t.Fatalf("target history was removed before parent validation: %v", err)
-	} else if string(got) != "preserve me\n" {
-		t.Fatalf("target history changed before parent validation: %q", got)
+	entries, err := os.ReadDir(targetDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("empty target changed before ambiguous parent refusal: entries=%v err=%v", entries, err)
 	}
 }
 

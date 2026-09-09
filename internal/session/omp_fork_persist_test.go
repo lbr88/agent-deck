@@ -2,11 +2,13 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
@@ -238,5 +240,139 @@ func TestOmpPendingForkPersistenceLeavesOtherProvidersTransient(t *testing.T) {
 				t.Fatalf("non-OMP reader restored an OMP recipe: %q", got)
 			}
 		})
+	}
+}
+
+func TestCheckpointOmpForkBeforeStartPersistsExactPendingRecipe(t *testing.T) {
+	storage := newTestStorage(t)
+	child := NewInstanceWithTool("checkpointed OMP child", t.TempDir(), "omp")
+	child.Command = "omp"
+	child.IsForkAwaitingStart = true
+	child.ForkStartCommand = "exact native fork recipe ${value:-$$}"
+
+	preserve, err := storage.CheckpointOmpForkBeforeStart(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preserve {
+		t.Fatal("successful OMP checkpoint was not marked recoverable")
+	}
+	storage = reopenOmpForkTestStorage(t, storage)
+	loaded, err := storage.Load()
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("Load checkpoint: instances=%d err=%v", len(loaded), err)
+	}
+	if loaded[0].ID != child.ID || !loaded[0].IsForkAwaitingStart || loaded[0].ForkStartCommand != child.ForkStartCommand {
+		t.Fatalf("checkpoint did not persist exact pending recipe: %+v", loaded[0])
+	}
+}
+
+func TestCheckpointOmpForkBeforeStartLeavesOtherProvidersUnchanged(t *testing.T) {
+	storage := newTestStorage(t)
+	child := NewInstanceWithTool("transient Pi child", t.TempDir(), "pi")
+	child.IsForkAwaitingStart = true
+	child.ForkStartCommand = "pi --fork parent"
+
+	preserve, err := storage.CheckpointOmpForkBeforeStart(child)
+	if err != nil || preserve {
+		t.Fatalf("non-OMP fork was checkpointed: preserve=%t err=%v", preserve, err)
+	}
+	exists, err := storage.InstanceExists(child.ID)
+	if err != nil || exists {
+		t.Fatalf("non-OMP checkpoint changed storage: exists=%t err=%v", exists, err)
+	}
+}
+
+func TestFinalizeOmpForkLaunchPreservesConcurrentRename(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	storage := newTestStorage(t)
+	child := NewInstanceWithTool("stale launch title", t.TempDir(), "omp")
+	child.Command = "omp"
+	child.IsForkAwaitingStart = true
+	child.ForkStartCommand = "native fork recipe"
+	if _, err := storage.CheckpointOmpForkBeforeStart(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.GetDB().WriteSessionTitle(child.ID, "user rename during launch"); err != nil {
+		t.Fatal(err)
+	}
+
+	child.mu.Lock()
+	child.IsForkAwaitingStart = false
+	child.ForkStartCommand = ""
+	child.Status = StatusRunning
+	child.LastStartedAt = time.Unix(1_800_000_222, 0).UTC()
+	child.SandboxContainer = "omp-sandbox"
+	child.mu.Unlock()
+	if err := storage.FinalizeOmpForkLaunch(child); err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := storage.GetDB().LoadInstanceByID(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Title != "user rename during launch" {
+		t.Fatalf("finalization replayed stale title %q", row.Title)
+	}
+	titleIntent, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".omp", "agent-deck", child.ID, ".agent-deck-title.json"))
+	if err != nil || !strings.Contains(string(titleIntent), "user rename during launch") {
+		t.Fatalf("newer persisted title was not reapplied to OMP intent: %s (%v)", titleIntent, err)
+	}
+	if got := readOmpPendingForkFromToolData(row.ToolData, row.Tool); got != "" {
+		t.Fatalf("finalization did not clear pending recipe: %q", got)
+	}
+	if row.TmuxSession != child.GetTmuxSession().Name || row.Status != string(StatusRunning) {
+		t.Fatalf("finalization runtime mismatch: %+v", row)
+	}
+}
+
+func TestFinalizeOmpForkLaunchDoesNotResurrectDeletedCheckpoint(t *testing.T) {
+	storage := newTestStorage(t)
+	child := NewInstanceWithTool("deleted while loading", t.TempDir(), "omp")
+	child.Command = "omp"
+	child.IsForkAwaitingStart = true
+	child.ForkStartCommand = "native fork recipe"
+	if _, err := storage.CheckpointOmpForkBeforeStart(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.GetDB().DeleteInstance(child.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := storage.FinalizeOmpForkLaunch(child)
+	if !errors.Is(err, statedb.ErrInstanceNotStored) {
+		t.Fatalf("error = %v, want ErrInstanceNotStored", err)
+	}
+	exists, loadErr := storage.InstanceExists(child.ID)
+	if loadErr != nil || exists {
+		t.Fatalf("finalization resurrected deleted child: exists=%t err=%v", exists, loadErr)
+	}
+}
+
+func TestReconcileOmpForkMetadataRejectsReusedNonOmpRow(t *testing.T) {
+	storage := newTestStorage(t)
+	child := NewInstanceWithTool("checkpointed", t.TempDir(), "omp")
+	child.Command = "omp"
+	child.IsForkAwaitingStart = true
+	child.ForkStartCommand = "native fork recipe"
+	if _, err := storage.CheckpointOmpForkBeforeStart(child); err != nil {
+		t.Fatal(err)
+	}
+	row, err := storage.GetDB().LoadInstanceByID(child.ID)
+	if err != nil || row == nil {
+		t.Fatalf("load row = (%v, %v)", row, err)
+	}
+	row.Tool = "claude"
+	row.Title = "other tool"
+	if err := storage.GetDB().SaveInstance(row); err != nil {
+		t.Fatal(err)
+	}
+	exists, err := storage.ReconcileOmpForkMetadata(child)
+	if err == nil || exists {
+		t.Fatalf("reconcile reused row = (%t, %v), want false + error", exists, err)
+	}
+	if child.Title == "other tool" {
+		t.Fatal("reconciliation copied metadata from a non-OMP row")
 	}
 }

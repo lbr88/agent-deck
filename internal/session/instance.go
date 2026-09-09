@@ -2709,8 +2709,11 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		return envPrefix + commandPrefix + args
 	}
 
-	envPrefix += i.ompIdentityLaunchSetup()
-	args += ompIdentityArgs
+	identityAckRequired := !ompCommandUsesNonTUI(cmd)
+	envPrefix += i.ompIdentityLaunchSetup(identityAckRequired)
+	if identityAckRequired {
+		args += ompIdentityArgs
+	}
 	sessionDir := ompAgentDeckSessionDirExpr(i.ID)
 	fresh := i.ompFreshStart
 	i.ompFreshStart = false
@@ -2721,6 +2724,33 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		opts.FromClaude = false
 		opts.FromCodex = false
 		_ = i.SetOmpOptions(opts)
+	}
+	if !identityAckRequired && !fresh && !importing {
+		// Print/RPC launches have no interactive extension lifecycle, so they
+		// must never rotate the TUI generation or enter a native migration that
+		// requires an eventual identity ACK. They still use the same exact
+		// binding selector and sibling-ownership validation as interactive OMP.
+		resumeCommand := fmt.Sprintf(`%s --resume "$source_file" --session-dir "$session_dir"%s`,
+			commandPrefix, args)
+		freshCommand := fmt.Sprintf(`%s --session-dir "$session_dir"%s`, commandPrefix, args)
+		script := strings.Join([]string{
+			fmt.Sprintf(`session_dir=%s; managed_root=${session_dir%%/*}; omp_root=${managed_root%%/*};`, sessionDir),
+			`if [ -L "$omp_root" ] || { [ -e "$omp_root" ] && [ ! -d "$omp_root" ]; }; then echo 'Invalid OMP data root; history preserved' >&2; exit 1; fi;`,
+			`if [ -L "$managed_root" ] || { [ -e "$managed_root" ] && [ ! -d "$managed_root" ]; }; then echo 'Invalid OMP managed session root; history preserved' >&2; exit 1; fi;`,
+			`mkdir -p "$managed_root" || exit 1;`,
+			`if [ -L "$managed_root" ] || [ ! -d "$managed_root" ]; then echo 'Invalid OMP managed session root; history preserved' >&2; exit 1; fi;`,
+			`if [ -L "$session_dir" ] || { [ -e "$session_dir" ] && [ ! -d "$session_dir" ]; }; then echo 'Invalid OMP session row; history preserved' >&2; exit 1; fi;`,
+			`if [ ! -e "$session_dir" ]; then mkdir "$session_dir" || exit 1; fi;`,
+			`real_managed_root=$(CDPATH= cd -P -- "$managed_root" 2>/dev/null && pwd -P) || exit 1; real_session_dir=$(CDPATH= cd -P -- "$session_dir" 2>/dev/null && pwd -P) || exit 1;`,
+			`if [ "$real_session_dir" != "$real_managed_root/${session_dir##*/}" ]; then echo 'OMP session row crosses another managed entry; history preserved' >&2; exit 1; fi;`,
+			`migration_marker="$session_dir/.agent-deck-legacy-migration"; if [ -e "$migration_marker" ] || [ -L "$migration_marker" ]; then echo 'OMP legacy identity migration requires an interactive OMP command; history preserved' >&2; exit 1; fi;`,
+			`source_file=; root_count=0; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ]; then source_file="$candidate"; root_count=$((root_count + 1)); fi; done;`,
+			ompBindingSelectionShell(),
+			`if [ "$root_count" -gt 1 ]; then echo "Refusing to resume OMP: multiple OMP root transcripts found in $session_dir; history preserved" >&2; exit 1; fi;`,
+			`if [ -n "$binding_file" ] && [ "${bound_state:-}" = pending ] && [ -z "$source_file" ]; then echo 'Pending OMP identity requires an interactive OMP command; history preserved' >&2; exit 1; fi;`,
+			fmt.Sprintf(`if [ -n "$source_file" ]; then source_name=${source_file##*/}; session_id=${source_name%%.jsonl}; session_id=${session_id##*_}; collision_file=; for candidate in "$managed_root"/*/*.jsonl; do if [ -f "$candidate" ] && [ "$candidate" != "$source_file" ]; then candidate_name=${candidate##*/}; candidate_id=${candidate_name%%.jsonl}; candidate_id=${candidate_id##*_}; if [ "$candidate_id" = "$session_id" ]; then collision_file="$candidate"; break; fi; fi; done; if [ -n "$collision_file" ]; then echo "Copied legacy OMP identity $session_id requires an interactive OMP command; history preserved" >&2; exit 1; fi; %s; else %s; fi;`, resumeCommand, freshCommand),
+		}, " ")
+		return envPrefix + script
 	}
 
 	if !fresh && !importing {
@@ -2784,12 +2814,18 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	if target == nil {
 		return "", fmt.Errorf("cannot build OMP fork command: target instance is nil")
 	}
-	if !i.CanForkOmp() {
-		return "", fmt.Errorf("cannot fork: no Agent Deck OMP session directory")
-	}
 	cmd := strings.TrimSpace(baseCommand)
 	if cmd == "" {
 		cmd = "omp"
+	}
+	if ompCommandUsesNonTUI(cmd) {
+		return "", fmt.Errorf("cannot fork OMP with a non-interactive command; an interactive OMP command is required to acknowledge the child identity, and parent history is preserved")
+	}
+	// A retained fork recipe may already point at an independently acknowledged
+	// child. That child is safely resumable even if the original parent has
+	// since been removed; only a genuinely new/empty target requires the parent.
+	if !i.CanForkOmp() && !target.CanForkOmp() {
+		return "", fmt.Errorf("cannot fork: no Agent Deck OMP session directory")
 	}
 	opts := target.resolvedOmpOptions()
 	opts.NoSession = false
@@ -2800,7 +2836,7 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	targetSessionDir := ompAgentDeckSessionDirExpr(target.ID)
 	commandPrefix := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s",
 		shellescape.Quote(target.ID), shellescape.Quote(sessionProfileEnvValue()), cmd)
-	launchSetup := target.ompIdentityLaunchSetup()
+	launchSetup := target.ompIdentityLaunchSetup(true)
 
 	// Resolve both identities before rotating the target launch generation. A
 	// nonempty target is retry/recovery state: resume its acknowledged binding
@@ -2809,11 +2845,6 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	script := strings.Join([]string{
 		`unset AGENTDECK_OMP_SOURCE_BINDING AGENTDECK_OMP_SOURCE_ERROR AGENTDECK_OMP_LAUNCH_ID AGENTDECK_OMP_DIR;`,
 		`scan_omp_roots() { source_file=; root_count=0; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then source_file="$candidate"; root_count=$((root_count + 1)); fi; done; };`,
-		fmt.Sprintf(`parent_session_dir=%s; session_dir="$parent_session_dir"; scan_omp_roots;`, parentSessionDir),
-		ompBindingSelectionShell(),
-		`if [ "$root_count" -gt 1 ]; then echo "Refusing to fork OMP: multiple OMP root transcripts found in $parent_session_dir; history preserved" >&2; for candidate in "$parent_session_dir"/*.jsonl; do if [ -f "$candidate" ]; then echo " - $candidate" >&2; fi; done; exit 1; fi;`,
-		`if [ -z "$source_file" ]; then echo "No acknowledged OMP session file found in $parent_session_dir; history preserved" >&2; exit 1; fi;`,
-		`parent_source_file=$source_file;`,
 		fmt.Sprintf(`target_session_dir=%s; session_dir="$target_session_dir"; target_mode=; target_source_file=;`, targetSessionDir),
 		`if [ -L "$session_dir" ] || { [ -e "$session_dir" ] && [ ! -d "$session_dir" ]; }; then echo "Refusing to fork OMP: target session path is not a real directory: $session_dir; history preserved" >&2; exit 1; fi;`,
 		`if [ ! -e "$session_dir" ]; then target_mode=fork; else if target_entry=$(find "$session_dir" -mindepth 1 -maxdepth 1 -print -quit 2>&1); then target_scan_status=0; else target_scan_status=$?; fi; if [ "$target_scan_status" -ne 0 ]; then echo "Refusing to fork OMP: unable to inspect existing target $session_dir: $target_entry; history preserved" >&2; exit 1; elif [ -z "$target_entry" ]; then target_mode=fork; else scan_omp_roots;`,
@@ -2821,6 +2852,11 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 		`if [ -z "$binding_file" ]; then echo "Refusing to fork OMP: target contains unbound history without an acknowledged active conversation: $session_dir; history preserved" >&2; exit 1; fi;`,
 		`if [ "$bound_state" != saved ] || [ -z "$source_file" ]; then echo "Refusing to fork OMP: target active conversation is pending or unavailable: $session_dir; history preserved" >&2; exit 1; fi;`,
 		`target_mode=resume; target_source_file=$source_file; fi; fi;`,
+		fmt.Sprintf(`if [ "$target_mode" = fork ]; then parent_session_dir=%s; session_dir="$parent_session_dir"; scan_omp_roots;`, parentSessionDir),
+		ompBindingSelectionShell(),
+		`if [ "$root_count" -gt 1 ]; then echo "Refusing to fork OMP: multiple OMP root transcripts found in $parent_session_dir; history preserved" >&2; for candidate in "$parent_session_dir"/*.jsonl; do if [ -f "$candidate" ]; then echo " - $candidate" >&2; fi; done; exit 1; fi;`,
+		`if [ -z "$source_file" ]; then echo "No acknowledged OMP session file found in $parent_session_dir; history preserved" >&2; exit 1; fi; parent_source_file=$source_file; fi;`,
+		`session_dir="$target_session_dir";`,
 		launchSetup,
 		fmt.Sprintf(`if [ "$target_mode" = resume ]; then %s --resume "$target_source_file" --session-dir "$session_dir"%s; else %s --fork "$parent_source_file" --session-dir "$session_dir"%s; fi;`, commandPrefix, args, commandPrefix, args),
 	}, " ")
@@ -5592,13 +5628,16 @@ func (i *Instance) StartWithMessage(message string) error {
 	// anything (PR #1942 review, P1a). The DeepSeek web profile is an HTTP
 	// server with no terminal prompt: the post-start send path below would type
 	// the message into the server process's stdin and report success, which is
-	// silent data loss — the worst failure class here. Every other tool returns
-	// nil from this check, so nothing else changes.
+	// silent data loss — the worst failure class here. Other prompt-bearing
+	// tools return nil from this check, so nothing else changes.
 	//
 	// Refusing before the spawn matters as much as refusing at all: reporting
 	// failure while leaving a running server behind is its own trap.
 	if message != "" {
 		if err := i.PromptDeliveryError(); err != nil {
+			if i.Tool == "omp" {
+				i.recordPrepareFailure(i.Command, err)
+			}
 			return err
 		}
 	}
@@ -10279,6 +10318,14 @@ func (i *Instance) restart(env map[string]string) error {
 // This recreates the tmux session and clears the stored tool session binding first,
 // so the next start gets a brand-new tool session ID.
 func (i *Instance) RestartFresh() error {
+	if i.Tool == "omp" {
+		opts := i.resolvedOmpOptions()
+		if !opts.NoSession && ompCommandUsesNonTUI(i.Command) {
+			err := fmt.Errorf("starting a fresh OMP conversation requires an interactive OMP command so its identity can be acknowledged; the running process and history are preserved")
+			i.recordPrepareFailure(i.Command, err)
+			return err
+		}
+	}
 	i.prepareRestartMCPConfig()
 
 	i.mu.Lock()
@@ -10801,7 +10848,7 @@ func (i *Instance) CanForkPi() bool {
 // forked. OMP stores task/subagent transcripts in nested companion directories;
 // those are not valid root sessions for Agent Deck to fork.
 func (i *Instance) CanForkOmp() bool {
-	if i.Tool != "omp" || i.ID == "" || i.resolvedOmpOptions().NoSession {
+	if i.Tool != "omp" || i.ID == "" || i.resolvedOmpOptions().NoSession || ompCommandUsesNonTUI(i.Command) {
 		return false
 	}
 	if i.SSHHost == "" && !i.IsSandboxed() {
@@ -11212,6 +11259,13 @@ func (i *Instance) CreateForkedOmpInstanceWithOptions(
 	newTitle, newGroupPath string,
 	opts *ClaudeOptions,
 ) (*Instance, string, error) {
+	baseCommand := strings.TrimSpace(i.Command)
+	if baseCommand == "" {
+		baseCommand = "omp"
+	}
+	if ompCommandUsesNonTUI(baseCommand) {
+		return nil, "", fmt.Errorf("cannot fork OMP with a non-interactive command; an interactive OMP command is required to acknowledge the child identity, and parent history is preserved")
+	}
 	projectPath := i.ProjectPath
 	if opts != nil && opts.WorkDir != "" {
 		projectPath = opts.WorkDir
@@ -11224,10 +11278,6 @@ func (i *Instance) CreateForkedOmpInstanceWithOptions(
 	}
 	forked.Tool = "omp"
 	forked.Wrapper = i.Wrapper
-	baseCommand := strings.TrimSpace(i.Command)
-	if baseCommand == "" {
-		baseCommand = "omp"
-	}
 	forked.Command = baseCommand
 	if parentOpts := i.GetOmpOptions(); parentOpts != nil {
 		copyOpts := *parentOpts

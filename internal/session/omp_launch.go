@@ -29,11 +29,16 @@ const (
 // Install on the execution host, not the controller. SSH and sandbox launch
 // wrappers therefore receive the same tracker, generation and authoritative
 // title as local sessions. No Node installation is needed: OMP loads the JS.
-func (i *Instance) ompIdentityLaunchSetup() string {
+func (i *Instance) ompIdentityLaunchSetup(ackRequired bool) string {
 	generation := uuid.NewString()
-	ackRequired := "1"
-	if !i.ompIdentityAckRequired() {
-		ackRequired = "0"
+	if !ackRequired {
+		// Non-TUI OMP modes do not load the identity extension and cannot
+		// acknowledge a launch generation. Keep only the metadata frame needed
+		// by the host-side launch stager, and clear any tracking environment a
+		// nested Agent Deck inherited before target-side binding selection.
+		return fmt.Sprintf(ompLaunchMetaPrefix+`%s_0`+ompLaunchMetaSuffix+
+			`unset AGENTDECK_OMP_DIR AGENTDECK_OMP_LAUNCH_ID AGENTDECK_OMP_SOURCE_BINDING AGENTDECK_OMP_SOURCE_ERROR; `,
+			generation)
 	}
 	title, _ := json.Marshal(struct {
 		Title string `json:"title"`
@@ -61,7 +66,7 @@ func (i *Instance) ompIdentityLaunchSetup() string {
 		`printf '%%s' %s > "$session_dir/.agent-deck-title.json.$$" && mv -f "$session_dir/.agent-deck-title.json.$$" "$session_dir/.agent-deck-title.json" && `+
 		`printf '%%s\n' %s > "$session_dir/.agent-deck-launch-generation.$$" && mv -f "$session_dir/.agent-deck-launch-generation.$$" "$session_dir/.agent-deck-launch-generation" ) || { echo 'Failed to install OMP identity tracking; history preserved' >&2; exit 1; }; `+
 		`export AGENTDECK_OMP_DIR="$session_dir" AGENTDECK_OMP_LAUNCH_ID=%s AGENTDECK_OMP_SOURCE_BINDING="$source_binding" AGENTDECK_OMP_SOURCE_ERROR="$source_error"; `,
-		generation, ackRequired, ompAgentDeckSessionDirExpr(i.ID), generation, quote(ompIdentityExtension), quote(string(title)), quote(generation), quote(generation))
+		generation, "1", ompAgentDeckSessionDirExpr(i.ID), generation, quote(ompIdentityExtension), quote(string(title)), quote(generation), quote(generation))
 }
 
 func (i *Instance) ompIdentityAckRequired() bool {

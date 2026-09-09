@@ -1333,6 +1333,14 @@ type sessionForkedMsg struct {
 	setupWarning string // non-fatal worktree setup-script failure, shown after a successful fork
 }
 
+type ompForkTitleSyncResultMsg struct {
+	instanceID string
+	title      string
+	locked     bool
+	durable    string
+	err        error
+}
+
 type refreshMsg struct{}
 
 type statusUpdateMsg struct {
@@ -7705,6 +7713,8 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			h.search.SetItems(h.instances)
 
+			reconciledPendingEdits := false
+
 			// Re-apply pending title changes that were lost during reload.
 			// This happens when a rename's save was skipped (isReloading=true)
 			// and the reload replaced instances with stale disk data.
@@ -7731,10 +7741,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 						inst.SetAutoName(false) // pending title is a genuine rename; keep the user-chosen name
 					}
 				}
-				// Clear pending changes and persist if any were re-applied
+				// Clear pending changes after they have been reconciled onto the
+				// reloaded instances. Persistence waits until group operations have
+				// also been reconciled so one full-tree save contains both queues.
 				h.pendingTitleChanges = make(map[string]pendingTitle)
 				if applied {
-					h.forceSaveInstances()
+					reconciledPendingEdits = true
 				}
 			}
 
@@ -7743,6 +7755,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// external-change guard can abort). See pendingGroupOps.
 			if h.reapplyPendingGroupOps() {
 				h.rebuildFlatItems()
+				reconciledPendingEdits = true
+			}
+			if reconciledPendingEdits {
 				h.forceSaveInstances()
 			}
 
@@ -7973,13 +7988,24 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h.reloadMu.Lock()
 		reloading := h.isReloading
 		h.reloadMu.Unlock()
-		if reloading && msg.err == nil && msg.instance != nil {
+		if reloading && msg.instance != nil {
 			// CRITICAL: Save the forked session to JSON immediately to prevent orphaning
 			uiLog.Debug("reload_save_session_forked", slog.String("id", msg.instance.ID), slog.String("title", msg.instance.Title))
-			h.instancesMu.Lock()
-			h.instances = append(h.instances, msg.instance)
-			h.instancesMu.Unlock()
-			h.forceSaveInstances()
+			adopted, titleCmd, adoptErr := h.adoptCheckpointedFork(msg.instance)
+			if adoptErr != nil {
+				h.setError(adoptErr)
+				return h, nil
+			}
+			if !adopted {
+				h.setError(fmt.Errorf("OMP fork child %s was removed while launching and was not re-added", msg.instance.ID))
+				return h, nil
+			}
+			if msg.instance.Tool != "omp" {
+				h.forceSaveInstances()
+			}
+			if msg.err != nil {
+				h.setError(msg.err)
+			}
 			// Surface a non-fatal setup-script warning without masking any
 			// persistence error forceSaveInstances may have set.
 			if msg.setupWarning != "" {
@@ -7988,32 +8014,34 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if h.storageWatcher != nil {
 				h.storageWatcher.TriggerReload()
 			}
-			return h, nil
+			return h, titleCmd
 		}
 
-		if msg.err != nil {
+		if msg.err != nil && msg.instance == nil {
 			h.setError(msg.err)
 		} else {
-			h.instancesMu.Lock()
-			h.instances = append(h.instances, msg.instance)
-			h.instanceByID[msg.instance.ID] = msg.instance
-			// Run dedup to ensure the forked session doesn't have a duplicate ID
-			// This is critical: fork detection may have picked up wrong session
-			session.UpdateClaudeSessionsWithDedup(h.instances)
-			h.instancesMu.Unlock()
+			adopted, titleCmd, adoptErr := h.adoptCheckpointedFork(msg.instance)
+			if adoptErr != nil {
+				h.setError(adoptErr)
+				return h, nil
+			}
+			if !adopted {
+				h.setError(fmt.Errorf("OMP fork child %s was removed while launching and was not re-added", msg.instance.ID))
+				return h, nil
+			}
 			// Invalidate status counts cache
 			h.cachedStatusCounts.valid.Store(false)
 
 			// Track as launching for animation
-			h.launchingSessions[msg.instance.ID] = time.Now()
+			if msg.err == nil {
+				h.launchingSessions[msg.instance.ID] = time.Now()
+			}
 
 			// Expand the group so the session is visible
 			if msg.instance.GroupPath != "" {
 				h.groupTree.ExpandGroupWithParents(msg.instance.GroupPath)
 			}
 
-			// Add to existing group tree instead of rebuilding
-			h.groupTree.AddSession(msg.instance)
 			deferListSelection := h.isNavigating || h.jumpMode
 			h.rebuildFlatItemsAfterAsyncUpdate()
 			h.search.SetItems(h.instances)
@@ -8029,10 +8057,17 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Save both instances AND groups
-			// Use forceSave to bypass the external-change abort - forked session MUST persist
-			h.forceSaveInstances()
+			// OMP was checkpointed before Start and finalized with a targeted
+			// write. Replaying the full pre-launch list here could clobber a
+			// concurrent rename/group move. Other providers keep their existing
+			// full-save path.
+			if msg.instance.Tool != "omp" {
+				h.forceSaveInstances()
+			}
 			h.publishWebMenuSnapshot()
+			if msg.err != nil {
+				h.setError(msg.err)
+			}
 
 			// forceSaveInstances can setError on a failed persist; fold the
 			// non-fatal degradation notice into it rather than overwriting, so a
@@ -8046,10 +8081,47 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				h.setError(noticeError(h.err, msg.setupWarning))
 			}
 
+			if msg.err != nil {
+				return h, titleCmd
+			}
+
 			// Start fetching preview for the forked session
-			return h, h.fetchPreview(msg.instance, msg.instance.ID, -1)
+			return h, tea.Batch(titleCmd, h.fetchPreview(msg.instance, msg.instance.ID, -1))
 		}
 		return h, nil
+
+	case ompForkTitleSyncResultMsg:
+		pending, ok := h.pendingTitleChanges[msg.instanceID]
+		if msg.err != nil {
+			// Provider synchronization can fail after the checkpoint row was
+			// concurrently deleted or reused. Reconcile storage on every error;
+			// the transport error itself is still the visible error and failed
+			// remote work is not rescheduled from this result handler.
+			h.reconcileCheckpointedForkAfterTitleError(msg)
+			h.setError(fmt.Errorf("OMP fork title convergence failed: %w", msg.err))
+			return h, nil
+		}
+		if ok && (pending.title != msg.title || pending.locked != msg.locked) {
+			inst := h.getInstanceByID(msg.instanceID)
+			return h, h.ompForkTitleSyncCmd(inst, msg.durable, &pending)
+		}
+		inst := h.getInstanceByID(msg.instanceID)
+		if ok {
+			delete(h.pendingTitleChanges, msg.instanceID)
+		}
+		if inst == nil {
+			return h, nil
+		}
+		adopted, nextTitleCmd, err := h.adoptCheckpointedFork(inst)
+		if err != nil {
+			h.setError(fmt.Errorf("reconcile OMP fork title result: %w", err))
+			return h, nil
+		}
+		if !adopted {
+			return h, nil
+		}
+		h.refreshCheckpointedForkPresentation()
+		return h, nextTitleCmd
 
 	case sessionDeletedMsg:
 		// CRITICAL FIX: Skip processing during reload to prevent state corruption
@@ -15885,9 +15957,13 @@ func defaultForkWithStateWorktreeDeps(sparseSourceDir string) forkWithStateWorkt
 type forkInstanceDeps struct {
 	createInstance     func(source *session.Instance, title, groupPath string, opts *session.ClaudeOptions) (*session.Instance, error)
 	createMultiRepoDir func(inst, source *session.Instance) error
+	checkpointOmpFork  func(inst *session.Instance) (preserveChild bool, err error)
+	finalizeOmpFork    func(inst *session.Instance) error
 	startInstance      func(inst *session.Instance) error
 	rollback           func(repoRoot, worktreePath, branch string)
 }
+
+var startForkedInstanceForUI = func(inst *session.Instance) error { return inst.Start() }
 
 func defaultForkInstanceDeps() forkInstanceDeps {
 	return forkInstanceDeps{
@@ -15939,7 +16015,7 @@ func defaultForkInstanceDeps() forkInstanceDeps {
 			}
 			return nil
 		},
-		startInstance: func(inst *session.Instance) error { return inst.Start() },
+		startInstance: startForkedInstanceForUI,
 		rollback: func(repoRoot, worktreePath, branch string) {
 			_ = rollbackForkWithStateWorktree(repoRoot, worktreePath, branch)
 		},
@@ -15991,11 +16067,48 @@ func completeFork(
 		inst.SetParentWithPath(parentSessionID, parentProjectPath)
 	}
 
+	checkpointed := false
+	if inst.Tool == "omp" {
+		if deps.checkpointOmpFork == nil {
+			err = fmt.Errorf("cannot durably checkpoint OMP fork child %s before provider launch: storage checkpoint is unavailable; provider was not started and parent history is preserved", inst.ID)
+		} else {
+			checkpointed, err = deps.checkpointOmpFork(inst)
+		}
+		if err != nil {
+			if withStateWorktreeCreated && !checkpointed {
+				deps.rollback(opts.WorktreeRepoRoot, opts.WorktreePath, opts.WorktreeBranch)
+			}
+			if checkpointed {
+				return inst, err
+			}
+			return nil, err
+		}
+	}
+
 	if err := deps.startInstance(inst); err != nil {
-		if withStateWorktreeCreated {
+		if withStateWorktreeCreated && !checkpointed {
 			deps.rollback(opts.WorktreeRepoRoot, opts.WorktreePath, opts.WorktreeBranch)
 		}
+		if checkpointed {
+			return inst, fmt.Errorf("OMP fork child %s was durably checkpointed but provider start failed: %w; history and worktree are preserved, retry starting child %s to resume safely", inst.ID, err, inst.ID)
+		}
 		return nil, err
+	}
+	if checkpointed {
+		if deps.finalizeOmpFork == nil {
+			err = fmt.Errorf("OMP fork child %s acknowledged its launch but durable finalization is unavailable", inst.ID)
+		} else {
+			err = deps.finalizeOmpFork(inst)
+		}
+		if err != nil {
+			if errors.Is(err, statedb.ErrInstanceNotStored) {
+				// Return the launch-result pointer as a tombstone carrier. UI/web
+				// completion must use its ID to purge a watcher-preloaded checkpoint;
+				// adoption still re-reads storage and refuses the missing row.
+				return inst, fmt.Errorf("OMP fork child %s finished launching after its checkpoint was removed: %w; the deleted row was not recreated", inst.ID, err)
+			}
+			return inst, fmt.Errorf("OMP fork child %s acknowledged its launch but the durable checkpoint could not be finalized: %w; history and worktree are preserved, retry child %s to reconcile the exact child", inst.ID, err, inst.ID)
+		}
 	}
 
 	switch inst.Tool {
@@ -16099,6 +16212,250 @@ func noticeError(existing error, notice string) error {
 		return fmt.Errorf("%s", notice)
 	}
 	return fmt.Errorf("%v; %s", existing, notice)
+}
+
+// adoptCheckpointedFork installs the launch-result instance without duplicating
+// a row already preloaded by the storage watcher after the pre-start checkpoint.
+func (h *Home) adoptCheckpointedFork(inst *session.Instance) (bool, tea.Cmd, error) {
+	if inst == nil {
+		return false, nil, nil
+	}
+	reconciled := false
+	if inst.Tool == "omp" && h.storage != nil {
+		exists, err := h.storage.ReconcileOmpForkMetadata(inst)
+		if err != nil {
+			if errors.Is(err, session.ErrOmpForkCheckpointSuperseded) {
+				h.removeCheckpointedForkResult(inst.ID)
+				h.refreshCheckpointedForkPresentation()
+			}
+			return false, nil, fmt.Errorf("reconcile OMP fork child %s before adoption: %w", inst.ID, err)
+		}
+		if !exists {
+			h.removeCheckpointedForkResult(inst.ID)
+			h.refreshCheckpointedForkPresentation()
+			return false, nil, nil
+		}
+		reconciled = true
+	}
+	h.instancesMu.Lock()
+	var previous *session.Instance
+	writeIndex := 0
+	for _, candidate := range h.instances {
+		if candidate != nil && candidate.ID == inst.ID {
+			if previous == nil {
+				previous = candidate
+				// The checkpoint row was visible while OMP waited for its ACK.
+				// Treat user-owned metadata from that newer row as authoritative;
+				// only the launch-result pointer owns the runtime state.
+				if !reconciled {
+					inst.SetTitleThreadSafe(candidate.GetTitleThreadSafe())
+					inst.GroupPath = candidate.GroupPath
+					inst.Order = candidate.Order
+					inst.TitleLocked = candidate.TitleLocked
+					inst.Pin = candidate.Pin
+					inst.Notes = candidate.Notes
+					inst.Color = candidate.Color
+					inst.ArchivedAt = candidate.ArchivedAt
+				}
+				h.instances[writeIndex] = inst
+				writeIndex++
+			}
+			continue
+		}
+		h.instances[writeIndex] = candidate
+		writeIndex++
+	}
+	h.instances = h.instances[:writeIndex]
+	persistedTitle := inst.GetTitleThreadSafe()
+	var pendingTitle *pendingTitle
+	if pending, ok := h.pendingTitleChanges[inst.ID]; ok {
+		inst.SetTitleThreadSafe(pending.title)
+		inst.TitleLocked = pending.locked
+		pendingCopy := pending
+		pendingTitle = &pendingCopy
+	}
+	for _, op := range h.pendingGroupOps {
+		switch op.kind {
+		case groupOpMove:
+			if op.sessionID != inst.ID {
+				continue
+			}
+			inst.GroupPath = op.targetPath
+		case groupOpRename:
+			if inst.GroupPath != op.oldPath && !strings.HasPrefix(inst.GroupPath, op.oldPath+"/") {
+				continue
+			}
+			target := op.name
+			if h.groupTree != nil {
+				target = h.groupTree.RenameTargetPath(op.oldPath, op.name)
+			}
+			inst.GroupPath = target + strings.TrimPrefix(inst.GroupPath, op.oldPath)
+		}
+	}
+	if previous == nil {
+		h.instances = append(h.instances, inst)
+	}
+	if h.instanceByID == nil {
+		h.instanceByID = make(map[string]*session.Instance)
+	}
+	h.instanceByID[inst.ID] = inst
+	session.UpdateClaudeSessionsWithDedup(h.instances)
+	instances := append([]*session.Instance(nil), h.instances...)
+	h.instancesMu.Unlock()
+
+	if h.groupTree == nil {
+		h.groupTree = session.NewGroupTree(instances)
+		return true, h.ompForkTitleSyncCmd(inst, persistedTitle, pendingTitle), nil
+	}
+	replacedInGroup := false
+	for _, group := range h.groupTree.Groups {
+		groupWriteIndex := 0
+		for _, candidate := range group.Sessions {
+			if candidate != nil && candidate.ID == inst.ID {
+				if !replacedInGroup && group.Path == inst.GroupPath {
+					group.Sessions[groupWriteIndex] = inst
+					groupWriteIndex++
+					replacedInGroup = true
+				}
+				continue
+			}
+			group.Sessions[groupWriteIndex] = candidate
+			groupWriteIndex++
+		}
+		group.Sessions = group.Sessions[:groupWriteIndex]
+	}
+	if !replacedInGroup {
+		durableOrder := inst.Order
+		h.groupTree.AddSession(inst)
+		// AddSession assigns append order. The exact durable row (or pending UI
+		// intent above) remains authoritative even when reconciliation moved the
+		// child to another group.
+		inst.Order = durableOrder
+		if group := h.groupTree.Groups[inst.GroupPath]; group != nil {
+			sort.SliceStable(group.Sessions, func(i, j int) bool {
+				return group.Sessions[i].Order < group.Sessions[j].Order
+			})
+		}
+	}
+	return true, h.ompForkTitleSyncCmd(inst, persistedTitle, pendingTitle), nil
+}
+
+func (h *Home) ompForkTitleSyncCmd(inst *session.Instance, expectedTitle string, pending *pendingTitle) tea.Cmd {
+	if inst == nil || pending == nil || h.storage == nil || inst.Tool != "omp" {
+		return nil
+	}
+	title := pending.title
+	locked := pending.locked
+	return func() tea.Msg {
+		durable, err := h.storage.ConvergeOmpForkUserTitle(inst, expectedTitle, title, locked)
+		return ompForkTitleSyncResultMsg{instanceID: inst.ID, title: title, locked: locked, durable: durable, err: err}
+	}
+}
+
+func (h *Home) removeCheckpointedForkResult(id string) {
+	if id == "" {
+		return
+	}
+	h.instancesMu.Lock()
+	writeIndex := 0
+	for _, candidate := range h.instances {
+		if candidate != nil && candidate.ID == id {
+			continue
+		}
+		h.instances[writeIndex] = candidate
+		writeIndex++
+	}
+	h.instances = h.instances[:writeIndex]
+	delete(h.instanceByID, id)
+	h.instancesMu.Unlock()
+	delete(h.pendingTitleChanges, id)
+	writeOpIndex := 0
+	for _, op := range h.pendingGroupOps {
+		if op.kind == groupOpMove && op.sessionID == id {
+			continue
+		}
+		h.pendingGroupOps[writeOpIndex] = op
+		writeOpIndex++
+	}
+	h.pendingGroupOps = h.pendingGroupOps[:writeOpIndex]
+	if h.groupTree != nil {
+		for _, group := range h.groupTree.Groups {
+			groupWriteIndex := 0
+			for _, candidate := range group.Sessions {
+				if candidate != nil && candidate.ID == id {
+					continue
+				}
+				group.Sessions[groupWriteIndex] = candidate
+				groupWriteIndex++
+			}
+			group.Sessions = group.Sessions[:groupWriteIndex]
+		}
+	}
+}
+
+// reconcileCheckpointedForkAfterTitleError retires the failed command's intent
+// before local/database reconciliation. Otherwise adoption could reapply a
+// failed or superseded title for a later save to retry implicitly. A distinct
+// newer pending rename remains visible, but no provider sync is retried here.
+func (h *Home) reconcileCheckpointedForkAfterTitleError(msg ompForkTitleSyncResultMsg) bool {
+	id := msg.instanceID
+	if pending, ok := h.pendingTitleChanges[id]; ok && pending.title == msg.title && pending.locked == msg.locked {
+		delete(h.pendingTitleChanges, id)
+	}
+	inst := h.getInstanceByID(id)
+	if inst == nil {
+		return false
+	}
+	adopted, _, err := h.adoptCheckpointedFork(inst)
+	if err != nil && !errors.Is(err, session.ErrOmpForkCheckpointSuperseded) {
+		uiLog.Warn("omp_fork_title_error_reconcile_failed",
+			slog.String("session_id", id),
+			slog.Any("error", err))
+	}
+	if adopted {
+		h.refreshCheckpointedForkPresentation()
+	}
+	return h.getInstanceByID(id) != nil
+}
+
+func (h *Home) refreshCheckpointedForkPresentation() {
+	h.cachedStatusCounts.valid.Store(false)
+	h.rebuildFlatItems()
+	if h.search != nil {
+		h.search.SetItems(h.instances)
+	}
+	h.publishWebMenuSnapshot()
+}
+
+// presentCheckpointedFork is the headless/web counterpart of the TUI message
+// handler. Durable launch failures still need to become visible immediately;
+// otherwise the web menu cache can retain its pre-checkpoint snapshot forever.
+func (h *Home) presentCheckpointedFork(inst *session.Instance) (bool, error) {
+	adopted, titleCmd, err := h.adoptCheckpointedFork(inst)
+	if err != nil || !adopted {
+		return adopted, err
+	}
+	for attempt := 0; titleCmd != nil && attempt < 3; attempt++ {
+		msg, _ := titleCmd().(ompForkTitleSyncResultMsg)
+		if msg.err != nil {
+			return h.reconcileCheckpointedForkAfterTitleError(msg), msg.err
+		}
+		if pending, ok := h.pendingTitleChanges[msg.instanceID]; ok && pending.title == msg.title && pending.locked == msg.locked {
+			delete(h.pendingTitleChanges, msg.instanceID)
+		}
+		adopted, titleCmd, err = h.adoptCheckpointedFork(inst)
+		if err != nil || !adopted {
+			return adopted, err
+		}
+	}
+	if titleCmd != nil {
+		return true, fmt.Errorf("OMP fork title changed repeatedly during presentation; retry rename")
+	}
+	if h.groupTree != nil && inst.GroupPath != "" {
+		h.groupTree.ExpandGroupWithParents(inst.GroupPath)
+	}
+	h.refreshCheckpointedForkPresentation()
+	return true, nil
 }
 
 // forkSessionCmdWithOptions creates a forked session with the given title, group, shared fork options, and optional sandbox.
@@ -16215,9 +16572,22 @@ func (h *Home) forkSessionCmdWithOptions(
 			}
 		}
 
-		inst, err := completeFork(source, title, groupPath, toggles, opts, parentSessionID, parentProjectPath, withStateWorktreeCreated, defaultForkInstanceDeps())
+		deps := defaultForkInstanceDeps()
+		deps.checkpointOmpFork = func(inst *session.Instance) (bool, error) {
+			if h.storage == nil {
+				return false, fmt.Errorf("cannot checkpoint OMP fork child %s: storage is unavailable", inst.ID)
+			}
+			return h.storage.CheckpointOmpForkBeforeStart(inst)
+		}
+		deps.finalizeOmpFork = func(inst *session.Instance) error {
+			if h.storage == nil {
+				return fmt.Errorf("cannot finalize OMP fork child %s: storage is unavailable", inst.ID)
+			}
+			return h.storage.FinalizeOmpForkLaunch(inst)
+		}
+		inst, err := completeFork(source, title, groupPath, toggles, opts, parentSessionID, parentProjectPath, withStateWorktreeCreated, deps)
 		if err != nil {
-			return sessionForkedMsg{err: err, sourceID: sourceID}
+			return sessionForkedMsg{instance: inst, err: err, sourceID: sourceID}
 		}
 
 		return sessionForkedMsg{instance: inst, sourceID: sourceID, notice: forkNotice, setupWarning: setupWarning}
@@ -25551,6 +25921,11 @@ func (h *Home) sendPromptToTarget(target sendOutputTarget, message string) error
 		tmuxSession := target.local.GetTmuxSession()
 		if tmuxSession == nil {
 			return fmt.Errorf("target session has no tmux pane")
+		}
+		if target.local.Tool == "omp" {
+			if err := target.local.PromptDeliveryError(); err != nil {
+				return err
+			}
 		}
 		if err := tmuxSession.SendKeysChunked(message); err != nil {
 			return fmt.Errorf("send failed: %w", err)

@@ -225,11 +225,35 @@ type ompActiveBinding struct {
 // Validate on the owner before any destructive restart action. The exact same
 // error reaches TUI Enter, CLI, hub and web callers through the lifecycle API.
 func (i *Instance) prepareOmpIdentity() error {
-	if i.Tool != "omp" || i.SSHHost != "" || i.IsSandboxed() || i.ompFreshStart || i.IsForkAwaitingStart {
+	if i.Tool != "omp" {
 		return nil
 	}
+	refuse := func(err error) error {
+		i.recordPrepareFailure(i.Command, err)
+		return err
+	}
 	opts := i.resolvedOmpOptions()
-	if opts.NoSession || opts.FromClaude || opts.FromCodex {
+	nonTUI := ompCommandUsesNonTUI(i.Command)
+	if i.ompFreshStart {
+		if !opts.NoSession && nonTUI {
+			return refuse(fmt.Errorf("starting a fresh OMP conversation requires an interactive OMP command so its identity can be acknowledged; history is preserved"))
+		}
+		return nil
+	}
+	if i.IsForkAwaitingStart {
+		_, ackRequired, found, metadataErr := parseOmpLaunchMetadata(i.ForkStartCommand)
+		if metadataErr != nil {
+			return refuse(metadataErr)
+		}
+		if found && !ackRequired {
+			return refuse(fmt.Errorf("pending OMP native fork used a non-interactive command and cannot acknowledge its child identity; switch to an interactive OMP command and restart fresh to recover while preserving history"))
+		}
+		return nil
+	}
+	if !opts.NoSession && nonTUI && (opts.FromClaude || opts.FromCodex) {
+		return refuse(fmt.Errorf("importing an OMP conversation requires an interactive OMP command so its identity can be acknowledged; history is preserved"))
+	}
+	if i.SSHHost != "" || i.IsSandboxed() || opts.NoSession || opts.FromClaude || opts.FromCodex {
 		return nil
 	}
 	home, err := os.UserHomeDir()
@@ -239,10 +263,29 @@ func (i *Instance) prepareOmpIdentity() error {
 	dir := filepath.Join(home, ".omp", "agent-deck", i.ID)
 	// Interrupted native re-keying must be finalized by the migration logic
 	// before its replacement can be made the stable active binding.
-	if _, err := os.Stat(filepath.Join(dir, ".agent-deck-legacy-migration")); err == nil {
+	migrationMarker := filepath.Join(dir, ".agent-deck-legacy-migration")
+	if _, markerErr := os.Lstat(migrationMarker); markerErr == nil {
+		if nonTUI {
+			return refuse(fmt.Errorf("interrupted OMP identity migration requires an interactive OMP command to recover; history is preserved"))
+		}
 		return nil
+	} else if !os.IsNotExist(markerErr) {
+		return refuse(fmt.Errorf("cannot inspect OMP identity migration state: %w; history is preserved", markerErr))
 	}
 	binding, err := resolveOmpActiveBinding(dir)
+	if nonTUI {
+		if err == nil && binding != nil && binding.State == "pending" {
+			if _, statErr := os.Stat(binding.File); os.IsNotExist(statErr) {
+				err = fmt.Errorf("pending OMP identity has no transcript to resume; an interactive OMP command is required to complete or replace it; history is preserved")
+			} else if statErr != nil {
+				err = fmt.Errorf("cannot verify pending OMP transcript %s: %w; history is preserved", binding.File, statErr)
+			}
+		}
+		if err != nil {
+			return refuse(err)
+		}
+		return nil
+	}
 	if err == nil && binding != nil {
 		bindingPath, _, _, pathErr := ompCurrentBindingPath(dir)
 		if pathErr != nil {

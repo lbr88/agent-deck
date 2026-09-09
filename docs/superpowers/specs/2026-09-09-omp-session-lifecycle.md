@@ -61,11 +61,23 @@ entry to a conversation owned by another entry. Detect conflicts before a switch
 where the provider supports cancellation, and expose a persistent diagnostic if
 a provider path bypasses that event.
 
-Pending OMP fork intent must survive an Agent Deck save/load before provider
-acknowledgment, not only an in-memory retry. Store that OMP-only intent using
-the existing session metadata mechanism. Once the child is acknowledged, normal
-save clears the pending recipe; if an older saved recipe is replayed after a
-crash, the exact bound child is resumed instead of creating another fork.
+Persist the finalized child row and OMP fork intent before starting the provider
+in every CLI, TUI, web and hub fork path. A checkpoint failure must prevent
+launch. Once a checkpoint may have committed, errors must preserve the child
+and its worktree, identify the recoverable entry, and keep it visible without
+duplicate rows if a watcher has already loaded it. Both successful and failed
+completion reconcile the latest persisted metadata and explicit pending UI edits;
+neither may restore an entry deleted while loading. A recoverable error refreshes
+rendered/search state and web menu caches as well as the underlying registry.
+Failed title commands retire only their matching queued intent before reconciling
+the durable row; a distinct newer user edit remains pending. An old failed sync
+must never reapply a superseded title during a later reload or save.
+Reload reconciles queued title/lock and group changes before saving either;
+persisting the title must not clear an unapplied move, group creation or rename.
+Once the child is acknowledged, a targeted write clears the pending recipe without
+replaying stale title/group metadata; if an older saved recipe
+is replayed after a crash, resume the exact bound child without requiring its
+parent to remain available or creating another fork.
 
 Capture manager identity before new/fork/branch transitions as well as afterward:
 a `/move` immediately followed by another operation may precede the next timer.
@@ -88,6 +100,23 @@ without becoming unstartable. Periodic checks are bounded and do not read entire
 conversation files or block session-list navigation.
 
 ### Launch and errors
+
+Recognized non-interactive OMP commands may start and resume their owned root,
+but must not replace an interactive generation or inherit another launch's
+tracking environment. They do not produce interactive identity acknowledgments.
+Operations that require such an acknowledgment (native fork, fresh/import
+transitions) must fail before launch with a clear explanation in non-interactive
+mode. These identity-transition restrictions apply to sessionful operations;
+NoSession retains its stateless launch/fresh/import behavior because it owns
+no persistent identity. Initial-message delivery must not type into a one-shot
+process that has no interactive prompt, including non-interactive NoSession.
+Interactive ephemeral sessions remain prompt-capable.
+Non-interactive preflight is validation-only: it must not bootstrap a binding,
+complete a missing pending transcript, or enter a legacy identity migration.
+An old non-acknowledging fork recipe remains refused even after the configured
+command becomes interactive; explicit interactive RestartFresh is its recovery
+path and preserves the prior history. Refusal must leave a running process and
+one-shot recovery intent intact and retain an actionable diagnostic.
 
 All lifecycle entry points share validation and diagnostics. Capture errors
 before losing the pane, preserve target-side failure information, and expose it

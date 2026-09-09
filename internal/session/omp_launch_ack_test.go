@@ -313,7 +313,7 @@ func TestOmpLaunchSetupRejectsCorruptPriorGenerationBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(dir) })
-			output, runErr := exec.Command("bash", "-c", inst.ompIdentityLaunchSetup()+" true").CombinedOutput()
+			output, runErr := exec.Command("bash", "-c", inst.ompIdentityLaunchSetup(true)+" true").CombinedOutput()
 			if runErr == nil || !strings.Contains(string(output), "Invalid OMP launch generation") {
 				t.Fatalf("corrupt generation bytes reached launch setup: err=%v output=%q", runErr, output)
 			}

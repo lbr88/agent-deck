@@ -14,6 +14,7 @@ import (
 
 	"github.com/asheshgoplani/agent-deck/internal/git"
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 )
 
 // extractUIFuncBodySource returns the source text of funcName's body block from
@@ -468,5 +469,139 @@ func TestCompleteFork_NoRollbackWhenWorktreeNotCreated(t *testing.T) {
 	}
 	if rec.calls != 0 {
 		t.Fatalf("expected no rollback when worktree not created, got %d", rec.calls)
+	}
+}
+
+func TestCompleteFork_CheckpointsOmpBeforeProviderStart(t *testing.T) {
+	source := &session.Instance{Tool: "omp"}
+	child := &session.Instance{ID: "checkpoint-child", Tool: "omp", IsForkAwaitingStart: true, ForkStartCommand: "fork recipe"}
+	var order []string
+	deps := forkInstanceDeps{
+		createInstance: func(_ *session.Instance, _, _ string, _ *session.ClaudeOptions) (*session.Instance, error) {
+			return child, nil
+		},
+		createMultiRepoDir: func(_, _ *session.Instance) error { return nil },
+		checkpointOmpFork: func(got *session.Instance) (bool, error) {
+			if got != child {
+				t.Fatalf("checkpoint child = %p, want %p", got, child)
+			}
+			order = append(order, "checkpoint")
+			return true, nil
+		},
+		finalizeOmpFork: func(got *session.Instance) error {
+			if got != child {
+				t.Fatalf("finalize child = %p, want %p", got, child)
+			}
+			order = append(order, "finalize")
+			return nil
+		},
+		startInstance: func(got *session.Instance) error {
+			order = append(order, "start")
+			return nil
+		},
+		rollback: func(_, _, _ string) {},
+	}
+	got, err := completeFork(source, "title", "group", forkToggles{}, nil, "", "", false, deps)
+	if err != nil || got != child {
+		t.Fatalf("completeFork: child=%p err=%v", got, err)
+	}
+	if strings.Join(order, ",") != "checkpoint,start,finalize" {
+		t.Fatalf("OMP fork lifecycle order = %v", order)
+	}
+}
+
+func TestCompleteFork_CheckpointFailurePreventsStart(t *testing.T) {
+	source := &session.Instance{Tool: "omp"}
+	child := &session.Instance{ID: "checkpoint-failed", Tool: "omp", IsForkAwaitingStart: true, ForkStartCommand: "fork recipe"}
+	started := false
+	rec := &rollbackRecorder{}
+	deps := forkInstanceDeps{
+		createInstance: func(_ *session.Instance, _, _ string, _ *session.ClaudeOptions) (*session.Instance, error) {
+			return child, nil
+		},
+		createMultiRepoDir: func(_, _ *session.Instance) error { return nil },
+		checkpointOmpFork: func(*session.Instance) (bool, error) {
+			return false, errors.New("checkpoint storage unavailable")
+		},
+		startInstance: func(*session.Instance) error { started = true; return nil },
+		rollback:      rec.fn,
+	}
+	got, err := completeFork(source, "title", "group", forkToggles{}, newForkStateOpts(), "", "", true, deps)
+	if err == nil || !strings.Contains(err.Error(), "checkpoint storage unavailable") {
+		t.Fatalf("checkpoint failure was not returned: %v", err)
+	}
+	if got != nil || started {
+		t.Fatalf("provider started without durable checkpoint: child=%p started=%t", got, started)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("definitely unpersisted checkpoint did not roll back worktree: %d", rec.calls)
+	}
+}
+
+func TestCompleteFork_PreservesCheckpointedOmpChildOnStartFailure(t *testing.T) {
+	source := &session.Instance{Tool: "omp"}
+	child := &session.Instance{ID: "checkpointed-start-failed", Tool: "omp", IsForkAwaitingStart: true, ForkStartCommand: "fork recipe"}
+	rec := &rollbackRecorder{}
+	deps := forkInstanceDeps{
+		createInstance: func(_ *session.Instance, _, _ string, _ *session.ClaudeOptions) (*session.Instance, error) {
+			return child, nil
+		},
+		createMultiRepoDir: func(_, _ *session.Instance) error { return nil },
+		checkpointOmpFork:  func(*session.Instance) (bool, error) { return true, nil },
+		finalizeOmpFork:    func(*session.Instance) error { return nil },
+		startInstance:      func(*session.Instance) error { return errors.New("provider ACK failed") },
+		rollback:           rec.fn,
+	}
+	got, err := completeFork(source, "title", "group", forkToggles{}, newForkStateOpts(), "", "", true, deps)
+	if err == nil || !strings.Contains(err.Error(), child.ID) || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("checkpointed launch failure was not actionable: %v", err)
+	}
+	if got != child {
+		t.Fatalf("checkpointed child was discarded: got=%p want=%p", got, child)
+	}
+	if rec.calls != 0 {
+		t.Fatalf("checkpointed child worktree was rolled back: %d", rec.calls)
+	}
+}
+
+func TestCompleteFork_PreservesCheckpointedOmpChildOnFinalizeFailure(t *testing.T) {
+	child := &session.Instance{ID: "checkpointed-finalize-failed", Tool: "omp"}
+	rec := &rollbackRecorder{}
+	deps := forkInstanceDeps{
+		createInstance: func(*session.Instance, string, string, *session.ClaudeOptions) (*session.Instance, error) {
+			return child, nil
+		},
+		createMultiRepoDir: func(*session.Instance, *session.Instance) error { return nil },
+		checkpointOmpFork:  func(*session.Instance) (bool, error) { return true, nil },
+		startInstance:      func(*session.Instance) error { return nil },
+		finalizeOmpFork:    func(*session.Instance) error { return errors.New("database busy") },
+		rollback:           rec.fn,
+	}
+
+	got, err := completeFork(&session.Instance{Tool: "omp"}, "title", "group", forkToggles{}, newForkStateOpts(), "", "", true, deps)
+	if err == nil || !strings.Contains(err.Error(), child.ID) || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("finalize failure was not actionable: %v", err)
+	}
+	if got != child || rec.calls != 0 {
+		t.Fatalf("finalize failure discarded child/worktree: child=%p rollback=%d", got, rec.calls)
+	}
+}
+
+func TestCompleteFork_ReturnsDeletedCheckpointTombstoneForReconciliation(t *testing.T) {
+	child := &session.Instance{ID: "deleted-checkpoint", Tool: "omp"}
+	deps := forkInstanceDeps{
+		createInstance: func(*session.Instance, string, string, *session.ClaudeOptions) (*session.Instance, error) {
+			return child, nil
+		},
+		createMultiRepoDir: func(*session.Instance, *session.Instance) error { return nil },
+		checkpointOmpFork:  func(*session.Instance) (bool, error) { return true, nil },
+		startInstance:      func(*session.Instance) error { return nil },
+		finalizeOmpFork:    func(*session.Instance) error { return statedb.ErrInstanceNotStored },
+		rollback:           func(string, string, string) {},
+	}
+
+	got, err := completeFork(&session.Instance{Tool: "omp"}, "title", "group", forkToggles{}, nil, "", "", false, deps)
+	if got != child || !errors.Is(err, statedb.ErrInstanceNotStored) {
+		t.Fatalf("deleted checkpoint result = (%p, %v), want tombstone child + ErrInstanceNotStored", got, err)
 	}
 }

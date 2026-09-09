@@ -85,6 +85,8 @@ Launch supplies `AGENTDECK_INSTANCE_ID`, `AGENTDECK_OMP_DIR`,
 - [x] Install the embedded extension on the execution host via portable target-side setup, then supply launch generation and title intent. Cover local, SSH, hub-owned and sandbox command construction.
 - [x] Route normal Start, StartWithMessage, Restart and native fork through the same validation; do not repeat import flags or fork a second time after first start.
 - [x] Persist pending OMP-only fork intent across actual storage save/load, clear after acknowledged completion, and safely replay a stale pending recipe as exact child resume. Explicit RestartFresh supersedes pending fork intent.
+- [x] Checkpoint finalized child rows before provider start in all production fork callers; retain recoverable children/worktrees on errors and avoid duplicate registry entries after watcher reload. Replay an acknowledged child independently of its parent's continued availability.
+- [x] Preserve existing identity state across repeated recognized non-TUI launches; reject unsupported identity-changing operations and interactive initial-message delivery before launch, without affecting interactive ephemeral sessions.
 - [x] Reconcile/audit existing entries before restart and on bounded metadata refresh; surface identity health while idle/running, not only after process death.
 - [x] SetField title writes only this entry's title intent; provider updates only its actual bound conversation. Test independent fork titles and original history unchanged.
 - [x] Test corrupt/missing bindings, ID mismatch, copied legacy IDs, filename/path quoting, multiple histories with explicit binding, pending new, stale generation, moved history and remote path isolation.
@@ -98,4 +100,5 @@ Launch supplies `AGENTDECK_INSTANCE_ID`, `AGENTDECK_OMP_DIR`,
 - [x] Test the real TUI Restart path, immediate exit, CLI lifetime, hub response and preview. Do not use cached Exists as proof of a live/ready provider.
 - [x] Run real isolated OMP v18.1.15 no-model-request smoke: create, new/branch, fork into distinct row, rename, exit/resume and failed startup. Never touch user sessions for tests.
 - [x] Re-run metadata-only audit of existing sessions; report any unresolved item, no blind history rewrites.
+- [x] Reconcile queued title and group edits together before reload persistence; verify the adjacent shared ordering bug exposed by fork-checkpoint tests without changing provider behavior.
 - [ ] Run focused tests, race coverage, lint, govulncheck and full CI. Complete local review and required PR reviews, resolve findings, merge and publish release, install verified release artifact; preserve dirty unrelated worktrees.

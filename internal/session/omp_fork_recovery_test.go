@@ -124,6 +124,58 @@ func TestOmpForkResumesBoundTargetDespiteRetainedHistoricalRoots(t *testing.T) {
 	}
 }
 
+func TestOmpForkRetryResumesAcknowledgedChildWithoutAvailableParent(t *testing.T) {
+	parent, target, parentDir, targetDir, _ := makeOmpForkRecoveryFixture(t)
+	probe, logFile := writeOmpForkRecoveryProbe(t, os.Getenv("HOME"))
+	activeChild := filepath.Join(targetDir, "active-child.jsonl")
+	writeOmpValidationTranscript(t, activeChild, "independent-child-id")
+	writeOmpValidationBinding(t, targetDir, activeChild, "independent-child-id", "saved", "child-generation")
+	if binding, err := resolveOmpActiveBinding(targetDir); err != nil || binding == nil {
+		t.Fatalf("fixture child binding is not valid: binding=%+v err=%v", binding, err)
+	}
+	if err := os.Rename(parentDir, filepath.Join(os.Getenv("HOME"), "unavailable-parent")); err != nil {
+		t.Fatal(err)
+	}
+	command, err := parent.buildOmpForkCommandForTarget(target, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if output, err := exec.Command("bash", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("independent child retry consulted unavailable parent: %v\n%s", err, output)
+	}
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(logBytes), "--resume|"+activeChild+"|") {
+		t.Fatalf("independent child was not resumed exactly: %s", logBytes)
+	}
+}
+
+func TestOmpForkNewChildStillRequiresAcknowledgedParent(t *testing.T) {
+	parent, target, parentDir, _, _ := makeOmpForkRecoveryFixture(t)
+	probe, logFile := writeOmpForkRecoveryProbe(t, os.Getenv("HOME"))
+	if err := os.Rename(parentDir, filepath.Join(os.Getenv("HOME"), "unavailable-parent")); err != nil {
+		t.Fatal(err)
+	}
+	command, err := parent.buildOmpForkCommandForTarget(target, probe)
+	if err != nil {
+		if _, statErr := os.Stat(logFile); !os.IsNotExist(statErr) {
+			t.Fatalf("provider ran without an acknowledged parent: %v", statErr)
+		}
+		return
+	}
+
+	output, runErr := exec.Command("bash", "-c", command).CombinedOutput()
+	if runErr == nil || !strings.Contains(string(output), "No acknowledged OMP session file") {
+		t.Fatalf("empty child guessed without its parent: %v\n%s", runErr, output)
+	}
+	if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+		t.Fatalf("provider ran without an acknowledged parent: %v", err)
+	}
+}
+
 func TestOmpForkRejectsUnboundOrPendingNonemptyTargetAndPreservesEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
