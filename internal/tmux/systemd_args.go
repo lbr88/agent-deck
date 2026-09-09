@@ -9,9 +9,36 @@ import (
 	"time"
 )
 
-// Probe the local client once, only when a launch actually contains dollars.
+// Probe the local client only when a launch actually contains dollars. Keep a
+// successful version; briefly cache failures so service -> scope fallback does
+// not repeat a slow probe, but a transient timeout does not poison all launches.
 // Unlike --user operations, --version needs no running service manager.
-var systemdRunVersion = sync.OnceValue(func() int {
+var systemdRunVersion = newSystemdRunVersionCache(probeSystemdRunVersion, time.Now)
+
+const systemdRunVersionRetryDelay = 5 * time.Second
+
+func newSystemdRunVersionCache(probe func() int, now func() time.Time) func() int {
+	var mu sync.Mutex
+	var version int
+	var retryAt time.Time
+	return func() int {
+		// Serialize probes as well as cache access: concurrent launches share
+		// one bounded probe rather than each paying for a failed subprocess.
+		mu.Lock()
+		defer mu.Unlock()
+		if version > 0 || now().Before(retryAt) {
+			return version
+		}
+		version = probe()
+		if version <= 0 {
+			version = 0
+			retryAt = now().Add(systemdRunVersionRetryDelay)
+		}
+		return version
+	}
+}
+
+func probeSystemdRunVersion() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "systemd-run", "--version").Output()
@@ -23,7 +50,7 @@ var systemdRunVersion = sync.OnceValue(func() int {
 		return 0
 	}
 	return version
-})
+}
 
 // protectSystemdRunArgs preserves tmux's arguments through systemd's extra
 // environment-expansion layer. This runs ONLY at the execution boundary: the

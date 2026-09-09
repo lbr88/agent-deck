@@ -48,4 +48,6 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
+        # Exact public tag for this unchanged pin; the moving v5 tag has advanced.
+        # https://github.com/actions/deploy-pages/releases/tag/v3.0.2-node.24
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v3.0.2-node.24

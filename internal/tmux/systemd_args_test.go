@@ -2,7 +2,10 @@ package tmux
 
 import (
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -12,6 +15,90 @@ func pinSystemdRunVersion(t *testing.T, version int) {
 	previous := systemdRunVersion
 	systemdRunVersion = func() int { return version }
 	t.Cleanup(func() { systemdRunVersion = previous })
+}
+
+func TestSystemdVersionCacheRetriesUnknownAfterCooldown(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	probes := 0
+	version := newSystemdRunVersionCache(func() int {
+		probes++
+		// Model two transient failures, including the time spent probing.
+		now = now.Add(2 * time.Second)
+		if probes < 3 {
+			return 0
+		}
+		return 253
+	}, func() time.Time { return now })
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		require.Zero(t, version())
+		require.Equal(t, attempt, probes, "unknown result must be retried after its cooldown")
+		for range 3 {
+			require.Zero(t, version(), "immediate service/scope retries must share the failed probe")
+		}
+		now = now.Add(systemdRunVersionRetryDelay - time.Nanosecond)
+		require.Zero(t, version(), "cooldown starts when the slow probe finishes")
+		require.Equal(t, attempt, probes)
+		now = now.Add(time.Nanosecond)
+	}
+	require.Equal(t, 253, version())
+	require.Equal(t, 3, probes)
+	now = now.Add(24 * time.Hour)
+	require.Equal(t, 253, version())
+	require.Equal(t, 3, probes, "a successful result must remain cached")
+}
+
+func TestSystemdVersionCacheKeepsSuccessfulVersion(t *testing.T) {
+	for _, parsed := range []int{253, 254, 259} {
+		t.Run(strconv.Itoa(parsed), func(t *testing.T) {
+			now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+			probes := 0
+			version := newSystemdRunVersionCache(func() int {
+				probes++
+				return parsed
+			}, func() time.Time { return now })
+			require.Equal(t, parsed, version())
+			now = now.Add(24 * time.Hour)
+			require.Equal(t, parsed, version())
+			require.Equal(t, 1, probes)
+		})
+	}
+}
+
+func TestSystemdVersionCacheSharesConcurrentProbe(t *testing.T) {
+	for _, parsed := range []int{0, 253, 259} {
+		t.Run(strconv.Itoa(parsed), func(t *testing.T) {
+			const callers = 16
+			var probes atomic.Int32
+			entered := make(chan struct{}, callers)
+			release := make(chan struct{})
+			version := newSystemdRunVersionCache(func() int {
+				probes.Add(1)
+				entered <- struct{}{}
+				<-release
+				return parsed
+			}, func() time.Time { return time.Unix(1, 0) })
+			start := make(chan struct{})
+			results := make(chan int, callers)
+			var ready sync.WaitGroup
+			ready.Add(callers)
+			for range callers {
+				go func() {
+					ready.Done()
+					<-start
+					results <- version()
+				}()
+			}
+			ready.Wait()
+			close(start)
+			<-entered
+			close(release)
+			for range callers {
+				require.Equal(t, parsed, <-results)
+			}
+			require.EqualValues(t, 1, probes.Load(), "concurrent launches must share the same probe")
+		})
+	}
 }
 
 // These assertions cover the launch boundary (not source text): changing the
