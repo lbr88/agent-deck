@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.5] - 2026-09-09
+
+### Fixed
+
+- Track each OMP entry's actual root conversation throughout native new, fork, branch, switch and move operations. Retained history no longer makes a known active conversation ambiguous.
+- Keep Agent Deck titles authoritative and sync explicit renames into only the owning OMP conversation, including independent native forks.
+- Preserve prior history during fresh starts and retain legacy migration recovery state until the replacement conversation is acknowledged.
+- Report OMP startup, identity-tracking and attach failures through CLI, TUI and hub previews, with bounded diagnostics and execution-host ownership validation.
+- Preserve shell variables through systemd service/scope launches and retain diagnostics from immediately exiting provider processes.
+- Run bundled tracker tests in local and GitHub gates; respect configured temporary storage during CSS verification and clean isolated test homes.
+
 ## [1.13.4] - 2026-09-07
 
 ### Fixed

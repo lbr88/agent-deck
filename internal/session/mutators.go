@@ -156,6 +156,10 @@ func SetField(inst *Instance, field, value string, extraArgsTokens []string) (ol
 		// next hook event. Unlock via `session set <id> title-locked false`.
 		inst.TitleLocked = true
 		inst.SyncTmuxDisplayName()
+		if inst.Tool == "omp" {
+			title := value
+			postCommit = func() error { return inst.syncOmpTitle(title) }
+		}
 		if strings.TrimSpace(value) != "" && (IsCodexCompatible(inst.Tool) || (inst.Tool == "kiro" && inst.KiroSessionID != "")) {
 			title := inst.Title
 			codexCommand := inst.resolveCodexCommand(inst.Command)

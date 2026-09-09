@@ -530,7 +530,10 @@ type Instance struct {
 
 	// ompFreshStart is a one-shot marker consumed by buildOmpCommand after an
 	// explicit RestartFresh. It is transient so ordinary restarts always resume.
-	ompFreshStart bool `json:"-"`
+	ompFreshStart        bool `json:"-"`
+	ompMetadataCheckedAt time.Time
+	ompIdentityWarning   string
+	ompMetadataPending   <-chan struct{}
 
 	// ToolOptions stores tool-specific launch options (Claude, Codex, Gemini, etc.)
 	// JSON structure: {"tool": "claude", "options": {...}}
@@ -2706,6 +2709,8 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		return envPrefix + commandPrefix + args
 	}
 
+	envPrefix += i.ompIdentityLaunchSetup()
+	args += ompIdentityArgs
 	sessionDir := ompAgentDeckSessionDirExpr(i.ID)
 	fresh := i.ompFreshStart
 	i.ompFreshStart = false
@@ -2727,8 +2732,9 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 		// session id active in multiple instance directories. Re-key such a
 		// transcript through OMP's native fork before opening it. OMP publishes the
 		// replacement JSONL before its artifact copy finishes, so Agent Deck also
-		// completes that copy idempotently before archiving the copied root and
-		// clearing the durable migration marker. The source companion stays in place
+		// completes that copy idempotently before archiving the copied root. The
+		// recovery marker survives until a later launch validates the provider's
+		// actual acknowledgment; a source snapshot alone is not an ACK. The source companion stays in place
 		// for interrupted-copy recovery; nested JSONL inside it is never resumable.
 		// Multiple distinct roots are ambiguous and must fail closed rather than
 		// guess by mtime.
@@ -2745,22 +2751,29 @@ func (i *Instance) buildOmpCommand(baseCommand string) string {
 			`find_forked_file() { forked_file=; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ] && [ "$candidate" != "$source_file" ]; then if [ -n "$forked_file" ]; then return 1; fi; forked_file="$candidate"; fi; done; [ -n "$forked_file" ] || return 2; return 0; };`,
 			`legacy_artifacts_complete() { source_artifacts=${source_file%%.jsonl}; forked_artifacts=${forked_file%%.jsonl}; if [ -e "$source_artifacts" ] && [ ! -d "$source_artifacts" ]; then echo "Failed to verify OMP legacy artifacts: $source_artifacts is not a directory" >&2; return 1; fi; if [ ! -d "$source_artifacts" ]; then return 0; fi; if [ ! -d "$forked_artifacts" ]; then return 2; fi; diff -qr "$source_artifacts" "$forked_artifacts" >/dev/null 2>&1; diff_status=$?; if [ "$diff_status" -eq 0 ]; then return 0; elif [ "$diff_status" -eq 1 ]; then return 2; fi; echo "Failed to verify OMP legacy artifacts in $forked_artifacts" >&2; return 1; };`,
 			`copy_legacy_artifacts() { source_artifacts=${source_file%%.jsonl}; forked_artifacts=${forked_file%%.jsonl}; if [ -e "$source_artifacts" ] && [ ! -d "$source_artifacts" ]; then echo "Failed to copy OMP legacy artifacts: $source_artifacts is not a directory" >&2; return 1; fi; if [ -d "$source_artifacts" ]; then if ! mkdir -p "$forked_artifacts" || ! cp -a "$source_artifacts/." "$forked_artifacts/"; then echo "Failed to copy OMP legacy artifacts from $source_artifacts to $forked_artifacts" >&2; return 1; fi; fi; return 0; };`,
-			`archive_legacy_root() { if [ -f "$source_file" ]; then archive_dir="$session_dir/.agent-deck-legacy-collisions/$session_id"; if [ -e "$archive_dir/$source_name" ]; then archive_dir="$archive_dir-$(date +%%Y%%m%%d%%H%%M%%S)-$$"; fi; if ! mkdir -p "$archive_dir"; then echo "Failed to create OMP legacy archive $archive_dir; preserved $source_file" >&2; return 1; fi; if ! mv "$source_file" "$archive_dir/$source_name"; then echo "Failed to archive copied OMP transcript $source_file" >&2; return 1; fi; fi; if ! rm -f "$migration_marker"; then echo "Failed to clear OMP legacy migration marker $migration_marker" >&2; return 1; fi; return 0; };`,
+			`record_recovered_omp_source() { recovered_id=${forked_file##*_}; recovered_id=${recovered_id%%.jsonl}; if [ -n "${AGENTDECK_OMP_SOURCE_BINDING:-}" ]; then (umask 077; printf '1\n%%s\n%%s\nsaved\n%%s\n' "$forked_file" "$recovered_id" "$AGENTDECK_OMP_LAUNCH_ID" > "$AGENTDECK_OMP_SOURCE_BINDING.$$") && mv -f "$AGENTDECK_OMP_SOURCE_BINDING.$$" "$AGENTDECK_OMP_SOURCE_BINDING" || return 1; export AGENTDECK_OMP_SOURCE_ERROR=; fi; };`,
+			`archive_legacy_root() { if [ -f "$source_file" ]; then archive_dir="$session_dir/.agent-deck-legacy-collisions/$session_id"; if [ -e "$archive_dir/$source_name" ]; then archive_dir="$archive_dir-$(date +%%Y%%m%%d%%H%%M%%S)-$$"; fi; if ! mkdir -p "$archive_dir"; then echo "Failed to create OMP legacy archive $archive_dir; preserved $source_file" >&2; return 1; fi; if ! mv "$source_file" "$archive_dir/$source_name"; then echo "Failed to archive copied OMP transcript $source_file" >&2; return 1; fi; fi; record_recovered_omp_source; };`,
+			`legacy_previous_ack_valid() { [ -z "${AGENTDECK_OMP_SOURCE_ERROR:-}" ] && [ -n "${AGENTDECK_OMP_SOURCE_BINDING:-}" ] && [ -f "$AGENTDECK_OMP_SOURCE_BINDING" ] && [ ! -L "$AGENTDECK_OMP_SOURCE_BINDING" ] || return 1; ( %s ); };`,
 			`finalize_legacy_migration() { if [ -z "${forked_file:-}" ]; then find_forked_file || { find_status=$?; if [ "$find_status" -eq 1 ]; then echo "Refusing to finalize OMP legacy migration: multiple replacement transcripts found in $session_dir" >&2; return 1; fi; return 2; }; fi; copy_legacy_artifacts || return 1; archive_legacy_root; };`,
 			`observe_completed_legacy_migration() { forked_file=; find_forked_file || { find_status=$?; if [ "$find_status" -eq 1 ]; then echo "Refusing to finalize OMP legacy migration: multiple replacement transcripts found in $session_dir" >&2; return 1; fi; return 2; }; legacy_artifacts_complete; artifacts_status=$?; if [ "$artifacts_status" -ne 0 ]; then return "$artifacts_status"; fi; archive_legacy_root; };`,
 			`scan_omp_roots;`,
+			`if [ -f "$migration_marker" ]; then [ ! -L "$migration_marker" ] && [ "$(wc -c < "$migration_marker")" -le 16384 ] || { echo "Refusing to resume OMP: invalid legacy migration marker; history preserved" >&2; exit 1; }; IFS= read -r source_name < "$migration_marker" || source_name=; case "$source_name" in ""|*/*) echo "Refusing to resume OMP: invalid legacy migration marker in $session_dir" >&2; exit 1;; esac; if [ ! -e "$session_dir/$source_name" ] && [ ! -L "$session_dir/$source_name" ] && legacy_previous_ack_valid >/dev/null 2>&1; then rm -f "$migration_marker" || { echo "Failed to clear acknowledged OMP legacy migration marker" >&2; exit 1; }; fi; fi;`,
 			`if [ -f "$migration_marker" ]; then IFS= read -r source_name < "$migration_marker" || source_name=; case "$source_name" in ""|*/*) echo "Refusing to resume OMP: invalid legacy migration marker in $session_dir" >&2; exit 1;; esac; active_file="$source_file"; source_file="$session_dir/$source_name"; session_id=${source_name%%.jsonl}; session_id=${session_id##*_}; if [ "$root_count" -eq 0 ]; then echo "Refusing to resume OMP: interrupted legacy migration has no active root transcript in $session_dir" >&2; exit 1; elif [ "$root_count" -gt 2 ]; then echo "Refusing to resume OMP: interrupted legacy migration has multiple replacement transcripts in $session_dir" >&2; exit 1; elif [ "$root_count" -eq 1 ] && [ "$active_file" = "$source_file" ]; then if ! rm -f "$migration_marker"; then echo "Refusing to resume OMP: could not clear unstarted legacy migration marker in $session_dir" >&2; exit 1; fi; scan_omp_roots; else forked_file=; if [ "$root_count" -eq 1 ]; then forked_file="$active_file"; elif [ ! -f "$source_file" ] || ! find_forked_file; then echo "Refusing to resume OMP: could not identify interrupted legacy migration transcripts in $session_dir" >&2; exit 1; fi; finalize_legacy_migration; migration_status=$?; if [ "$migration_status" -ne 0 ]; then echo "Refusing to resume OMP: could not recover interrupted legacy migration in $session_dir" >&2; exit 1; fi; scan_omp_roots; fi; fi;`,
+			`%s`,
 			`if [ "$root_count" -gt 1 ]; then echo "Refusing to resume OMP: multiple OMP root transcripts found in $session_dir" >&2; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ]; then echo " - $candidate" >&2; fi; done; exit 1; fi;`,
 			`if [ -n "$source_file" ]; then source_name=${source_file##*/}; session_id=${source_name%%.jsonl}; session_id=${session_id##*_}; agent_deck_root=${session_dir%%/*}; collision_file=; for candidate in "$agent_deck_root"/*/*.jsonl; do if [ -f "$candidate" ] && [ "$candidate" != "$source_file" ]; then candidate_name=${candidate##*/}; candidate_id=${candidate_name%%.jsonl}; candidate_id=${candidate_id##*_}; if [ "$candidate_id" = "$session_id" ]; then collision_file="$candidate"; break; fi; fi; done;`,
 			`if [ -n "$collision_file" ]; then echo "Detected copied legacy OMP identity $session_id in $collision_file; creating a unique native fork for this Agent Deck session" >&2; marker_tmp="$migration_marker.$$"; if ! printf '%%s\n' "$source_name" > "$marker_tmp" || ! mv "$marker_tmp" "$migration_marker"; then rm -f "$marker_tmp"; echo "Failed to record OMP legacy migration; preserved $source_file" >&2; exit 1; fi; migration_result="$session_dir/.agent-deck-legacy-migration-result.$$"; migration_stop="$session_dir/.agent-deck-legacy-migration-stop.$$"; ( while [ ! -e "$migration_stop" ]; do observe_completed_legacy_migration; migration_status=$?; if [ "$migration_status" -ne 2 ]; then printf '%%s\n' "$migration_status" > "$migration_result"; exit "$migration_status"; fi; sleep 0.05; done; exit 2 ) & migration_pid=$!; %s; omp_status=$?; if ! : > "$migration_stop"; then kill "$migration_pid" 2>/dev/null; wait "$migration_pid" 2>/dev/null; echo "Failed to stop OMP legacy migration watcher; inspect $migration_marker before restarting" >&2; exit 1; fi; wait "$migration_pid" 2>/dev/null; if [ -f "$migration_result" ]; then IFS= read -r migration_status < "$migration_result" || migration_status=1; else forked_file=; finalize_legacy_migration; migration_status=$?; fi; if ! rm -f "$migration_result" "$migration_stop"; then echo "Failed to clean OMP legacy migration state in $session_dir" >&2; exit 1; fi; if [ "$migration_status" -eq 2 ]; then echo "OMP did not create a replacement transcript for copied identity $session_id; preserved $source_file" >&2; exit 1; elif [ "$migration_status" -ne 0 ]; then echo "Failed to complete copied OMP identity migration $session_id; inspect $migration_marker before restarting" >&2; exit 1; fi; exit "$omp_status"; else %s; fi; else %s; fi;`,
 			`}`,
 		}, " ")
-		return envPrefix + fmt.Sprintf(script, sessionDir, forkCommand, resumeCommand, freshCommand)
+		return envPrefix + fmt.Sprintf(script, sessionDir, ompBindingSelectionShell(), ompBindingSelectionShell(), forkCommand, resumeCommand, freshCommand)
 	}
 
 	setup := "mkdir -p \"$session_dir\""
 	if fresh {
-		setup = "rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\""
+		// A fresh conversation is not permission to erase prior conversation
+		// files or their tool artifacts. Keep an explicit boundary until OMP
+		// acknowledges the replacement identity, including a lazy empty /new.
+		setup += " && printf '%s\\n' \"$AGENTDECK_OMP_LAUNCH_ID\" > \"$session_dir/.agent-deck-fresh-pending.$AGENTDECK_OMP_LAUNCH_ID\""
 	}
 	return envPrefix + fmt.Sprintf(
 		"session_dir=%s; %s && %s --session-dir \"$session_dir\"%s",
@@ -2782,13 +2795,36 @@ func (i *Instance) buildOmpForkCommandForTarget(target *Instance, baseCommand st
 	opts.NoSession = false
 	opts.FromClaude = false
 	opts.FromCodex = false
-	args := ompQuotedArgs(opts)
+	args := ompQuotedArgs(opts) + ompIdentityArgs
 	parentSessionDir := ompAgentDeckSessionDirExpr(i.ID)
-	sessionDir := ompAgentDeckSessionDirExpr(target.ID)
-	return target.buildEnvSourceCommand() + fmt.Sprintf(
-		"parent_session_dir=%s; session_dir=%s; { source_file=; root_count=0; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ]; then source_file=\"$candidate\"; root_count=$((root_count + 1)); fi; done; if [ \"$root_count\" -gt 1 ]; then echo \"Refusing to fork OMP: multiple OMP root transcripts found in $parent_session_dir\" >&2; for candidate in \"$parent_session_dir\"/*.jsonl; do if [ -f \"$candidate\" ]; then echo \" - $candidate\" >&2; fi; done; exit 1; fi; if [ -z \"$source_file\" ]; then echo \"No OMP session file found in $parent_session_dir\" >&2; exit 1; fi; rm -rf -- \"$session_dir\" && mkdir -p \"$session_dir\" && AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s --fork \"$source_file\" --session-dir \"$session_dir\"%s; }",
-		parentSessionDir, sessionDir, shellescape.Quote(target.ID),
-		shellescape.Quote(sessionProfileEnvValue()), cmd, args), nil
+	targetSessionDir := ompAgentDeckSessionDirExpr(target.ID)
+	commandPrefix := fmt.Sprintf("AGENTDECK_INSTANCE_ID=%s AGENTDECK_PROFILE=%s %s",
+		shellescape.Quote(target.ID), shellescape.Quote(sessionProfileEnvValue()), cmd)
+	launchSetup := target.ompIdentityLaunchSetup()
+
+	// Resolve both identities before rotating the target launch generation. A
+	// nonempty target is retry/recovery state: resume its acknowledged binding
+	// exactly, or fail closed while preserving every transcript and companion.
+	// Only a missing or truly empty target is eligible for a new native fork.
+	script := strings.Join([]string{
+		`unset AGENTDECK_OMP_SOURCE_BINDING AGENTDECK_OMP_SOURCE_ERROR AGENTDECK_OMP_LAUNCH_ID AGENTDECK_OMP_DIR;`,
+		`scan_omp_roots() { source_file=; root_count=0; for candidate in "$session_dir"/*.jsonl; do if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then source_file="$candidate"; root_count=$((root_count + 1)); fi; done; };`,
+		fmt.Sprintf(`parent_session_dir=%s; session_dir="$parent_session_dir"; scan_omp_roots;`, parentSessionDir),
+		ompBindingSelectionShell(),
+		`if [ "$root_count" -gt 1 ]; then echo "Refusing to fork OMP: multiple OMP root transcripts found in $parent_session_dir; history preserved" >&2; for candidate in "$parent_session_dir"/*.jsonl; do if [ -f "$candidate" ]; then echo " - $candidate" >&2; fi; done; exit 1; fi;`,
+		`if [ -z "$source_file" ]; then echo "No acknowledged OMP session file found in $parent_session_dir; history preserved" >&2; exit 1; fi;`,
+		`parent_source_file=$source_file;`,
+		fmt.Sprintf(`target_session_dir=%s; session_dir="$target_session_dir"; target_mode=; target_source_file=;`, targetSessionDir),
+		`if [ -L "$session_dir" ] || { [ -e "$session_dir" ] && [ ! -d "$session_dir" ]; }; then echo "Refusing to fork OMP: target session path is not a real directory: $session_dir; history preserved" >&2; exit 1; fi;`,
+		`if [ ! -e "$session_dir" ]; then target_mode=fork; else if target_entry=$(find "$session_dir" -mindepth 1 -maxdepth 1 -print -quit 2>&1); then target_scan_status=0; else target_scan_status=$?; fi; if [ "$target_scan_status" -ne 0 ]; then echo "Refusing to fork OMP: unable to inspect existing target $session_dir: $target_entry; history preserved" >&2; exit 1; elif [ -z "$target_entry" ]; then target_mode=fork; else scan_omp_roots;`,
+		ompBindingSelectionShell(),
+		`if [ -z "$binding_file" ]; then echo "Refusing to fork OMP: target contains unbound history without an acknowledged active conversation: $session_dir; history preserved" >&2; exit 1; fi;`,
+		`if [ "$bound_state" != saved ] || [ -z "$source_file" ]; then echo "Refusing to fork OMP: target active conversation is pending or unavailable: $session_dir; history preserved" >&2; exit 1; fi;`,
+		`target_mode=resume; target_source_file=$source_file; fi; fi;`,
+		launchSetup,
+		fmt.Sprintf(`if [ "$target_mode" = resume ]; then %s --resume "$target_source_file" --session-dir "$session_dir"%s; else %s --fork "$parent_source_file" --session-dir "$session_dir"%s; fi;`, commandPrefix, args, commandPrefix, args),
+	}, " ")
+	return target.buildEnvSourceCommand() + script, nil
 }
 
 // resolveDynamicTool returns the tool identity an instance should carry after
@@ -2853,8 +2889,14 @@ func (i *Instance) consumeForkStartCommand() string {
 	command := i.Command
 	if i.ForkStartCommand != "" {
 		command = i.ForkStartCommand
-		i.ForkStartCommand = ""
 	}
+	// OMP's fork command is transactional through provider identity ACK. Keep
+	// its retry recipe until the new child (or an idempotently recovered child)
+	// has published the exact launch generation; the ACK waiter clears it then.
+	if i.Tool == "omp" {
+		return command
+	}
+	i.ForkStartCommand = ""
 	i.IsForkAwaitingStart = false
 	return command
 }
@@ -4935,7 +4977,7 @@ func (i *Instance) buildTmuxOptionOverrides() map[string]string {
 	// its answer and exits BY DESIGN, and without remain-on-exit tmux tears the
 	// pane down with the answer still in it — the user asked a question and got
 	// a closed window. Keeping the pane is what makes a one-shot readable.
-	if i.IsSandboxed() || i.expectsFastExit() {
+	if i.IsSandboxed() || i.expectsFastExit() || i.Tool == "omp" {
 		if overrides == nil {
 			overrides = make(map[string]string)
 		}
@@ -5186,9 +5228,14 @@ func (i *Instance) Start() error {
 	}
 	defer release()
 	if spawnedSince(i.ID, beforeLock) {
+		if i.Tool == "omp" {
+			return i.ompDeduplicatedLaunch(false)
+		}
 		return nil
 	}
-	defer recordInstanceSpawn(i.ID)
+	if i.Tool != "omp" {
+		defer recordInstanceSpawn(i.ID)
+	}
 
 	if i.tmuxSession == nil {
 		return fmt.Errorf("tmux session not initialized")
@@ -5198,6 +5245,9 @@ func (i *Instance) Start() error {
 	// spawn_attempt trace so a spawn that dies before anything else runs still
 	// leaves a durable record.
 	i.recordSpawnAttempt()
+	if err := i.prepareOmpIdentity(); err != nil {
+		return err
+	}
 
 	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
 	// (issue #59, v1.7.68). Runs before command-building so the
@@ -5311,7 +5361,7 @@ func (i *Instance) Start() error {
 		}
 		command = i.buildPiCommand(i.Command)
 	case i.Tool == "omp":
-		if i.IsForkAwaitingStart {
+		if i.IsForkAwaitingStart && !i.ompFreshStart {
 			command = i.consumeForkStartCommand()
 			break
 		}
@@ -5378,11 +5428,14 @@ func (i *Instance) Start() error {
 	i.preAcceptCursorWorkspaceTrust()
 
 	// Start the tmux session
-	if err := i.tmuxSession.Start(command); err != nil {
+	if err := i.startTmuxWithOmpTracking(command); err != nil {
 		// #1580: persist the tmux-level failure so the preview / session show /
 		// lifecycle log can surface it instead of a bare "error".
 		i.recordTmuxStartFailure(command, err)
 		return fmt.Errorf("failed to start tmux session: %w", err)
+	}
+	if i.Tool == "omp" {
+		recordInstanceSpawn(i.ID)
 	}
 	i.markCodexSubagentMigrationStarted()
 
@@ -5522,9 +5575,14 @@ func (i *Instance) StartWithMessage(message string) error {
 	}
 	defer release()
 	if spawnedSince(i.ID, beforeLock) {
+		if i.Tool == "omp" {
+			return i.ompDeduplicatedLaunch(message != "")
+		}
 		return nil
 	}
-	defer recordInstanceSpawn(i.ID)
+	if i.Tool != "omp" {
+		defer recordInstanceSpawn(i.ID)
+	}
 
 	if i.tmuxSession == nil {
 		return fmt.Errorf("tmux session not initialized")
@@ -5548,6 +5606,9 @@ func (i *Instance) StartWithMessage(message string) error {
 	// #1580 diagnosability: clear any stale spawn-failure sidecar and drop a
 	// spawn_attempt trace (same as Start()).
 	i.recordSpawnAttempt()
+	if err := i.prepareOmpIdentity(); err != nil {
+		return err
+	}
 
 	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
 	// (issue #59, v1.7.68). Same call as in Start() — both spawn paths
@@ -5643,7 +5704,7 @@ func (i *Instance) StartWithMessage(message string) error {
 		}
 		command = i.buildPiCommand(i.Command)
 	case i.Tool == "omp":
-		if i.IsForkAwaitingStart {
+		if i.IsForkAwaitingStart && !i.ompFreshStart {
 			command = i.consumeForkStartCommand()
 			break
 		}
@@ -5717,10 +5778,13 @@ func (i *Instance) StartWithMessage(message string) error {
 	i.preAcceptCursorWorkspaceTrust()
 
 	// Start the tmux session
-	if err := i.tmuxSession.Start(command); err != nil {
+	if err := i.startTmuxWithOmpTracking(command); err != nil {
 		// #1580: persist the tmux-level failure (sister path to Start()).
 		i.recordTmuxStartFailure(command, err)
 		return fmt.Errorf("failed to start tmux session: %w", err)
+	}
+	if i.Tool == "omp" {
+		recordInstanceSpawn(i.ID)
 	}
 	i.markCodexSubagentMigrationStarted()
 
@@ -5813,7 +5877,7 @@ func (i *Instance) sendMessageWhenReady(message string) error {
 		ClaudeComposer: IsClaudeCompatible(i.Tool),
 		CodexPrompt:    IsCodexCompatible(i.Tool),
 	}); err != nil {
-		return fmt.Errorf("timeout waiting for agent to be ready")
+		return fmt.Errorf("could not deliver initial message: %w", err)
 	}
 
 	// Pre-send provenance probe for the #1777 attribution gate: Claude
@@ -6213,6 +6277,7 @@ func (i *Instance) UpdateStatus() error {
 	// tmux status. Refresh them before the early-return paths below so /rename
 	// is observed even while a session is detached, stopped, or hook-fast.
 	i.refreshCodexMetadataLocked()
+	i.refreshOmpMetadataLocked()
 
 	// Short grace period for tmux initialization (not Claude startup)
 	// Use lastStartTime for accuracy on restarts, fallback to CreatedAt
@@ -7929,7 +7994,11 @@ func (i *Instance) Preview() (string, error) {
 
 // PreviewFull returns all terminal output
 func (i *Instance) PreviewFull() (string, error) {
+	warning := i.ompHealthPreview()
 	if i.tmuxSession == nil {
+		if warning != "" {
+			return warning, nil
+		}
 		return "", fmt.Errorf("tmux session not initialized")
 	}
 
@@ -7937,9 +8006,17 @@ func (i *Instance) PreviewFull() (string, error) {
 	if err != nil {
 		// #1580: pane gone — fall back to the recorded spawn failure.
 		if fallback := i.spawnFailurePreview(); fallback != "" {
-			return fallback, nil
+			return fallback + "\n\n" + warning, nil
+		}
+		if warning != "" {
+			return warning, nil
 		}
 		return "", err
+	}
+	if warning != "" {
+		// Remote previews keep only the newest tail. Put diagnostics after
+		// history so long transcripts cannot truncate the actionable warning.
+		content += "\n\n" + warning
 	}
 	return content, nil
 }
@@ -9505,9 +9582,17 @@ func (i *Instance) restart(env map[string]string) error {
 	// spawn won while this call waited for the lock, restart that fresh process
 	// so the requested environment is not silently discarded.
 	if spawnedSince(i.ID, beforeLock) && len(env) == 0 {
+		if i.Tool == "omp" {
+			return i.ompDeduplicatedLaunch(false)
+		}
 		return nil
 	}
-	defer recordInstanceSpawn(i.ID)
+	if i.Tool != "omp" {
+		defer recordInstanceSpawn(i.ID)
+	}
+	if err := i.prepareOmpIdentity(); err != nil {
+		return err
+	}
 
 	// #1775: supersede the fast-death watcher from the PREVIOUS spawn here, at
 	// the single entry point, rather than deeper down. restart() has several
@@ -9517,6 +9602,7 @@ func (i *Instance) restart(env map[string]string) error {
 	// REPLACEMENT pane with the old spawn's command and start time — and
 	// recording a failure against it if that pane died.
 	i.bumpSpawnGenAndBarrier()
+	i.recordSpawnAttempt()
 
 	if len(env) > 0 {
 		i.restartEnv = make(map[string]string, len(env))
@@ -10047,6 +10133,14 @@ func (i *Instance) restart(env map[string]string) error {
 		case i.Tool == "pi":
 			command = i.buildPiCommand(i.Command)
 		case i.Tool == "omp":
+			// A native fork is not committed until the child acknowledges its
+			// exact launch generation. Restart must replay the retained selector:
+			// it forks an empty target once, then resumes the bound child on retry.
+			// An explicit RestartFresh deliberately supersedes that pending intent.
+			if i.IsForkAwaitingStart && !i.ompFreshStart {
+				command = i.consumeForkStartCommand()
+				break
+			}
 			command = i.buildOmpCommand(i.Command)
 		case i.Tool == "copilot":
 			command = i.buildCopilotCommand(i.Command)
@@ -10097,7 +10191,7 @@ func (i *Instance) restart(env map[string]string) error {
 
 	mcpLog.Debug("restart_starting_new_session", slog.String("command", command))
 
-	if err := i.tmuxSession.Start(command); err != nil {
+	if err := i.startTmuxWithOmpTracking(command); err != nil {
 		mcpLog.Debug("restart_start_failed", slog.String("error", err.Error()))
 		// #1924: Start() and its sister path have recorded this since #1580,
 		// but restart() never did — so the one case where the user has just
@@ -10107,7 +10201,14 @@ func (i *Instance) restart(env map[string]string) error {
 		i.Status = StatusError
 		return fmt.Errorf("failed to restart tmux session: %w", err)
 	}
+	if i.Tool == "omp" {
+		recordInstanceSpawn(i.ID)
+	}
 	i.markCodexSubagentMigrationStarted()
+	if command != "" && !i.expectsFastExit() {
+		gen, wake := i.newSpawnGenWatch()
+		go i.watchForFastDeath(command, gen, wake, i.tmuxSession, i.ID, i.Tool, sessionLog, GetSessionIDLifecycleLogPath(), spawnFailureDir())
+	}
 
 	mcpLog.Debug("restart_start_succeeded")
 
@@ -10709,17 +10810,8 @@ func (i *Instance) CanForkOmp() bool {
 			return false
 		}
 		sessionDir := filepath.Join(home, ".omp", "agent-deck", i.ID)
-		entries, err := os.ReadDir(sessionDir)
-		if err != nil {
-			return false
-		}
-		rootCount := 0
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".jsonl") {
-				rootCount++
-			}
-		}
-		return rootCount == 1
+		binding, err := resolveOmpActiveBinding(sessionDir)
+		return err == nil && binding != nil && binding.State == "saved"
 	}
 	return true
 }

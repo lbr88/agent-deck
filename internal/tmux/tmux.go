@@ -1394,6 +1394,12 @@ func (s *Session) startCommandSpec(workDir, command string) (string, []string) {
 	tmuxArgs := buildInnerTmuxArgs(s.SocketName, "new-session", "-d", "-s", s.Name, "-c", workDir,
 		"-x", strconv.Itoa(cols), "-y", strconv.Itoa(rows))
 	if startWithInitialProcess {
+		// Set this from INSIDE the newborn pane before its command can exit.
+		// Applying OptionOverrides after new-session returns loses sub-250ms
+		// failures (and their only diagnostic) before the parent can observe it.
+		if s.OptionOverrides["remain-on-exit"] == "on" {
+			command = `tmux -S "${TMUX%%,*}" set-option -p -t "$TMUX_PANE" remain-on-exit on || exit 1; ` + command
+		}
 		// Deliver the pane command as SEPARATE argv tokens (bash, -c, command)
 		// rather than a single shell-quoted string. This is the crux of the
 		// #1567 / #1580 fix.
@@ -3032,6 +3038,31 @@ func (s *Session) IsPaneDead() bool {
 		return false
 	}
 	return strings.TrimSpace(string(out)) == "1"
+}
+
+// PrimaryPaneAliveFresh probes pane 0.0 directly and fails closed when tmux
+// cannot answer. Launch/readiness gates must not use Exists or IsPaneDead:
+// both deliberately trust positive caches and treat some query failures as
+// live, which is appropriate for status polling but unsafe for acknowledging
+// that a newly launched process can receive user input.
+func (s *Session) PrimaryPaneAliveFresh() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
+	defer cancel()
+	out, err := s.tmuxCmdContext(ctx, "display-message", "-p", "-t", s.Name+":0.0", "#{pane_dead}").Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return false, fmt.Errorf("fresh primary-pane probe timed out: %w", errTmuxTimeout)
+		}
+		return false, fmt.Errorf("fresh primary-pane probe failed: %w", err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "0":
+		return true, nil
+	case "1":
+		return false, nil
+	default:
+		return false, fmt.Errorf("fresh primary-pane probe returned invalid state %q", strings.TrimSpace(string(out)))
+	}
 }
 
 // PaneDeadExitStatus returns the exit code of the process that ran in the

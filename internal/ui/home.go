@@ -1338,6 +1338,7 @@ type refreshMsg struct{}
 type statusUpdateMsg struct {
 	attachedSessionID string // Session that just returned from attach (if local attach)
 	attachedWorkDir   string // pane_current_path captured after attach returns
+	attachErr         error  // Failed attach is not a successful visit to the session.
 } // Triggers immediate status update without reloading
 
 type hubClientAPI interface {
@@ -5269,7 +5270,7 @@ func (h *Home) cleanupExpiredAnimations(
 		// Use appropriate timeout based on tool
 		// Claude and Gemini use longer timeout (MCP loading can be slow)
 		timeout := defaultTimeout
-		if session.IsCodexCompatible(inst.Tool) {
+		if needsResumeFrameProbe(inst) {
 			timeout = codexTimeout
 		} else if session.IsClaudeCompatible(inst.Tool) || inst.Tool == "gemini" {
 			timeout = claudeTimeout
@@ -5295,6 +5296,9 @@ func paneFrameReady(content string) bool {
 	return strings.TrimSpace(ansi.Strip(content)) != ""
 }
 
+var errResumeProcessExited = errors.New("agent exited while opening the session")
+var errResumeObservationFailed = errors.New("could not verify the agent while opening the session")
+
 func captureResumePane(inst *session.Instance) (string, error) {
 	if inst == nil {
 		return "", fmt.Errorf("session no longer exists")
@@ -5303,7 +5307,30 @@ func captureResumePane(inst *session.Instance) (string, error) {
 	if tmuxSess == nil {
 		return "", fmt.Errorf("session has no tmux target")
 	}
+	dead := false
+	if inst.GetToolThreadSafe() == "omp" {
+		alive, err := tmuxSess.PrimaryPaneAliveFresh()
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", errResumeObservationFailed, err)
+		}
+		dead = !alive
+	} else {
+		dead = tmuxSess.IsPaneDead()
+	}
+	if dead {
+		output, _ := tmuxSess.CaptureHistoryLines(50)
+		output = strings.TrimSpace(tmux.StripANSI(output))
+		if len(output) > 8192 {
+			output = output[len(output)-8192:]
+		}
+		return "", fmt.Errorf("%w: %s", errResumeProcessExited, output)
+	}
 	return tmuxSess.CapturePaneFresh()
+}
+
+func needsResumeFrameProbe(inst *session.Instance) bool {
+	tool := inst.GetToolThreadSafe()
+	return session.IsCodexCompatible(tool) || tool == "omp"
 }
 
 // hasActiveAnimation checks if a session has an animation currently being displayed
@@ -5350,7 +5377,7 @@ func (h *Home) hasActiveAnimation(sessionID string) bool {
 	// preview content is not evidence either because it may predate respawn-pane.
 	// Only the generation-matched readiness message releases this guard.
 	if _, isResuming := h.resumingSessions[sessionID]; isResuming &&
-		session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+		needsResumeFrameProbe(inst) {
 		return timeSinceStart < codexResumeReadyTimeout
 	}
 
@@ -8259,6 +8286,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A newer restart generation owns this session now.
 			return h, nil
 		}
+		if errors.Is(msg.err, errResumeProcessExited) || errors.Is(msg.err, errResumeObservationFailed) {
+			delete(h.resumingSessions, msg.sessionID)
+			delete(h.resumeAttachRequests, msg.sessionID)
+			h.setError(msg.err)
+			return h, nil
+		}
 
 		if msg.ready {
 			delete(h.resumingSessions, msg.sessionID)
@@ -8379,7 +8412,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if startedAt, tracked := h.resumingSessions[msg.sessionID]; tracked {
 				if inst := h.getInstanceByID(msg.sessionID); inst != nil &&
-					session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+					needsResumeFrameProbe(inst) {
 					readinessCheck = h.probeSessionResumeReadiness(msg.sessionID, startedAt, 0)
 				} else {
 					readinessCheck = func() tea.Msg {
@@ -8876,6 +8909,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusUpdateMsg:
 		// Clear attach flag - we've returned from the attached session
 		h.isAttaching.Store(false) // Atomic store for thread safety
+		if msg.attachErr != nil {
+			h.setError(fmt.Errorf("could not open session: %w", msg.attachErr))
+			return h, h.attachReturnSyncCmd(msg.attachedSessionID)
+		}
 		jumpInProgress := h.jumpMode
 		now := time.Now()
 		h.beginAttachReturnGrace(now)
@@ -9639,7 +9676,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, sessionID := range expiredResumes {
 			delete(h.resumeAttachRequests, sessionID)
 			if inst := h.getInstanceByID(sessionID); inst != nil &&
-				session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+				needsResumeFrameProbe(inst) {
 				h.setError(fmt.Errorf("session did not render after resume; press R to retry"))
 			}
 		}
@@ -11457,6 +11494,9 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 							onExit:      func() { h.isAttaching.Store(false) },
 						}, func(err error) tea.Msg {
 							h.isAttaching.Store(false)
+							if err != nil {
+								return statusUpdateMsg{attachedSessionID: parentInst.ID, attachErr: err}
+							}
 							parentInst.MarkAccessed()
 							return statusUpdateMsg{attachedSessionID: parentInst.ID}
 						})
@@ -16720,7 +16760,7 @@ func (h *Home) activateLocalSession(inst *session.Instance) tea.Cmd {
 		return h.beginSessionResume(inst, true)
 	}
 
-	if !session.IsCodexCompatible(inst.GetToolThreadSafe()) {
+	if !needsResumeFrameProbe(inst) {
 		return h.attachSession(inst)
 	}
 
@@ -17059,6 +17099,9 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 		// Belt for the path where Bubble Tea fails to release the terminal and
 		// invokes this callback without ever running attachCmd.Run().
 		h.isAttaching.Store(false) // Atomic store for thread safety
+		if err != nil {
+			return statusUpdateMsg{attachedSessionID: inst.ID, attachErr: err}
+		}
 
 		// NOTE: No manual screen clear here. Bubble Tea's RestoreTerminal()
 		// re-enters alt screen which handles clearing. Direct fmt.Print

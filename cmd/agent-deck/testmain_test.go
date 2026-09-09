@@ -44,7 +44,8 @@ func runTestMain(m *testing.M) int {
 	// commands operate on their temp repos instead of the real repository.
 	testutil.UnsetGitRepoEnv()
 	if !isHelperProcess {
-		isolatePackageHome("agent-deck-cmd-tests-home-*")
+		cleanupPackageHome := isolatePackageHome("agent-deck-cmd-tests-home-*")
+		defer cleanupPackageHome()
 	}
 
 	// Isolate the tmux socket. Without this, cmd-level tests spawn tmux
@@ -69,7 +70,7 @@ func runTestMain(m *testing.M) int {
 	return code
 }
 
-func isolatePackageHome(pattern string) {
+func isolatePackageHome(pattern string) func() {
 	home, err := os.MkdirTemp("", pattern)
 	if err != nil {
 		panic(err)
@@ -83,6 +84,7 @@ func isolatePackageHome(pattern string) {
 	os.Unsetenv("XDG_DATA_HOME")
 	os.Unsetenv("XDG_CACHE_HOME")
 	os.Unsetenv("XDG_STATE_HOME")
+	return func() { _ = os.RemoveAll(home) }
 }
 
 // cleanupTestSessions kills any tmux sessions created during testing.

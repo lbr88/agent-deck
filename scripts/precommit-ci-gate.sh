@@ -78,6 +78,11 @@ ensure_go_tool() {
   fi
 }
 
+if has_match '^internal/session/(omp/|omp_[^/]+\.go$)'; then
+  command -v node >/dev/null 2>&1 || { echo "node is required for bundled OMP tracker tests."; exit 1; }
+  run node --test internal/session/omp/identity.test.mjs
+fi
+
 if [ "$go_changed" = true ]; then
   echo "[precommit-ci] Go-relevant staged changes detected."
 

@@ -167,6 +167,17 @@ jobs:
         timeout-minutes: 5
         run: go install gotest.tools/gotestsum@v1.13.0
 
+      - name: Set up Node for bundled OMP tracker tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+          # Release artifacts must not consume a mutable package-manager cache.
+          package-manager-cache: false
+
+      - name: Test bundled OMP identity tracker
+        timeout-minutes: 5
+        run: node --test internal/session/omp/identity.test.mjs
+
       - name: Run tests
         timeout-minutes: 30
         env:

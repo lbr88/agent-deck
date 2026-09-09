@@ -273,10 +273,10 @@ func TestBuildOmpCommand_ImportIsOneShot(t *testing.T) {
 	}
 }
 
-func TestBuildOmpCommand_FreshRestartRemovesScopedHistory(t *testing.T) {
+func TestBuildOmpCommand_FreshRestartSkipsResume(t *testing.T) {
 	inst := &Instance{ID: "fresh", Tool: "omp", ompFreshStart: true}
 	got := inst.buildOmpCommand("omp")
-	if !strings.Contains(got, `rm -rf -- "$session_dir"`) || strings.Contains(got, "--continue") {
+	if strings.Contains(got, "--resume") || strings.Contains(got, "--continue") {
 		t.Fatalf("fresh OMP command = %s", got)
 	}
 	if inst.ompFreshStart {
@@ -439,7 +439,7 @@ func TestOmpForkStopsWhenTargetSessionDirCreationFails(t *testing.T) {
 	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(parentDir, "session.jsonl"), []byte("{}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(parentDir, "session.jsonl"), []byte("{\"type\":\"session\",\"id\":\"parent-session\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, cmd, err := parent.CreateForkedOmpInstanceWithOptions("child", "", nil)
@@ -755,6 +755,11 @@ func TestBuildOmpCommandRecoversInterruptedLegacyMigration(t *testing.T) {
 	if err := os.WriteFile(migrationMarker, []byte(legacyName+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A previous launcher recorded the copied root before its native re-key
+	// was interrupted. Recovery must not keep selecting that archived source.
+	if err := writeOmpActiveBinding(sessionDir, &ompActiveBinding{File: legacyFile, SessionID: legacyID, State: "saved", Generation: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
 
 	fakeBin := filepath.Join(home, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -804,8 +809,10 @@ printf '%s\n' "$mode $source_file" > "$OMP_INVOKED_MARKER"
 	if _, err := os.Stat(otherFile); err != nil {
 		t.Fatalf("other Agent Deck instance was modified: %v", err)
 	}
-	if _, err := os.Stat(migrationMarker); !os.IsNotExist(err) {
-		t.Fatalf("durable migration marker was not cleared: %v", err)
+	// This fake provider does not acknowledge tracking. Keep the durable
+	// recovery checkpoint, even though archive/copy work has completed.
+	if _, err := os.Stat(migrationMarker); err != nil {
+		t.Fatalf("durable migration marker was cleared before provider ACK: %v", err)
 	}
 }
 
@@ -916,8 +923,8 @@ printf '%s\n' "$mode $source_file" > "$OMP_INVOKED_MARKER"
 	if _, err := os.Stat(otherFile); err != nil {
 		t.Fatalf("other Agent Deck instance was modified: %v", err)
 	}
-	if _, err := os.Stat(migrationMarker); !os.IsNotExist(err) {
-		t.Fatalf("durable migration marker was not cleared after repair: %v", err)
+	if _, err := os.Stat(migrationMarker); err != nil {
+		t.Fatalf("durable migration marker was cleared after repair without provider ACK: %v", err)
 	}
 }
 

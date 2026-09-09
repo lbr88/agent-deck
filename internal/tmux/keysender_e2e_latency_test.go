@@ -68,12 +68,16 @@ func pollUntilPaneContains(t *testing.T, socket, target, want string, timeout ti
 	start := time.Now()
 	deadline := start.Add(timeout)
 	for time.Now().Before(deadline) {
-		out, err := exec.Command("tmux", "-L", socket, "capture-pane", "-t", target, "-p").CombinedOutput()
+		// A long working-directory prompt can wrap a marker even in a wide
+		// pane. Join soft-wrapped rows so rendered Z17_ is not mistaken for
+		// missing input when tmux captures it as "Z1\n7_".
+		out, err := exec.Command("tmux", "-L", socket, "capture-pane", "-t", target, "-p", "-J").CombinedOutput()
 		if err == nil && strings.Contains(string(out), want) {
 			return time.Since(start)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("pane never rendered %q within %v", want, timeout)
+	out, captureErr := exec.Command("tmux", "-L", socket, "capture-pane", "-t", target, "-p", "-J").CombinedOutput()
+	t.Fatalf("pane never rendered %q within %v (capture error: %v): %q", want, timeout, captureErr, out)
 	return 0
 }

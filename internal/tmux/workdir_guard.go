@@ -70,6 +70,9 @@ const SpawnBaseDir = "/"
 // TestNewSpawnCommand_RunsFromSpawnBaseDir and the Start() lint in
 // issue1713_workdir_guard_test.go.
 func newSpawnCommand(launcher string, args ...string) *exec.Cmd {
+	if launcher == "systemd-run" {
+		args = protectSystemdRunArgs(args)
+	}
 	cmd := execCommand(launcher, args...)
 	cmd.Dir = SpawnBaseDir
 	return cmd

@@ -60,20 +60,21 @@ css: tools
 		-o ./internal/web/static/styles.css \
 		--minify
 	@echo "==> Brute-force globbing diff (Pitfall #1 gate)"
-	@trap 'rm -f ./internal/web/static/.brute-tw.src.css' EXIT INT TERM; \
+	@BRUTE_CSS=$$(mktemp "$${TMPDIR:-/var/tmp}/agent-deck-tw-brute.XXXXXX") || exit 1; \
+	trap 'rm -f ./internal/web/static/.brute-tw.src.css "$$BRUTE_CSS"' EXIT INT TERM; \
 	cp ./internal/web/static/styles.src.css ./internal/web/static/.brute-tw.src.css; \
 	printf '\n/* --- brute-force additional @source (Pitfall #1 gate) --- */\n@source "./**/*.{js,mjs,html}";\n@source not "./vendor/**";\n@source not "./chart.umd.min.js";\n@source not "./sw.js";\n' \
 		>> ./internal/web/static/.brute-tw.src.css; \
 	$(TAILWIND_BIN) -i ./internal/web/static/.brute-tw.src.css \
-		-o /tmp/agent-deck-tw-brute.css \
-		--minify; \
+		-o "$$BRUTE_CSS" \
+		--minify || exit 1; \
 	rm -f ./internal/web/static/.brute-tw.src.css; \
-	if ! diff -q ./internal/web/static/styles.css /tmp/agent-deck-tw-brute.css >/dev/null 2>&1; then \
+	if ! diff -q ./internal/web/static/styles.css "$$BRUTE_CSS" >/dev/null 2>&1; then \
 		if [ -f ./internal/web/static/.tailwind-allowlist.txt ]; then \
 			echo "Brute-force diff non-empty but allowlist file present; review manually."; \
 		else \
 			echo "ERROR: brute-force @source diff non-empty (Pitfall #1). Add classes to internal/web/static/.tailwind-allowlist.txt or fix @source globs in styles.src.css." >&2; \
-			diff ./internal/web/static/styles.css /tmp/agent-deck-tw-brute.css | head -40; \
+			diff ./internal/web/static/styles.css "$$BRUTE_CSS" | head -40; \
 			exit 1; \
 		fi; \
 	fi
