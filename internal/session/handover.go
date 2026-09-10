@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -16,7 +17,31 @@ const (
 	HandoverTargetCodex    HandoverTarget = "codex"
 	HandoverTargetOpenCode HandoverTarget = "opencode"
 	HandoverTargetKiro     HandoverTarget = "kiro"
+	HandoverTargetOMP      HandoverTarget = "omp"
 )
+
+var supportedHandoverTargets = []HandoverTarget{
+	HandoverTargetClaude,
+	HandoverTargetCodex,
+	HandoverTargetOpenCode,
+	HandoverTargetKiro,
+	HandoverTargetOMP,
+}
+
+// SupportedHandoverTargets returns the canonical tools that can participate on
+// either side of a handover. Callers receive a copy so the registry cannot be
+// mutated accidentally.
+func SupportedHandoverTargets() []HandoverTarget {
+	return append([]HandoverTarget(nil), supportedHandoverTargets...)
+}
+
+func supportedHandoverTargetsText() string {
+	names := make([]string, 0, len(supportedHandoverTargets))
+	for _, target := range supportedHandoverTargets {
+		names = append(names, string(target))
+	}
+	return strings.Join(names, ", ")
+}
 
 type HandoverOptions struct {
 	Target      HandoverTarget
@@ -24,7 +49,6 @@ type HandoverOptions struct {
 	GroupPath   string
 	ProjectPath string
 	Message     string
-	Start       bool
 	Peers       []*Instance
 }
 
@@ -54,7 +78,7 @@ func HandoverSession(source *Instance, opts HandoverOptions) (*HandoverResult, e
 	if err != nil {
 		return nil, err
 	}
-	sourceTool, err := handoverSourceTool(source)
+	sourceTool, err := HandoverSourceTool(source)
 	if err != nil {
 		return nil, err
 	}
@@ -108,33 +132,33 @@ func HandoverSession(source *Instance, opts HandoverOptions) (*HandoverResult, e
 }
 
 func normalizeHandoverTarget(target HandoverTarget) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(string(target))) {
-	case string(HandoverTargetClaude):
-		return string(HandoverTargetClaude), nil
-	case string(HandoverTargetCodex):
-		return string(HandoverTargetCodex), nil
-	case string(HandoverTargetOpenCode):
-		return string(HandoverTargetOpenCode), nil
-	case string(HandoverTargetKiro):
-		return string(HandoverTargetKiro), nil
-	default:
-		return "", fmt.Errorf("unsupported handover target %q: allowed targets are claude, codex, opencode, kiro", target)
+	normalized := strings.ToLower(strings.TrimSpace(string(target)))
+	for _, supported := range supportedHandoverTargets {
+		if normalized == string(supported) {
+			return normalized, nil
+		}
 	}
+	return "", fmt.Errorf("unsupported handover target %q: allowed targets are %s", target, supportedHandoverTargetsText())
 }
 
-func handoverSourceTool(source *Instance) (string, error) {
-	switch {
-	case IsClaudeCompatible(source.Tool):
-		return string(HandoverTargetClaude), nil
-	case IsCodexCompatible(source.Tool):
-		return string(HandoverTargetCodex), nil
-	case source.Tool == string(HandoverTargetOpenCode):
-		return string(HandoverTargetOpenCode), nil
-	case source.Tool == string(HandoverTargetKiro):
-		return string(HandoverTargetKiro), nil
-	default:
-		return "", fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode, kiro", source.Tool)
+// HandoverSourceTool returns the canonical handover identity for an instance.
+func HandoverSourceTool(source *Instance) (string, error) {
+	if source == nil {
+		return "", fmt.Errorf("source session is required")
 	}
+	tool := strings.ToLower(strings.TrimSpace(source.Tool))
+	switch {
+	case IsClaudeCompatible(tool):
+		return string(HandoverTargetClaude), nil
+	case IsCodexCompatible(tool):
+		return string(HandoverTargetCodex), nil
+	}
+	for _, supported := range supportedHandoverTargets {
+		if tool == string(supported) {
+			return tool, nil
+		}
+	}
+	return "", fmt.Errorf("unsupported handover source tool %q: supported source tools are %s", source.Tool, supportedHandoverTargetsText())
 }
 
 func uniqueHandoverDefaultTitle(sourceTitle, targetTool string, peers []*Instance) string {
@@ -224,7 +248,7 @@ func capHandoverText(s string, limit int) string {
 }
 
 func buildHandoverPrompt(source, target *Instance, sourceTool, targetTool, latestOutput, message string) string {
-	sourceToolID := sourceHandoverToolSessionID(source, sourceTool)
+	sourceToolID := HandoverSourceToolSessionID(source)
 	if sourceToolID == "" {
 		sourceToolID = "unknown"
 	}
@@ -257,7 +281,14 @@ func buildHandoverPrompt(source, target *Instance, sourceTool, targetTool, lates
 	return b.String()
 }
 
-func sourceHandoverToolSessionID(source *Instance, sourceTool string) string {
+// HandoverSourceToolSessionID returns only an identity that Agent Deck can
+// prove belongs to the selected source. OMP has no database ID column, so its
+// provider ID comes from the exact validated active-binding record.
+func HandoverSourceToolSessionID(source *Instance) string {
+	sourceTool, err := HandoverSourceTool(source)
+	if err != nil {
+		return ""
+	}
 	switch sourceTool {
 	case string(HandoverTargetClaude):
 		return strings.TrimSpace(source.ClaudeSessionID)
@@ -267,6 +298,20 @@ func sourceHandoverToolSessionID(source *Instance, sourceTool string) string {
 		return strings.TrimSpace(source.OpenCodeSessionID)
 	case string(HandoverTargetKiro):
 		return strings.TrimSpace(source.KiroSessionID)
+	case string(HandoverTargetOMP):
+		if source.SSHHost != "" || source.IsSandboxed() || source.resolvedOmpOptions().NoSession ||
+			!validHookSessionAnchorInstanceID(source.ID) {
+			return ""
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		binding, err := readOmpActiveBinding(filepath.Join(home, ".omp", "agent-deck", source.ID))
+		if err != nil || binding == nil {
+			return ""
+		}
+		return strings.TrimSpace(binding.SessionID)
 	default:
 		return ""
 	}

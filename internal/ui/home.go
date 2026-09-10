@@ -1310,6 +1310,11 @@ type sessionHandoverCreatedMsg struct {
 	warning  string
 }
 
+type handoverSourceToolIDResolvedMsg struct {
+	sourceID string
+	toolID   string
+}
+
 type codexImportEntriesLoadedMsg struct {
 	entries []session.CodexIndexEntry
 	err     error
@@ -8090,6 +8095,10 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
+	case handoverSourceToolIDResolvedMsg:
+		h.handoverDialog.SetSourceToolID(msg.sourceID, msg.toolID)
+		return h, nil
+
 	case ompForkTitleSyncResultMsg:
 		pending, ok := h.pendingTitleChanges[msg.instanceID]
 		if msg.err != nil {
@@ -12929,7 +12938,7 @@ func (h *Home) handleSessionActionPrefixKey(key string) (tea.Model, tea.Cmd) {
 	}
 	switch key {
 	case "h":
-		h.openHandoverDialogForSelected()
+		return h, h.openHandoverDialogForSelected()
 	case "e", "P", "shift+p", "enter":
 		h.openEditSessionDialogForSelected()
 	case "esc":
@@ -12970,22 +12979,48 @@ func hubSessionEditProxy(item session.Item) *session.Instance {
 	}
 }
 
-func (h *Home) openHandoverDialogForSelected() {
+var resolveHandoverSourceToolID = session.HandoverSourceToolSessionID
+
+func (h *Home) openHandoverDialogForSelected() tea.Cmd {
 	if h.cursor >= len(h.flatItems) {
-		return
+		return nil
 	}
 	item := h.flatItems[h.cursor]
 	if item.Type != session.ItemTypeSession || item.Session == nil {
-		return
+		return nil
 	}
-	switch canonicalHandoverDialogTool(item.Session) {
-	case "claude", "codex", "opencode", "kiro":
-	default:
-		h.setError(fmt.Errorf("unsupported handover source tool %q: supported source tools are claude, codex, opencode, kiro", item.Session.Tool))
-		return
+	sourceTool, err := session.HandoverSourceTool(item.Session)
+	if err != nil {
+		h.setError(err)
+		return nil
 	}
 	h.handoverDialog.SetSize(h.width, h.height)
 	h.handoverDialog.Show(item.Session)
+	if sourceTool != string(session.HandoverTargetOMP) {
+		return nil
+	}
+
+	// OMP has no persisted provider-ID column. Resolve its exact active binding
+	// off Bubble Tea's event-loop goroutine so opening the modal cannot block on
+	// config or filesystem I/O. Capture only the immutable lookup inputs rather
+	// than retaining the live Instance pointer while status polling continues.
+	sourceID := item.Session.ID
+	lookupSource := &session.Instance{
+		ID:              sourceID,
+		Title:           item.Session.Title,
+		Tool:            item.Session.Tool,
+		SSHHost:         item.Session.SSHHost,
+		ToolOptionsJSON: append([]byte(nil), item.Session.ToolOptionsJSON...),
+	}
+	if item.Session.IsSandboxed() {
+		lookupSource.Sandbox = &session.SandboxConfig{Enabled: true}
+	}
+	return func() tea.Msg {
+		return handoverSourceToolIDResolvedMsg{
+			sourceID: sourceID,
+			toolID:   resolveHandoverSourceToolID(lookupSource),
+		}
+	}
 }
 
 // handleConfirmDialogKey handles keys when confirmation dialog is visible
@@ -19753,7 +19788,6 @@ func (h *Home) createSessionFromHandover(source *session.Instance, peers []*sess
 			GroupPath:   values.GroupPath,
 			ProjectPath: values.ProjectPath,
 			Message:     values.Message,
-			Start:       values.StartNow,
 			Peers:       peers,
 		})
 		if err != nil {

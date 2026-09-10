@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.6] - 2026-09-10
+
+### Added
+
+- Support Oh My Pi (`omp`) as both a source and target in CLI and TUI session handovers, using the source entry's exact validated OMP conversation binding when available.
+
 ## [1.13.5] - 2026-09-09
 
 ### Fixed

@@ -51,7 +51,7 @@ func (d *HandoverDialog) Show(source *session.Instance) {
 	d.sourceID = source.ID
 	d.sourceTitle = source.Title
 	d.sourceTool = canonicalHandoverDialogTool(source)
-	d.sourceToolID = handoverDialogSourceToolID(source)
+	d.sourceToolID = handoverDialogCachedSourceToolID(source)
 	d.targetOptions = handoverDialogTargets(d.sourceTool)
 	d.targetCursor = 0
 	d.focusIndex = 0
@@ -80,6 +80,17 @@ func (d *HandoverDialog) Hide() {
 
 func (d *HandoverDialog) IsVisible() bool {
 	return d != nil && d.visible
+}
+
+// SetSourceToolID applies a deferred provider-identity lookup only while the
+// dialog still belongs to the same source session. OMP resolves its active
+// binding asynchronously, so the result may arrive after the dialog was
+// closed or replaced.
+func (d *HandoverDialog) SetSourceToolID(sourceID, toolID string) {
+	if d == nil || !d.visible || d.sourceID != sourceID {
+		return
+	}
+	d.sourceToolID = strings.TrimSpace(toolID)
 }
 
 func (d *HandoverDialog) SetSize(width, height int) {
@@ -272,24 +283,19 @@ func (d *HandoverDialog) blurInputs() {
 }
 
 func canonicalHandoverDialogTool(source *session.Instance) string {
-	switch {
-	case source == nil:
+	tool, err := session.HandoverSourceTool(source)
+	if err != nil {
 		return ""
-	case session.IsClaudeCompatible(source.Tool):
-		return "claude"
-	case session.IsCodexCompatible(source.Tool):
-		return "codex"
-	default:
-		return source.Tool
 	}
+	return tool
 }
 
 func handoverDialogTargets(sourceTool string) []string {
-	all := []string{"claude", "codex", "opencode", "kiro"}
+	all := session.SupportedHandoverTargets()
 	targets := make([]string, 0, len(all)-1)
 	for _, target := range all {
-		if target != sourceTool {
-			targets = append(targets, target)
+		if string(target) != sourceTool {
+			targets = append(targets, string(target))
 		}
 	}
 	return targets
@@ -303,22 +309,14 @@ func handoverDialogDefaultTitle(sourceTitle, target string) string {
 	return fmt.Sprintf("%s (%s)", sourceTitle, target)
 }
 
-func handoverDialogSourceToolID(source *session.Instance) string {
+func handoverDialogCachedSourceToolID(source *session.Instance) string {
 	if source == nil {
 		return ""
 	}
-	switch canonicalHandoverDialogTool(source) {
-	case "claude":
-		return source.ClaudeSessionID
-	case "codex":
-		return source.CodexSessionID
-	case "opencode":
-		return source.OpenCodeSessionID
-	case "kiro":
-		return source.KiroSessionID
-	default:
+	if canonicalHandoverDialogTool(source) == string(session.HandoverTargetOMP) {
 		return ""
 	}
+	return session.HandoverSourceToolSessionID(source)
 }
 
 func shortHandoverDialogID(id string) string {

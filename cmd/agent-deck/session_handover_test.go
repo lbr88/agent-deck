@@ -55,6 +55,34 @@ func TestHandoverSessionCLIHelperCreatesStoppedCodexSession(t *testing.T) {
 	}
 }
 
+func TestHandoverSessionCLIHelperCreatesStoppedOmpSession(t *testing.T) {
+	source := session.NewInstanceWithGroupAndTool("source", t.TempDir(), "grp", "claude")
+	storage := &session.Storage{}
+	var saved []*session.Instance
+
+	result, err := handoverSession("default", handoverSessionOptions{
+		Source: source.ID,
+		To:     "omp",
+	}, handoverSessionDeps{
+		load: func(string) (*session.Storage, []*session.Instance, []*session.GroupData, error) {
+			return storage, []*session.Instance{source}, nil, nil
+		},
+		save: func(_ *session.Storage, instances []*session.Instance, _ []*session.GroupData) error {
+			saved = append([]*session.Instance(nil), instances...)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("handoverSession: %v", err)
+	}
+	if result.Target.Tool != "omp" || result.Target.Command != "omp" || result.Started {
+		t.Fatalf("target = tool %q command %q started %v, want omp/omp/false", result.Target.Tool, result.Target.Command, result.Started)
+	}
+	if len(saved) != 2 || saved[1].ID != result.Target.ID {
+		t.Fatalf("saved instances = %v, want source plus OMP target", saved)
+	}
+}
+
 func TestHandoverSessionCLIHelperStartPersistsBeforeAndAfterStarting(t *testing.T) {
 	source := session.NewInstanceWithGroupAndTool("source task", t.TempDir(), "work", "claude")
 	var events []string
@@ -121,7 +149,7 @@ func TestHandoverSessionCLIHelperValidationErrors(t *testing.T) {
 			return nil, []*session.Instance{source}, nil, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "allowed targets are claude, codex, opencode, kiro") {
+	if err == nil || !strings.Contains(err.Error(), "allowed targets are claude, codex, opencode, kiro, omp") {
 		t.Fatalf("unknown-target error = %v, want allowed-targets validation", err)
 	}
 }

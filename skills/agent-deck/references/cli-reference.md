@@ -295,7 +295,7 @@ directory.
 ### session handover
 
 ```bash
-agent-deck session handover <source-session> --to <claude|codex|opencode|kiro> [-t "title"] [-g "group"] [--path <path>] [-m "message"] [--start] [--json] [-q]
+agent-deck session handover <source-session> --to <claude|codex|opencode|kiro|omp> [-t "title"] [-g "group"] [--path <path>] [-m "message"] [--start] [--json] [-q]
 ```
 
 Creates a new target-tool session with a deterministic handover packet. This
@@ -305,7 +305,7 @@ output, git context, and optional operator message.
 
 | Flag | Description |
 |------|-------------|
-| `--to` | Target tool: `claude`, `codex`, `opencode`, or `kiro` |
+| `--to` | Target tool: `claude`, `codex`, `opencode`, `kiro`, or `omp` |
 | `-t, --title` | Title for the new target session |
 | `-g, --group` | Group path for the new target session |
 | `--path` | Project path for the new target session |
