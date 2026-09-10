@@ -127,8 +127,8 @@ func handleSessionHandover(profile string, args []string) {
 	group := fs.String("group", "", "Group path for the new session")
 	groupShort := fs.String("g", "", "Group path for the new session (short)")
 	pathFlag := fs.String("path", "", "Project path for the new session")
-	message := fs.String("message", "", "Operator instruction appended to the handover packet")
-	messageShort := fs.String("m", "", "Operator instruction appended to the handover packet (short)")
+	message := fs.String("message", "", "Explicit operator instruction; without one the target acknowledges and waits")
+	messageShort := fs.String("m", "", "Explicit operator instruction; without one the target acknowledges and waits (short)")
 	start := fs.Bool("start", false, "Start the handed-over session and send the handover packet")
 	noStart := fs.Bool("no-start", false, "Create the handed-over session stopped")
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
@@ -184,6 +184,9 @@ func handleSessionHandover(profile string, args []string) {
 		fmt.Sprintf("Handed over session: %s", result.Result.Target.Title),
 		handoverResultJSON(result),
 	)
+	if result.Result.Warning != "" && !*jsonOutput && !(*quiet || *quietShort) {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", result.Result.Warning)
+	}
 }
 
 func handoverResultJSON(result *handoverSessionResult) map[string]interface{} {
