@@ -2,7 +2,7 @@
 name: agent-deck
 description: Terminal session manager for AI coding agents. Use when user mentions "agent-deck", "session", "sub-agent", "MCP attach", "git worktree", or needs to (1) create/start/stop/restart/fork sessions, (2) attach/detach MCPs, (3) manage groups/profiles, (4) get session output, (5) configure agent-deck, (6) troubleshoot issues, (7) launch sub-agents, or (8) create/manage worktree sessions. Covers CLI commands, TUI shortcuts, config.toml options, and automation.
 metadata:
-  compatibility: "claude, opencode"
+  compatibility: "claude, codex, kiro, omp, opencode"
 ---
 
 # Agent Deck
@@ -37,6 +37,24 @@ $SKILL_DIR/scripts/launch-subagent.sh "Title" "Prompt" --wait
 **For local development**, the path looks like: `<repo>/skills/agent-deck/scripts/`
 
 ## Quick Start
+
+### Check whether this session is managed
+
+Before relying on current-session context, run:
+
+```bash
+agent-deck session current --json
+```
+
+Exit 0 confirms the managed Agent Deck session and returns its authoritative
+ID, title, profile, path, and group; `status` is the last stored value, not a
+live probe. On a non-zero exit, inspect the error: `not in a tmux session` or
+`current tmux session is not an agent-deck session` means the current execution
+context is unmanaged, while probe, profile, or storage errors make the check
+inconclusive and require troubleshooting. Do not infer session context from the
+working directory or an inherited environment variable. Commands that default
+to the current session, create parented children, or inspect children require
+this check first.
 
 ```bash
 # Launch TUI
