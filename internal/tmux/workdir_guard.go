@@ -70,6 +70,9 @@ const SpawnBaseDir = "/"
 // TestNewSpawnCommand_RunsFromSpawnBaseDir and the Start() lint in
 // issue1713_workdir_guard_test.go.
 func newSpawnCommand(launcher string, args ...string) *exec.Cmd {
+	if launcher == "systemd-run" {
+		args = protectSystemdRunArgs(args)
+	}
 	cmd := execCommand(launcher, args...)
 	cmd.Dir = SpawnBaseDir
 	return cmd
@@ -231,17 +234,92 @@ func sameDirectory(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
+// panePathFormat includes the SERVER version in the same tmux query as the
+// path. This matters because tmux 3.0 through 3.4 alter format output before it
+// reaches the client: utf8_strvis() inserts a backslash before a dollar followed
+// by a letter, underscore, or opening brace. tmux 3.5 fixed that by doing so
+// only when VIS_DQ is requested. Using #{version} from the same expansion keeps
+// decoding tied to the server which serialized the path; `tmux -V` would only
+// identify the installed client, which can differ from an already-running
+// server. Upstream source for the behavior and fix:
+//   - https://github.com/tmux/tmux/blob/3.4/utf8.c#L508-L541
+//   - https://github.com/tmux/tmux/blob/3.5/utf8.c#L536-L569
+const tmuxPathOutputPrefix = "AD_CWD_V1"
+
+var panePathFormat = tmuxFmt(tmuxPathOutputPrefix, "#{version}", "#{pane_current_path}")
+
+// parsePanePathOutput removes only tmux's known pre-3.5 format-output escape.
+// Unknown and modern versions are left byte-for-byte alone so a genuine
+// backslash-dollar directory can never be silently retargeted.
+func parsePanePathOutput(output string) string {
+	payload, ok := parseVersionedTmuxOutput(output)
+	if !ok {
+		return ""
+	}
+	return payload
+}
+
+// parseVersionedTmuxOutput parses "AD_CWD_V1|#{version}|<payload>" and reverses the
+// exact output transformation used by tmux 3.0 through 3.4. The printable
+// marker identifies the response independently of the version spelling, so
+// custom/future versions retain their raw paths without accepting an unframed
+// path that happens to contain a pipe. Cut preserves separator bytes in payload.
+func parseVersionedTmuxOutput(output string) (string, bool) {
+	line := strings.Trim(output, "\n\r\t\v\f")
+	framed, ok := strings.CutPrefix(line, tmuxPathOutputPrefix+tmuxFieldSep)
+	if !ok {
+		return "", false
+	}
+	version, payload, ok := strings.Cut(framed, tmuxFieldSep)
+	if !ok || version == "" || strings.ContainsAny(version, "\x00\r\n\t") {
+		return "", false
+	}
+	if tmuxVersionEscapesFormatDollars(version) {
+		payload = decodeLegacyTmuxFormatDollars(payload)
+	}
+	return payload, true
+}
+
+func tmuxVersionEscapesFormatDollars(version string) bool {
+	major, minor, suffix, ok := splitTmuxVersion(version)
+	// Released tmux patch versions use at most one trailing letter (3.2a,
+	// 3.4a). A longer/custom suffix is not one of the source versions whose
+	// serializer we verified, so leave its payload untouched.
+	patch := suffix == "" || (len(suffix) == 1 && suffix[0] >= 'a' && suffix[0] <= 'z')
+	return ok && major == 3 && minor < 5 && patch
+}
+
+// decodeLegacyTmuxFormatDollars reverses the branch in tmux <=3.4's
+// utf8_strvis(): for each variable-like dollar it removes exactly the one
+// backslash tmux inserted immediately before it. Existing backslashes remain:
+// a real `\$name` is reported as `\\$name` and decodes back to `\$name`.
+func decodeLegacyTmuxFormatDollars(value string) string {
+	var decoded strings.Builder
+	decoded.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' && i+2 < len(value) && value[i+1] == '$' &&
+			isLegacyTmuxDollarFollower(value[i+2]) {
+			continue
+		}
+		decoded.WriteByte(value[i])
+	}
+	return decoded.String()
+}
+
+func isLegacyTmuxDollarFollower(next byte) bool {
+	return next == '_' || next == '{' ||
+		(next >= 'a' && next <= 'z') ||
+		(next >= 'A' && next <= 'Z')
+}
+
 // panePathProbe reads the pane's live working directory. Swappable seam so the
 // verification logic can be tested without a tmux server.
 var panePathProbe = func(s *Session) (string, error) {
-	out, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", "#{pane_current_path}")
+	out, err := s.runBoundedOutput("display-message", "-t", s.Name, "-p", panePathFormat)
 	if err != nil {
 		return "", err
 	}
-	// Strip only newline/tab/control framing from tmux's own output — not
-	// spaces, which may be a real part of the reported directory name. See
-	// classifyPaneCwd, which re-trims with the same restricted cutset.
-	return strings.Trim(string(out), "\n\r\t\v\f"), nil
+	return parsePanePathOutput(string(out)), nil
 }
 
 // paneCwdRecheckDelay spaces the re-probes below. tmux creates the pane process

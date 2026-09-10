@@ -797,13 +797,18 @@ func (i *Instance) deepSeekPromptDelivery() DeepSeekPromptDelivery {
 // PromptDeliveryError returns a non-nil error when this session cannot receive a
 // prompt at all, and nil when some channel exists (pane or command line).
 //
-// It is tool-agnostic by design: send paths call it without knowing about
-// DeepSeek, and every other tool returns nil, so nothing else changes behavior.
-// The message names the profile, the reason, and the two ways forward, because
-// "refused" without a route out is only marginally better than losing the
-// message.
+// It is tool-agnostic by design: send paths call it without knowing which
+// provider owns the pane. DeepSeek's browser surface and OMP's recognized
+// print/RPC modes have no terminal prompt, so typing into either would silently
+// discard the message. The error gives the caller a usable recovery route.
 func (i *Instance) PromptDeliveryError() error {
-	if i == nil || i.Tool != "deepseek" {
+	if i == nil {
+		return nil
+	}
+	if i.Tool == "omp" && ompCommandUsesNonTUI(i.Command) {
+		return fmt.Errorf("this OMP command uses a non-interactive output mode and has no terminal prompt; put the prompt in the configured command or switch to an interactive OMP command")
+	}
+	if i.Tool != "deepseek" {
 		return nil
 	}
 	if i.deepSeekPromptDelivery() != DeepSeekPromptUnsupported {

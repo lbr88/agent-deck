@@ -17,6 +17,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/git"
 	"github.com/asheshgoplani/agent-deck/internal/hub"
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/vcs"
 	"github.com/asheshgoplani/agent-deck/internal/vcsbackend"
 	"github.com/asheshgoplani/agent-deck/internal/web"
@@ -970,15 +971,57 @@ func (m *WebMutator) ForkSession(id string) (string, error) {
 		return "", fmt.Errorf("fork session: %w", err)
 	}
 
-	if err := forked.Start(); err != nil {
-		return "", fmt.Errorf("start forked session: %w", err)
-	}
-
 	storage, err := session.NewStorageWithProfile(m.h.profile)
 	if err != nil {
 		return "", fmt.Errorf("open storage: %w", err)
 	}
 	defer storage.Close()
+	checkpointed, err := storage.CheckpointOmpForkBeforeStart(forked)
+	if err != nil {
+		if checkpointed {
+			adopted, adoptErr := m.h.presentCheckpointedFork(forked)
+			if adoptErr != nil {
+				return forked.ID, errors.Join(err, adoptErr)
+			}
+			if adopted {
+				return forked.ID, err
+			}
+			return "", err
+		}
+		return "", err
+	}
+	if err := startForkedInstanceForUI(forked); err != nil {
+		if checkpointed {
+			adopted, adoptErr := m.h.presentCheckpointedFork(forked)
+			if adoptErr != nil {
+				return forked.ID, errors.Join(fmt.Errorf("start forked session: %w", err), adoptErr)
+			}
+			if !adopted {
+				return "", fmt.Errorf("OMP fork child %s was removed while its provider start failed: %w; the deleted row was not recreated", forked.ID, err)
+			}
+			return forked.ID, fmt.Errorf("OMP fork child %s is durably checkpointed but provider start failed: %w; retry child %s to resume safely", forked.ID, err, forked.ID)
+		}
+		return "", fmt.Errorf("start forked session: %w", err)
+	}
+	if checkpointed {
+		forked.PostStartSync(0)
+		if err := storage.FinalizeOmpForkLaunch(forked); err != nil {
+			adopted, presentErr := m.h.presentCheckpointedFork(forked)
+			if presentErr != nil {
+				return forked.ID, errors.Join(err, presentErr)
+			}
+			if !adopted && errors.Is(err, statedb.ErrInstanceNotStored) {
+				return "", fmt.Errorf("OMP fork child %s was removed while launching: %w; the deleted row was not recreated", forked.ID, err)
+			}
+			return forked.ID, fmt.Errorf("OMP fork child %s started but finalization failed: %w; retry child %s to reconcile the exact child", forked.ID, err, forked.ID)
+		}
+		if adopted, err := m.h.presentCheckpointedFork(forked); err != nil {
+			return forked.ID, err
+		} else if !adopted {
+			return "", fmt.Errorf("OMP fork child %s was removed while launching and was not re-added", forked.ID)
+		}
+		return forked.ID, nil
+	}
 
 	m.h.instancesMu.RLock()
 	existing := make([]*session.Instance, len(m.h.instances))
@@ -1098,22 +1141,30 @@ func (m *WebMutator) ForkSessionWithOptions(id string, req web.ForkSessionReques
 		delete(m.h.forkingSessions, msg.sourceID)
 	}
 	if msg.err != nil {
+		if msg.instance != nil {
+			adopted, adoptErr := m.h.presentCheckpointedFork(msg.instance)
+			if adoptErr != nil {
+				return msg.instance.ID, errors.Join(msg.err, adoptErr)
+			}
+			if !adopted {
+				return "", msg.err
+			}
+			return msg.instance.ID, msg.err
+		}
 		return "", msg.err
 	}
 	if msg.instance == nil {
 		return "", fmt.Errorf("fork did not return a session")
 	}
 
-	m.h.instancesMu.Lock()
-	m.h.instances = append(m.h.instances, msg.instance)
-	if m.h.instanceByID == nil {
-		m.h.instanceByID = make(map[string]*session.Instance)
+	adopted, err := m.h.presentCheckpointedFork(msg.instance)
+	if err != nil {
+		return msg.instance.ID, err
 	}
-	m.h.instanceByID[msg.instance.ID] = msg.instance
-	session.UpdateClaudeSessionsWithDedup(m.h.instances)
-	m.h.instancesMu.Unlock()
+	if !adopted {
+		return "", fmt.Errorf("OMP fork child %s was removed while launching and was not re-added", msg.instance.ID)
+	}
 
-	m.h.cachedStatusCounts.valid.Store(false)
 	m.h.launchingSessions[msg.instance.ID] = time.Now()
 	if m.h.groupTree == nil {
 		m.h.groupTree = session.NewGroupTree(m.h.instances)
@@ -1121,10 +1172,6 @@ func (m *WebMutator) ForkSessionWithOptions(id string, req web.ForkSessionReques
 	if msg.instance.GroupPath != "" {
 		m.h.groupTree.ExpandGroupWithParents(msg.instance.GroupPath)
 	}
-	m.h.groupTree.AddSession(msg.instance)
-	m.h.rebuildFlatItems()
-	m.h.search.SetItems(m.h.instances)
-
 	storage, err := session.NewStorageWithProfile(m.h.profile)
 	if err != nil {
 		return "", fmt.Errorf("open storage: %w", err)
@@ -1134,6 +1181,9 @@ func (m *WebMutator) ForkSessionWithOptions(id string, req web.ForkSessionReques
 	instances := make([]*session.Instance, len(m.h.instances))
 	copy(instances, m.h.instances)
 	m.h.instancesMu.RUnlock()
+	if msg.instance.Tool == "omp" {
+		return msg.instance.ID, nil
+	}
 	if err := storage.SaveWithGroups(instances, m.h.groupTree); err != nil {
 		return "", fmt.Errorf("save forked session: %w", err)
 	}
@@ -1468,6 +1518,11 @@ func (m *WebMutator) SendSessionPrompt(id, message string) error {
 	ts := inst.GetTmuxSession()
 	if ts == nil || strings.TrimSpace(ts.Name) == "" {
 		return fmt.Errorf("session %q is not running; start it before prompting", inst.Title)
+	}
+	if inst.Tool == "omp" {
+		if err := inst.PromptDeliveryError(); err != nil {
+			return err
+		}
 	}
 	tmuxName := ts.Name
 	go func() {

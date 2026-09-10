@@ -47,16 +47,18 @@ func TestPrepend_Idempotent(t *testing.T) {
 // the status-poll hot path and pass slices they did not allocate. An
 // append-aliasing bug here would rewrite a caller's argv from under it.
 func TestPrepend_DoesNotMutateOrAliasCallerSlice(t *testing.T) {
-	// Extra capacity is what makes append() alias rather than copy.
-	original := make([]string, 3, 8)
-	copy(original, []string{"kill-session", "-t", "x"})
-	snapshot := append([]string(nil), original...)
-
-	out := tmuxutf8.Prepend(original)
-	out[len(out)-1] = "CLOBBERED"
-
-	if !reflect.DeepEqual(original, snapshot) {
-		t.Fatalf("Prepend must not alias the caller slice\n after: %v\n want:  %v", original, snapshot)
+	for _, args := range [][]string{
+		{"kill-session", "-t", "x"},
+		{"-u", "kill-session", "-t", "x"},
+	} {
+		// Extra capacity is what makes append() alias rather than copy.
+		original := make([]string, len(args), 8)
+		copy(original, args)
+		out := tmuxutf8.Prepend(original)
+		out[len(out)-1] = "CLOBBERED"
+		if !reflect.DeepEqual(original, args) {
+			t.Fatalf("Prepend must not alias the caller slice\n after: %v\n want:  %v", original, args)
+		}
 	}
 }
 

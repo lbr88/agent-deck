@@ -223,7 +223,8 @@ func runTestMain(m *testing.M) int {
 	// Git hooks export GIT_DIR/GIT_WORK_TREE; clear them so test subprocess git
 	// commands operate on their temp repos instead of the real repository.
 	testutil.UnsetGitRepoEnv()
-	isolatePackageHome("agent-deck-session-tests-home-*")
+	cleanupPackageHome := isolatePackageHome("agent-deck-session-tests-home-*")
+	defer cleanupPackageHome()
 
 	// Isolate the tmux socket. Without this, tests spawn tmux sessions on the
 	// user's default socket and destabilize live agent-deck sessions.
@@ -257,7 +258,7 @@ func runTestMain(m *testing.M) int {
 	return code
 }
 
-func isolatePackageHome(pattern string) {
+func isolatePackageHome(pattern string) func() {
 	home, err := os.MkdirTemp("", pattern)
 	if err != nil {
 		panic(err)
@@ -271,6 +272,7 @@ func isolatePackageHome(pattern string) {
 	os.Unsetenv("XDG_DATA_HOME")
 	os.Unsetenv("XDG_CACHE_HOME")
 	os.Unsetenv("XDG_STATE_HOME")
+	return func() { _ = os.RemoveAll(home) }
 }
 
 // cleanupTestSessions kills any tmux sessions created during testing.

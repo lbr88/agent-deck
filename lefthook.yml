@@ -24,6 +24,11 @@ pre-push:
     lint:
       run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX golangci-lint run
       tags: [quality]
+    omp-identity:
+      run: |
+        command -v node >/dev/null 2>&1 || { echo "node is required for bundled OMP tracker tests."; exit 1; }
+        node --test internal/session/omp/identity.test.mjs
+      tags: [quality, test]
     build:
       run: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX go build -o /dev/null ./cmd/agent-deck/
       tags: [build]

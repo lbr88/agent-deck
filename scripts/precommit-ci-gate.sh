@@ -78,6 +78,11 @@ ensure_go_tool() {
   fi
 }
 
+if has_match '^internal/session/(omp/|omp_[^/]+\.go$)'; then
+  command -v node >/dev/null 2>&1 || { echo "node is required for bundled OMP tracker tests."; exit 1; }
+  run node --test internal/session/omp/identity.test.mjs
+fi
+
 if [ "$go_changed" = true ]; then
   echo "[precommit-ci] Go-relevant staged changes detected."
 
@@ -94,8 +99,9 @@ if [ "$go_changed" = true ]; then
   ensure_go_tool golangci-lint github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
   run golangci-lint run --timeout=5m
 
-  ensure_go_tool govulncheck golang.org/x/vuln/cmd/govulncheck@latest
-  run govulncheck ./...
+  # Match CI's Go-1.25-compatible scanner, regardless of an older binary on PATH.
+  # Go caches its build; a cold cache compiles it without replacing global tools.
+  run go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   ensure_go_tool gotestsum gotest.tools/gotestsum@v1.13.0
   run gotestsum --rerun-fails=2 --rerun-fails-abort-on-data-race --packages="./..." -- -race -timeout 20m

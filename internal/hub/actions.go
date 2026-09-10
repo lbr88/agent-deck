@@ -1126,6 +1126,8 @@ type LocalActionBackend struct {
 	Profile string
 }
 
+var startForkedInstanceForHub = func(inst *session.Instance) error { return inst.Start() }
+
 var (
 	// ErrHubUndoNothing means the owner node has no deleted hub session to restore.
 	ErrHubUndoNothing = errors.New("hub undo delete: nothing to undo")
@@ -1376,6 +1378,11 @@ func (b LocalActionBackend) Send(ctx context.Context, sessionID, message string)
 	if !inst.Exists() {
 		return fmt.Errorf("session %q is not running", inst.Title)
 	}
+	if inst.Tool == "omp" {
+		if err := inst.PromptDeliveryError(); err != nil {
+			return err
+		}
+	}
 	tmuxSess := inst.GetTmuxSession()
 	if tmuxSess == nil {
 		return fmt.Errorf("session %q has no tmux session", inst.Title)
@@ -1474,10 +1481,26 @@ func (b LocalActionBackend) Fork(ctx context.Context, sessionID string) (string,
 	if err != nil {
 		return "", fmt.Errorf("create fork: %w", err)
 	}
-	if err := forked.Start(); err != nil {
+	checkpointed, err := storage.CheckpointOmpForkBeforeStart(forked)
+	if err != nil {
+		if checkpointed {
+			return forked.ID, err
+		}
+		return "", err
+	}
+	if err := startForkedInstanceForHub(forked); err != nil {
+		if checkpointed {
+			return forked.ID, fmt.Errorf("OMP fork child %s is durably checkpointed but provider start failed: %w; retry child %s to resume safely", forked.ID, err, forked.ID)
+		}
 		return "", fmt.Errorf("start fork: %w", err)
 	}
 	forked.PostStartSync(0)
+	if checkpointed {
+		if err := storage.FinalizeOmpForkLaunch(forked); err != nil {
+			return forked.ID, fmt.Errorf("OMP fork child %s started but finalization failed: %w; retry child %s to reconcile the exact child", forked.ID, err, forked.ID)
+		}
+		return forked.ID, nil
+	}
 	instances = append(instances, forked)
 	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
 		return "", err
@@ -1536,11 +1559,28 @@ func (b LocalActionBackend) ForkWithOptions(ctx context.Context, req ForkSession
 	if req.Sandbox || strings.TrimSpace(req.SandboxImage) != "" {
 		forked.Sandbox = session.NewSandboxConfig(strings.TrimSpace(req.SandboxImage))
 	}
-	if err := forked.Start(); err != nil {
+	checkpointed, err := storage.CheckpointOmpForkBeforeStart(forked)
+	if err != nil {
+		if checkpointed {
+			return forked.ID, err
+		}
+		worktree.rollback()
+		return "", err
+	}
+	if err := startForkedInstanceForHub(forked); err != nil {
+		if checkpointed {
+			return forked.ID, fmt.Errorf("OMP fork child %s is durably checkpointed but provider start failed: %w; retry child %s to resume safely", forked.ID, err, forked.ID)
+		}
 		worktree.rollback()
 		return "", fmt.Errorf("start fork: %w", err)
 	}
 	forked.PostStartSync(0)
+	if checkpointed {
+		if err := storage.FinalizeOmpForkLaunch(forked); err != nil {
+			return forked.ID, fmt.Errorf("OMP fork child %s started but finalization failed: %w; retry child %s to reconcile the exact child", forked.ID, err, forked.ID)
+		}
+		return forked.ID, nil
+	}
 	instances = append(instances, forked)
 	if err := storage.SaveWithGroups(instances, session.NewGroupTreeWithGroups(instances, groups)); err != nil {
 		worktree.rollback()

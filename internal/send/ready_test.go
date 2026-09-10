@@ -1,6 +1,7 @@
 package send
 
 import (
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,5 +99,59 @@ func TestWaitForAgentReady_RespectsTimeout(t *testing.T) {
 	}
 	if mock.calls.Load() == 0 {
 		t.Error("expected GetStatus to be polled")
+	}
+}
+
+type deadReadyChecker struct{ mockReadyChecker }
+
+func (*deadReadyChecker) Exists() bool     { return true }
+func (*deadReadyChecker) IsPaneDead() bool { return true }
+
+func TestWaitForAgentReadyReturnsProviderDeathNotLongTimeout(t *testing.T) {
+	checker := &deadReadyChecker{mockReadyChecker{statuses: []string{"error"}, pane: "approval-history-invalid"}}
+	start := time.Now()
+	err := WaitForAgentReady(checker, "omp", 2*time.Second, PromptGates{})
+	if err == nil || !strings.Contains(err.Error(), "exited") || !strings.Contains(err.Error(), "approval-history-invalid") {
+		t.Fatalf("provider exit lost: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("waited for readiness after the provider died")
+	}
+}
+
+type freshReadyChecker struct {
+	mockReadyChecker
+	probes   int
+	failAt   int
+	probeErr error
+}
+
+func (*freshReadyChecker) Exists() bool     { return true }
+func (*freshReadyChecker) IsPaneDead() bool { return false }
+func (m *freshReadyChecker) PrimaryPaneAliveFresh() (bool, error) {
+	m.probes++
+	return m.probes < m.failAt, m.probeErr
+}
+
+func TestOmpMessageReadinessRejectsStaleCacheAndSettlingDeath(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failAt int
+		err    error
+	}{
+		{"dead despite positive cache", 1, nil},
+		{"query failure despite positive cache", 1, errors.New("fresh pane query failed")},
+		{"death during ready settling delay", 3, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checker := &freshReadyChecker{mockReadyChecker: mockReadyChecker{statuses: []string{"active", "waiting"}, pane: "provider failure"}, failAt: tc.failAt, probeErr: tc.err}
+			err := WaitForAgentReady(checker, "omp", 2*time.Second, PromptGates{})
+			if err == nil || !strings.Contains(err.Error(), "message was not sent") {
+				t.Fatalf("OMP accepted stale liveness before sending: %v", err)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("lost fresh probe failure: %v", err)
+			}
+		})
 	}
 }

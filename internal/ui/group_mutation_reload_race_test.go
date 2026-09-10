@@ -18,10 +18,136 @@ package ui
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
+
+// A reload that has both a pending title/lock and a pending group mutation
+// must reconcile the complete in-memory tree before its first force-save. If
+// the title is saved first, that successful full-tree save clears the queued
+// group op and silently persists only half of the user's intent.
+func TestReloadReconcilesPendingTitleAndGroupBeforeSaving(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		tool           string
+		groupOp        pendingGroupOp
+		wantGroupPath  string
+		wantGroupPaths []string
+		deleteOldGroup bool
+	}{
+		{
+			name:           "omp move",
+			tool:           "omp",
+			groupOp:        pendingGroupOp{kind: groupOpMove, targetPath: "moved"},
+			wantGroupPath:  "moved",
+			wantGroupPaths: []string{"before", "moved"},
+		},
+		{
+			name:           "claude create",
+			tool:           "claude",
+			groupOp:        pendingGroupOp{kind: groupOpCreate, name: "created"},
+			wantGroupPath:  "before",
+			wantGroupPaths: []string{"before", "created"},
+		},
+		{
+			name:           "omp rename",
+			tool:           "omp",
+			groupOp:        pendingGroupOp{kind: groupOpRename, oldPath: "before", name: "renamed"},
+			wantGroupPath:  "renamed",
+			wantGroupPaths: []string{"renamed"},
+			deleteOldGroup: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			session.ClearUserConfigCache()
+			t.Cleanup(session.ClearUserConfigCache)
+
+			const profile = "_reload_pending_edits"
+			storage, err := session.NewStorageWithProfile(profile)
+			if err != nil {
+				t.Fatalf("NewStorageWithProfile: %v", err)
+			}
+			t.Cleanup(func() { _ = storage.Close() })
+
+			inst := session.NewInstanceWithGroupAndTool("disk-title", t.TempDir(), "before", tc.tool)
+			seedTree := session.NewGroupTree([]*session.Instance{inst})
+			if tc.groupOp.kind == groupOpMove {
+				seedTree.CreateGroup(tc.groupOp.targetPath)
+			}
+			if err := storage.SaveWithGroups([]*session.Instance{inst}, seedTree); err != nil {
+				t.Fatalf("seed storage: %v", err)
+			}
+			if tc.deleteOldGroup {
+				// The rename handler deletes the old additive group row before its
+				// routine save can lose the race. The stale instance row recreates
+				// the old group in the reloaded tree for pending-op reconciliation.
+				if err := storage.DeleteGroupSubtree("before"); err != nil {
+					t.Fatalf("delete old group row: %v", err)
+				}
+			}
+
+			instances, groups, err := storage.LoadWithGroups()
+			if err != nil {
+				t.Fatalf("load stale state: %v", err)
+			}
+			tc.groupOp.sessionID = inst.ID
+			home := NewHome()
+			home.width, home.height = 100, 30
+			home.profile = profile
+			home.storage = storage
+			home.pendingTitleChanges[inst.ID] = pendingTitle{title: "queued-title", locked: true}
+			home.pendingGroupOps = []pendingGroupOp{tc.groupOp}
+
+			_, _ = home.updateInner(loadSessionsMsg{instances: instances, groups: groups})
+
+			assertPersisted := func(stage string) {
+				t.Helper()
+				row, err := storage.GetDB().LoadInstanceByID(inst.ID)
+				if err != nil || row == nil {
+					t.Fatalf("%s load row: row=%+v err=%v", stage, row, err)
+				}
+				if row.Title != "queued-title" || !row.TitleLocked || row.GroupPath != tc.wantGroupPath {
+					t.Fatalf("%s row = (title=%q locked=%t group=%q), want (title=%q locked=true group=%q)",
+						stage, row.Title, row.TitleLocked, row.GroupPath, "queued-title", tc.wantGroupPath)
+				}
+				_, persistedGroups, err := storage.LoadWithGroups()
+				if err != nil {
+					t.Fatalf("%s load groups: %v", stage, err)
+				}
+				gotPaths := make([]string, 0, len(persistedGroups))
+				for _, group := range persistedGroups {
+					gotPaths = append(gotPaths, group.Path)
+				}
+				if !reflect.DeepEqual(gotPaths, tc.wantGroupPaths) {
+					t.Fatalf("%s group paths = %v, want %v", stage, gotPaths, tc.wantGroupPaths)
+				}
+			}
+
+			assertPersisted("reconciled reload")
+			if len(home.pendingTitleChanges) != 0 || len(home.pendingGroupOps) != 0 {
+				t.Fatalf("reconciled reload retained handled intent: titles=%+v groups=%+v",
+					home.pendingTitleChanges, home.pendingGroupOps)
+			}
+
+			instances, groups, err = storage.LoadWithGroups()
+			if err != nil {
+				t.Fatalf("load reconciled state: %v", err)
+			}
+			_, _ = home.updateInner(loadSessionsMsg{instances: instances, groups: groups})
+			if !home.forceSaveInstances() {
+				t.Fatal("later save after reload failed")
+			}
+			assertPersisted("later save/reload")
+			if len(home.pendingTitleChanges) != 0 || len(home.pendingGroupOps) != 0 {
+				t.Fatalf("later reload replayed handled intent: titles=%+v groups=%+v",
+					home.pendingTitleChanges, home.pendingGroupOps)
+			}
+		})
+	}
+}
 
 func TestGroupCreate_SurvivesReloadRace(t *testing.T) {
 	home := NewHome()

@@ -1223,7 +1223,7 @@ func handleSessionFork(profile string, args []string) {
 	fs.Usage = func() {
 		fmt.Println("Usage: agent-deck session fork <id|title> [options]")
 		fmt.Println()
-		fmt.Println("Fork a Claude, OpenCode, Pi, or Codex session with conversation context.")
+		fmt.Println("Fork a Claude, OpenCode, Pi, OMP, or Codex session with conversation context.")
 		fmt.Println()
 		fmt.Println("Options:")
 		fs.PrintDefaults()
@@ -1271,9 +1271,10 @@ func handleSessionFork(profile string, args []string) {
 	// Verify this tool has a session-fork implementation.
 	isClaudeFork := session.IsClaudeCompatible(inst.Tool)
 	isPiFork := inst.Tool == "pi"
+	isOmpFork := inst.Tool == "omp"
 	isOpenCodeFork := inst.Tool == "opencode"
 	isCodexFork := session.IsCodexCompatible(inst.Tool)
-	if !isClaudeFork && !isPiFork && !isOpenCodeFork && !isCodexFork {
+	if !isClaudeFork && !isPiFork && !isOmpFork && !isOpenCodeFork && !isCodexFork {
 		out.Error(
 			fmt.Sprintf("session '%s' is not a forkable session (tool: %s)", inst.Title, inst.Tool),
 			ErrCodeInvalidOperation,
@@ -1571,6 +1572,16 @@ func handleSessionFork(profile string, args []string) {
 		forkedInst.Sandbox = session.NewSandboxConfig(*sandboxImage)
 	}
 
+	checkpointedOmpFork := false
+	if forkedInst.Tool == "omp" {
+		preserveChild, checkpointErr := storage.CheckpointOmpForkBeforeStart(forkedInst)
+		if checkpointErr != nil {
+			out.Error(fmt.Sprintf("failed to checkpoint OMP fork child %s before provider start: %v", forkedInst.ID, checkpointErr), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
+		checkpointedOmpFork = preserveChild
+	}
+
 	// Test seam: when set, capture the fully-prepared fork before tmux Start()
 	// mutates the environment and return early. Production runs leave the hook
 	// nil, so this is a no-op outside of tests.
@@ -1581,12 +1592,22 @@ func handleSessionFork(profile string, args []string) {
 
 	// Start the forked session
 	if err := forkedInst.Start(); err != nil {
+		if checkpointedOmpFork {
+			out.Error(fmt.Sprintf("OMP fork child %s is durably checkpointed but provider start failed: %v; retry starting child %s to resume safely", forkedInst.ID, err, forkedInst.ID), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
 		out.Error(fmt.Sprintf("failed to start forked session: %v", err), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 
 	// Capture forked session's new session ID
 	forkedInst.PostStartSync(3 * time.Second)
+	if checkpointedOmpFork {
+		if err := storage.FinalizeOmpForkLaunch(forkedInst); err != nil {
+			out.Error(fmt.Sprintf("OMP fork child %s started but its durable checkpoint could not be finalized: %v; retry child %s to reconcile the exact child", forkedInst.ID, err, forkedInst.ID), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
+	}
 
 	// Add to instances
 	instances = append(instances, forkedInst)
@@ -1600,9 +1621,11 @@ func handleSessionFork(profile string, args []string) {
 	}
 
 	// Save
-	if err := storage.SaveWithGroups(instances, groupTree); err != nil {
-		out.Error(fmt.Sprintf("failed to save: %v", err), ErrCodeInvalidOperation)
-		os.Exit(1)
+	if !checkpointedOmpFork {
+		if err := storage.SaveWithGroups(instances, groupTree); err != nil {
+			out.Error(fmt.Sprintf("failed to save: %v", err), ErrCodeInvalidOperation)
+			os.Exit(1)
+		}
 	}
 
 	// Output success

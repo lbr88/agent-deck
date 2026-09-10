@@ -49,6 +49,21 @@ func WaitForAgentReady(target AgentReadyChecker, tool string, timeout time.Durat
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		time.Sleep(pollInterval)
+		if err := checkOmpReadyLiveness(target, tool); err != nil {
+			return err
+		}
+		_, hasFreshProbe := target.(interface{ PrimaryPaneAliveFresh() (bool, error) })
+		if lifecycle, ok := target.(interface {
+			Exists() bool
+			IsPaneDead() bool
+		}); ok && !(tool == "omp" && hasFreshProbe) && (!lifecycle.Exists() || lifecycle.IsPaneDead()) {
+			output, _ := target.CapturePaneFresh()
+			output = tmux.StripANSI(output)
+			if len(output) > 4096 {
+				output = output[len(output)-4096:]
+			}
+			return fmt.Errorf("agent exited before accepting the message; message was not sent: %s", strings.TrimSpace(output))
+		}
 
 		status, err := target.GetStatus()
 		if err != nil {
@@ -61,7 +76,7 @@ func WaitForAgentReady(target AgentReadyChecker, tool string, timeout time.Durat
 		if status == "starting" {
 			if paneShowsReadyPrompt(target, tool, gates) {
 				time.Sleep(300 * time.Millisecond)
-				return nil
+				return checkOmpReadyLiveness(target, tool)
 			}
 			readyCount = 0
 			continue
@@ -105,11 +120,37 @@ func WaitForAgentReady(target AgentReadyChecker, tool string, timeout time.Durat
 				}
 			}
 			time.Sleep(300 * time.Millisecond)
-			return nil
+			return checkOmpReadyLiveness(target, tool)
 		}
 	}
 
 	return fmt.Errorf("agent not ready after %s", timeout)
+}
+
+// Initial identity ACK does not guarantee the process survives readiness
+// polling. Never promote an OMP pane from a cached status after it has died,
+// including during the final composer-settling delay.
+func checkOmpReadyLiveness(target AgentReadyChecker, tool string) error {
+	if tool != "omp" {
+		return nil
+	}
+	probe, ok := target.(interface{ PrimaryPaneAliveFresh() (bool, error) })
+	if !ok {
+		return nil
+	}
+	alive, err := probe.PrimaryPaneAliveFresh()
+	if err != nil {
+		return fmt.Errorf("could not verify OMP process; message was not sent: %w", err)
+	}
+	if !alive {
+		output, _ := target.CapturePaneFresh()
+		output = tmux.StripANSI(output)
+		if len(output) > 4096 {
+			output = output[len(output)-4096:]
+		}
+		return fmt.Errorf("agent exited before accepting the message; message was not sent: %s", strings.TrimSpace(output))
+	}
+	return nil
 }
 
 func paneShowsReadyPrompt(target AgentReadyChecker, tool string, gates PromptGates) bool {

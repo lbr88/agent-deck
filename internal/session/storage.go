@@ -59,6 +59,9 @@ type InstanceData struct {
 	Status                Status    `json:"status"`
 	CreatedAt             time.Time `json:"created_at"`
 	LastAccessedAt        time.Time `json:"last_accessed_at,omitempty"`
+	// OmpPendingForkCommand bridges the SQLite extras zone to full instances.
+	// Other providers retain their existing transient first-start behavior.
+	OmpPendingForkCommand string `json:"-"`
 	// LastStartedAt mirrors Instance.LastStartedAt (issue #30 / #1704 fix).
 	// Persisted via the tool_data extras zone (see last_started_persist.go),
 	// not a typed SQL column. Zero means unknown (old record or never
@@ -1194,6 +1197,7 @@ func instanceToRow(inst *Instance) (*statedb.InstanceRow, error) {
 	// zone. For a one-shot the task IS the invocation, so a row that forgets it
 	// can only ever be "restarted" into dsh's usage error.
 	toolData = WriteDeepSeekTaskToToolData(toolData, inst.DeepSeekTask)
+	toolData = writeOmpPendingForkToToolData(toolData, inst)
 
 	return &statedb.InstanceRow{
 		ID:                         inst.ID,
@@ -1381,6 +1385,7 @@ func (s *Storage) LoadLite() ([]*InstanceData, []*GroupData, error) {
 			GenericSessionLocation:    genericScopeLocation(r.ToolData),
 			LastActivityAt:            ReadLastActivityAtFromToolData(r.ToolData),
 			DeepSeekTask:              ReadDeepSeekTaskFromToolData(r.ToolData),
+			OmpPendingForkCommand:     readOmpPendingForkFromToolData(r.ToolData, r.Tool),
 		}
 	}
 
@@ -1515,6 +1520,7 @@ func (s *Storage) LoadWithGroups() ([]*Instance, []*GroupData, error) {
 			GenericSessionLocation:    genericScopeLocation(r.ToolData),
 			LastActivityAt:            ReadLastActivityAtFromToolData(r.ToolData),
 			DeepSeekTask:              ReadDeepSeekTaskFromToolData(r.ToolData),
+			OmpPendingForkCommand:     readOmpPendingForkFromToolData(r.ToolData, r.Tool),
 		}
 	}
 
@@ -1715,6 +1721,10 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 		// appended instead of replacing, producing "/some/path~/actual/path".
 		projectPath := ExpandPath(fixMalformedTildePath(instData.ProjectPath))
 
+		pendingOmpFork := ""
+		if instData.Tool == "omp" {
+			pendingOmpFork = instData.OmpPendingForkCommand
+		}
 		inst := &Instance{
 			ID:                           instData.ID,
 			Title:                        instData.Title,
@@ -1728,6 +1738,8 @@ func (s *Storage) convertToInstances(data *StorageData) ([]*Instance, []*GroupDa
 			AutoName:                     instData.AutoName,
 			autoNameDescription:          instData.AutoNameDescription,
 			Command:                      instData.Command,
+			ForkStartCommand:             pendingOmpFork,
+			IsForkAwaitingStart:          pendingOmpFork != "",
 			Wrapper:                      instData.Wrapper,
 			Tool:                         instData.Tool,
 			Status:                       instData.Status,
