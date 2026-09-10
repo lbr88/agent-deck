@@ -20,8 +20,8 @@ func TestHandoverDialog_ShowDefaultsAndExcludesSourceTool(t *testing.T) {
 	if !d.IsVisible() {
 		t.Fatal("dialog should be visible")
 	}
-	if strings.Join(d.targetOptions, ",") != "claude,opencode,kiro" {
-		t.Fatalf("targetOptions = %v, want claude/opencode/kiro without codex", d.targetOptions)
+	if strings.Join(d.targetOptions, ",") != "claude,opencode,kiro,omp" {
+		t.Fatalf("targetOptions = %v, want claude/opencode/kiro/omp without codex", d.targetOptions)
 	}
 	if d.titleInput.Value() != "SERV-220 (claude)" {
 		t.Fatalf("title default = %q", d.titleInput.Value())
@@ -32,6 +32,48 @@ func TestHandoverDialog_ShowDefaultsAndExcludesSourceTool(t *testing.T) {
 	view := d.View()
 	if !strings.Contains(view, "019f12ae") || strings.Contains(view, "037a-7cd1-b49e") {
 		t.Fatalf("view should show shortened source tool id, got:\n%s", view)
+	}
+}
+
+func TestHandoverDialog_OmpSourceOffersEveryOtherSupportedTarget(t *testing.T) {
+	source := session.NewInstanceWithGroupAndTool("approval", "/repo", "ticm", "omp")
+
+	d := NewHandoverDialog()
+	d.Show(source)
+
+	if strings.Join(d.targetOptions, ",") != "claude,codex,opencode,kiro" {
+		t.Fatalf("targetOptions = %v, want every supported target except omp", d.targetOptions)
+	}
+	if d.sourceTool != "omp" {
+		t.Fatalf("sourceTool = %q, want omp", d.sourceTool)
+	}
+	if d.sourceToolID != "" {
+		t.Fatalf("sourceToolID = %q, want deferred OMP lookup", d.sourceToolID)
+	}
+}
+
+func TestHandoverDialog_SetSourceToolIDRejectsStaleResult(t *testing.T) {
+	first := session.NewInstanceWithGroupAndTool("first", "/repo", "ticm", "omp")
+	second := session.NewInstanceWithGroupAndTool("second", "/repo", "ticm", "omp")
+
+	d := NewHandoverDialog()
+	d.Show(first)
+	d.Show(second)
+
+	d.SetSourceToolID(first.ID, "stale-provider-id")
+	if d.sourceToolID != "" {
+		t.Fatalf("sourceToolID = %q after stale result, want empty", d.sourceToolID)
+	}
+
+	d.SetSourceToolID(second.ID, "current-provider-id")
+	if d.sourceToolID != "current-provider-id" {
+		t.Fatalf("sourceToolID = %q, want current-provider-id", d.sourceToolID)
+	}
+
+	d.Hide()
+	d.SetSourceToolID(second.ID, "late-provider-id")
+	if d.sourceToolID != "" {
+		t.Fatalf("sourceToolID = %q after hidden result, want empty", d.sourceToolID)
 	}
 }
 
@@ -56,6 +98,51 @@ func TestHomeHandoverActionOpensDialogWithPrefix(t *testing.T) {
 	}
 	if h.editSessionDialog.IsVisible() {
 		t.Fatal("P then h should not open the edit session dialog")
+	}
+}
+
+func TestHomeHandoverActionDefersOmpSourceIdentityLookup(t *testing.T) {
+	old := resolveHandoverSourceToolID
+	t.Cleanup(func() { resolveHandoverSourceToolID = old })
+	calls := 0
+	resolveHandoverSourceToolID = func(source *session.Instance) string {
+		calls++
+		if source.Title != "source" {
+			t.Fatalf("resolver source title = %q, want source", source.Title)
+		}
+		return "omp-provider-id"
+	}
+
+	h := NewHome()
+	source := session.NewInstanceWithGroupAndTool("source", "/repo", "grp", "omp")
+	h.instances = []*session.Instance{source}
+	h.instanceByID = map[string]*session.Instance{source.ID: source}
+	h.groupTree = session.NewGroupTree(h.instances)
+	h.rebuildFlatItems()
+	h.moveCursorToSession(source.ID)
+
+	model, _ := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	h = model.(*Home)
+	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	h = model.(*Home)
+	if cmd == nil {
+		t.Fatal("P then h for OMP should return deferred identity lookup command")
+	}
+	if calls != 0 {
+		t.Fatalf("resolver calls before command execution = %d, want 0", calls)
+	}
+	if h.handoverDialog.sourceToolID != "" {
+		t.Fatalf("sourceToolID before command execution = %q, want empty", h.handoverDialog.sourceToolID)
+	}
+
+	msg := cmd()
+	if calls != 1 {
+		t.Fatalf("resolver calls after command execution = %d, want 1", calls)
+	}
+	model, _ = h.Update(msg)
+	h = model.(*Home)
+	if h.handoverDialog.sourceToolID != "omp-provider-id" {
+		t.Fatalf("sourceToolID after result = %q, want omp-provider-id", h.handoverDialog.sourceToolID)
 	}
 }
 

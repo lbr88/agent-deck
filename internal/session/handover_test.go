@@ -108,6 +108,122 @@ func TestHandoverSession_KiroToCodexIncludesSourceSessionID(t *testing.T) {
 	}
 }
 
+func TestHandoverSession_CodexToOmpBuildsRunnableTarget(t *testing.T) {
+	source := NewInstanceWithGroupAndTool("incident review", t.TempDir(), "security", "codex")
+	source.CodexSessionID = "019f12ae-037a-7cd1-b49e-18808bf7f48d"
+
+	result, err := HandoverSession(source, HandoverOptions{Target: HandoverTargetOMP})
+	if err != nil {
+		t.Fatalf("HandoverSession: %v", err)
+	}
+	if result.Target.Tool != "omp" || result.Target.Command != "omp" || result.Target.Status != StatusStopped {
+		t.Fatalf("target = tool %q command %q status %q, want omp/omp/stopped", result.Target.Tool, result.Target.Command, result.Target.Status)
+	}
+	if !strings.Contains(result.HandoverPrompt, "handed over from codex to omp") {
+		t.Fatalf("prompt missing Codex-to-OMP handover direction:\n%s", result.HandoverPrompt)
+	}
+}
+
+func TestHandoverSession_OmpToCodexUsesExactBoundSourceID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := NewInstanceWithGroupAndTool("approval", t.TempDir(), "ticm", "omp")
+	dir := filepath.Join(home, ".omp", "agent-deck", source.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(dir, "conversation.jsonl")
+	if err := os.WriteFile(transcript, []byte("{\"type\":\"session\",\"id\":\"omp-session-exact\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOmpActiveBinding(dir, &ompActiveBinding{
+		File: transcript, SessionID: "omp-session-exact", State: "saved", Generation: "handover-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := HandoverSession(source, HandoverOptions{Target: HandoverTargetCodex})
+	if err != nil {
+		t.Fatalf("HandoverSession: %v", err)
+	}
+	if !strings.Contains(result.HandoverPrompt, "handed over from omp to codex") ||
+		!strings.Contains(result.HandoverPrompt, "- Source tool session id: omp-session-exact") {
+		t.Fatalf("prompt missing exact OMP source identity:\n%s", result.HandoverPrompt)
+	}
+}
+
+func TestHandoverSourceTool_NormalizesWhitespaceBeforeCompatibilityCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	isolateConfigHomeXDG(t)
+	if err := SaveUserConfig(&UserConfig{Tools: map[string]ToolDef{
+		"codex_wrapper": {Command: "codex-wrapper", CompatibleWith: "codex"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ClearUserConfigCache()
+	t.Cleanup(ClearUserConfigCache)
+	source := NewInstanceWithGroupAndTool("source", t.TempDir(), "grp", " codex_wrapper ")
+
+	tool, err := HandoverSourceTool(source)
+	if err != nil {
+		t.Fatalf("HandoverSourceTool: %v", err)
+	}
+	if tool != "codex" {
+		t.Fatalf("tool = %q, want codex", tool)
+	}
+}
+
+func TestHandoverSourceToolSessionID_OmpNoSessionOmitsRetainedBinding(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := NewInstanceWithGroupAndTool("stateless", t.TempDir(), "grp", "omp")
+	if err := source.SetOmpOptions(&OmpOptions{NoSession: true}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".omp", "agent-deck", source.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(dir, "retained.jsonl")
+	if err := os.WriteFile(transcript, []byte("{\"type\":\"session\",\"id\":\"retained-session\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOmpActiveBinding(dir, &ompActiveBinding{
+		File: transcript, SessionID: "retained-session", State: "saved", Generation: "no-session-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if id := HandoverSourceToolSessionID(source); id != "" {
+		t.Fatalf("source ID = %q, want empty for --no-session OMP source", id)
+	}
+}
+
+func TestHandoverSourceToolSessionID_OmpRejectsUnsafeInstanceID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := NewInstanceWithGroupAndTool("unsafe", t.TempDir(), "grp", "omp")
+	source.ID = "../escaped-binding"
+	dir := filepath.Join(home, ".omp", "escaped-binding")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(dir, "conversation.jsonl")
+	if err := os.WriteFile(transcript, []byte("{\"type\":\"session\",\"id\":\"wrong-session\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOmpActiveBinding(dir, &ompActiveBinding{
+		File: transcript, SessionID: "wrong-session", State: "saved", Generation: "unsafe-id-test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if id := HandoverSourceToolSessionID(source); id != "" {
+		t.Fatalf("source ID = %q, want empty for unsafe Agent Deck instance ID", id)
+	}
+}
+
 func TestHandoverSession_MissingLatestOutputUsesFallback(t *testing.T) {
 	source := NewInstanceWithGroupAndTool("codex source", t.TempDir(), "grp", "codex")
 
