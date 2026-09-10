@@ -504,7 +504,7 @@ Bring conversations that were started outside Agent Deck into the registry with 
 
 ### Handover Between Tools
 
-Create a new session for another supported tool with `agent-deck session handover <source> --to <claude|codex|opencode|kiro|omp>`. Handover builds a deterministic context packet from the source session, latest visible output, and git context; it does not migrate or modify the source tool's native transcript. Use `--start` to launch the target and send the handover packet immediately.
+Create a new session for another supported tool with `agent-deck session handover <source> --to <claude|codex|opencode|kiro|omp>`. Handover builds a deterministic context packet from the source session, complete latest visible output, and git context; it does not migrate or modify the source tool's native transcript. Use `--start` to launch the target and send the packet immediately. Without an explicit `--message`, the target only acknowledges the packet and waits for operator instructions; Agent Deck never invents an instruction to continue.
 
 ### Archive Sessions
 

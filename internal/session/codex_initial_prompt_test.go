@@ -48,6 +48,23 @@ func TestBuildCodexCommandWithPromptQuotesMetacharacters(t *testing.T) {
 	}
 }
 
+func TestBuildCodexCommandWithPromptOversizedPromptUsesPostStartTransport(t *testing.T) {
+	i := codexInstance("codex", "codex")
+	marker := "CONTEXT-BEYOND-LINUX-MAX-ARG-STRING"
+	prompt := strings.Repeat("handover context with an apostrophe ' and a newline\n", 4096) + marker
+
+	cmd, embedded := i.buildCodexCommandWithPrompt("codex", prompt)
+	if embedded {
+		t.Fatalf("oversized prompt must not be embedded in argv; command has %d bytes", len(cmd))
+	}
+	if strings.Contains(cmd, marker) {
+		t.Fatalf("oversized prompt leaked into the launch command instead of the post-start stdin-backed transport")
+	}
+	if cmd != i.buildCodexCommand("codex") {
+		t.Fatalf("oversized prompt changed the base launch command:\n got %q\nwant %q", cmd, i.buildCodexCommand("codex"))
+	}
+}
+
 func TestBuildCodexCommandWithPromptEmptyPromptIsNotEmbedded(t *testing.T) {
 	i := codexInstance("codex", "codex")
 	cmd, embedded := i.buildCodexCommandWithPrompt("codex", "   ")

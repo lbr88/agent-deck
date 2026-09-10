@@ -2472,17 +2472,24 @@ func (i *Instance) buildCodexCommand(baseCommand string) string {
 	return envPrefix + command + yoloFlag + modelFlag + reasoningFlag
 }
 
+// codexInitialPromptMaxCommandBytes leaves a wide margin below Linux's
+// MAX_ARG_STRLEN (128 KiB on the usual 4 KiB-page systems). startCommandSpec
+// ultimately carries the complete shell command in one argv element, so the
+// limit must be applied after shell-quoting has expanded the prompt. Larger
+// prompts use SendKeysAndEnter's stdin-backed tmux buffer transport instead.
+const codexInitialPromptMaxCommandBytes = 64 * 1024
+
 // buildCodexCommandWithPrompt builds the Codex launch command with an initial
 // prompt delivered as Codex's own positional [PROMPT] argument, mirroring the
 // claude-code startup query (#725). It reports whether the prompt was embedded;
 // when it was not, the caller must fall back to the post-start typing path.
 //
-// Typing a large initial prompt into a live Codex TUI is unreliable: the message
-// is sent as one literal `tmux send-keys -l` burst followed immediately by Enter,
-// and Codex reads a large fast burst as a paste, swallowing the trailing Enter
-// into it. The prompt then sits unsubmitted in the composer and the agent never
-// starts. `codex [OPTIONS] [PROMPT]` starts the session with the prompt already
-// in hand, so nothing is typed and there is no Enter to lose.
+// Small prompts use `codex [OPTIONS] [PROMPT]`, so nothing is typed into the
+// startup TUI. Oversized prompts cannot use that path: the complete command is
+// eventually one argv element and the kernel can reject it with E2BIG. Those
+// prompts deliberately fall back to the post-start transport, which stages the
+// full body through `tmux load-buffer -` (stdin, not argv), pastes it as one
+// bracketed payload, then submits Enter after a settle delay.
 //
 // The prompt is only embedded on the plain fresh-start path. It is NOT embedded
 // when:
@@ -2490,7 +2497,8 @@ func (i *Instance) buildCodexCommand(baseCommand string) string {
 //   - the user supplied a custom command (buildCodexCommand passes it through
 //     verbatim, and an arbitrary wrapper need not accept a positional prompt);
 //   - the session resumes (`codex ... resume <sid>`), where a trailing operand
-//     would not be the subcommand's prompt.
+//     would not be the subcommand's prompt;
+//   - the shell-quoted command exceeds the conservative single-argv limit.
 //
 // In each of those cases the caller keeps the existing behaviour unchanged.
 func (i *Instance) buildCodexCommandWithPrompt(baseCommand, prompt string) (string, bool) {
@@ -2511,7 +2519,11 @@ func (i *Instance) buildCodexCommandWithPrompt(baseCommand, prompt string) (stri
 	if i.CodexSessionID != "" {
 		return command, false
 	}
-	return command + " " + shellescape.Quote(prompt), true
+	candidate := command + " " + shellescape.Quote(prompt)
+	if len(candidate) > codexInitialPromptMaxCommandBytes {
+		return command, false
+	}
+	return candidate, true
 }
 
 func (i *Instance) markCodexSubagentMigrationStarted() {

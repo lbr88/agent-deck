@@ -300,8 +300,10 @@ agent-deck session handover <source-session> --to <claude|codex|opencode|kiro|om
 
 Creates a new target-tool session with a deterministic handover packet. This
 is not native transcript migration: the source session is unchanged, and the
-target receives context assembled from the source metadata, latest visible
-output, git context, and optional operator message.
+target receives context assembled from the source metadata, complete latest
+visible output, git context, and optional operator message. Without an explicit
+operator message, a started target only acknowledges receipt and waits; Agent
+Deck does not instruct it to continue the source task.
 
 | Flag | Description |
 |------|-------------|
@@ -309,7 +311,7 @@ output, git context, and optional operator message.
 | `-t, --title` | Title for the new target session |
 | `-g, --group` | Group path for the new target session |
 | `--path` | Project path for the new target session |
-| `-m, --message` | Operator instruction appended to the handover packet |
+| `-m, --message` | Explicit operator instruction; when omitted, the target acknowledges and waits |
 | `--start` | Start the target session and send the handover packet immediately |
 | `--no-start` | Explicitly create the target session stopped |
 | `--json` | JSON output |
