@@ -1397,9 +1397,6 @@ func (s *Session) startCommandSpec(workDir, command string) (string, []string) {
 		// Set this from INSIDE the newborn pane before its command can exit.
 		// Applying OptionOverrides after new-session returns loses sub-250ms
 		// failures (and their only diagnostic) before the parent can observe it.
-		if s.OptionOverrides["remain-on-exit"] == "on" {
-			command = `tmux -S "${TMUX%%,*}" set-option -p -t "$TMUX_PANE" remain-on-exit on || exit 1; ` + command
-		}
 		// Deliver the pane command as SEPARATE argv tokens (bash, -c, command)
 		// rather than a single shell-quoted string. This is the crux of the
 		// #1567 / #1580 fix.
@@ -1421,7 +1418,21 @@ func (s *Session) startCommandSpec(workDir, command string) (string, []string) {
 		// pass through as the command argument verbatim — bash -c "bash -c '…'"
 		// tail-exec's the inner bash, so no extra lingering process and no
 		// re-escaping of the nested single quotes.
-		tmuxArgs = append(tmuxArgs, bashBinary, "-c", command)
+		if s.OptionOverrides["remain-on-exit"] == "on" {
+			// tmux 3.4 preserves the dead pane but loses pane_dead_status when
+			// the bootstrap shell enables remain-on-exit and then interprets the
+			// tool command itself. Exec a second bash instead: it replaces the
+			// bootstrap process, so tmux records the tool's real exit status.
+			// Passing the original command as an argv element also keeps it
+			// verbatim instead of interpolating it into the bootstrap script.
+			tmuxArgs = append(tmuxArgs,
+				bashBinary, "-c",
+				`tmux -S "${TMUX%%,*}" set-option -p -t "$TMUX_PANE" remain-on-exit on || exit 1; exec "$@"`,
+				"agent-deck-pane", bashBinary, "-c", command,
+			)
+		} else {
+			tmuxArgs = append(tmuxArgs, bashBinary, "-c", command)
+		}
 	}
 
 	unitBase := serviceUnitBase(s.Name)
