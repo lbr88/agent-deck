@@ -8,48 +8,108 @@ import (
 )
 
 const (
-	hotkeyQuit             = "quit"
-	hotkeyNewSession       = "new_session"
-	hotkeyQuickCreate      = "quick_create"
-	hotkeyRename           = "rename"
-	hotkeyRestart          = "restart"
-	hotkeyRestartFresh     = "restart_fresh"
-	hotkeyDelete           = "delete"
-	hotkeyCloseSession     = "close_session"
-	hotkeyArchiveSession   = "archive_session"
-	hotkeyUnarchiveSession = "unarchive_session"
-	hotkeyViewArchived     = "view_archived"
-	hotkeyUndoDelete       = "undo_delete"
-	hotkeyMoveToGroup      = "move_to_group"
-	hotkeyMCPManager       = "mcp_manager"
-	hotkeyPluginManager    = "plugin_manager"
-	hotkeySkillsManager    = "skills_manager"
-	hotkeyTogglePreview    = "toggle_preview"
-	hotkeyCycleGroupView   = "cycle_group_view"
-	hotkeyMarkUnread       = "mark_unread"
-	hotkeyQuickApprove     = "quick_approve"
-	hotkeyPromptSession    = "prompt_session" // #1410: prompt the highlighted session without attaching
-	hotkeyToggleYolo       = "toggle_yolo"
-	hotkeyQuickFork        = "quick_fork"
-	hotkeyForkWithOptions  = "fork_with_options"
-	hotkeyCopyOutput       = "copy_output"
-	hotkeyCopyPane         = "copy_pane"
-	hotkeySendOutput       = "send_output"
-	hotkeyExecShell        = "exec_shell"
-	hotkeyOpenShellHere    = "open_shell_here"
-	hotkeyEditNotes        = "edit_notes"
-	hotkeyEditPaths        = "edit_paths"
-	hotkeyEditSession      = "edit_session"
-	hotkeyWorktreeSetup    = "worktree_setup"
-	hotkeyWorktreeFinish   = "worktree_finish"
-	hotkeyCreateGroup      = "create_group"
-	hotkeySearch           = "search"
-	hotkeyHelp             = "help"
-	hotkeySettings         = "settings"
-	hotkeyImport           = "import"
-	hotkeyReload           = "reload"
-	hotkeyDetach           = "detach"
-	hotkeyWatcherPanel     = "watcher_panel"
+	hotkeyQuit                 = "quit"
+	hotkeyNewSession           = "new_session"
+	hotkeyQuickCreate          = "quick_create"
+	hotkeyRename               = "rename"
+	hotkeyRestart              = "restart"
+	hotkeyRestartFresh         = "restart_fresh"
+	hotkeyDelete               = "delete"
+	hotkeyCloseSession         = "close_session"
+	hotkeyArchiveSession       = "archive_session"
+	hotkeyUnarchiveSession     = "unarchive_session"
+	hotkeyViewArchived         = "view_archived"
+	hotkeyUndoDelete           = "undo_delete"
+	hotkeyMoveToGroup          = "move_to_group"
+	hotkeyMCPManager           = "mcp_manager"
+	hotkeyPluginManager        = "plugin_manager"
+	hotkeySkillsManager        = "skills_manager"
+	hotkeyTogglePreview        = "toggle_preview"
+	hotkeyCycleGroupView       = "cycle_group_view"
+	hotkeyMarkUnread           = "mark_unread"
+	hotkeyQuickApprove         = "quick_approve"
+	hotkeyPromptSession        = "prompt_session" // #1410: prompt the highlighted session without attaching
+	hotkeyToggleYolo           = "toggle_yolo"
+	hotkeyQuickFork            = "quick_fork"
+	hotkeyForkWithOptions      = "fork_with_options"
+	hotkeyCopyOutput           = "copy_output"
+	hotkeyCopyPane             = "copy_pane"
+	hotkeySendOutput           = "send_output"
+	hotkeyExecShell            = "exec_shell"
+	hotkeyOpenShellHere        = "open_shell_here"
+	hotkeyEditNotes            = "edit_notes"
+	hotkeyEditPaths            = "edit_paths"
+	hotkeyEditSession          = "edit_session"
+	hotkeyWorktreeSetup        = "worktree_setup"
+	hotkeyWorktreeFinish       = "worktree_finish"
+	hotkeyCreateGroup          = "create_group"
+	hotkeySearch               = "search"
+	hotkeyHelp                 = "help"
+	hotkeySettings             = "settings"
+	hotkeyImport               = "import"
+	hotkeyReload               = "reload"
+	hotkeyDetach               = "detach"
+	hotkeyWatcherPanel         = "watcher_panel"
+	hotkeyNavigateUp           = "navigate_up"
+	hotkeyNavigateDown         = "navigate_down"
+	hotkeyPageUp               = "page_up"
+	hotkeyPageDown             = "page_down"
+	hotkeyFullPageUp           = "full_page_up"
+	hotkeyFullPageDown         = "full_page_down"
+	hotkeyFirstItem            = "first_item"
+	hotkeyLastItem             = "last_item"
+	hotkeyNextGroupSession     = "next_group_session"
+	hotkeyPreviousGroupSession = "previous_group_session"
+	hotkeyFirstGroupSession    = "first_group_session"
+	hotkeyLastGroupSession     = "last_group_session"
+	hotkeySearchGroup          = "search_group"
+	hotkeyOpenNewWindow        = "open_new_window"
+	hotkeyToggleExpand         = "toggle_expand"
+	hotkeyCollapse             = "collapse"
+	hotkeyMoveUp               = "move_up"
+	hotkeyMoveDown             = "move_down"
+	hotkeyPromote              = "promote"
+	hotkeyDemote               = "demote"
+	hotkeyCyclePin             = "cycle_pin"
+	hotkeyPreviewSmaller       = "preview_smaller"
+	hotkeyPreviewLarger        = "preview_larger"
+	hotkeyPreviewOrientation   = "preview_orientation"
+	hotkeyQuickOpen            = "quick_open"
+	hotkeyRemoveSession        = "remove_session"
+	hotkeyBulkRemoveErrored    = "bulk_remove_errored"
+	hotkeyInsertMode           = "insert_mode"
+	hotkeyHubAdmin             = "hub_admin"
+	hotkeyHandover             = "handover"
+	hotkeyCopyInfo             = "copy_info"
+	hotkeyCopyCodeBlock        = "copy_code_block"
+	hotkeyGeminiModel          = "gemini_model"
+	hotkeyFeedback             = "feedback"
+	hotkeyClearFilter          = "clear_filter"
+	hotkeyFilterRunning        = "filter_running"
+	hotkeyFilterWaiting        = "filter_waiting"
+	hotkeyFilterIdle           = "filter_idle"
+	hotkeyFilterErrorOrCost    = "filter_error_or_cost"
+	hotkeyCostDashboard        = "cost_dashboard"
+	hotkeyFilterOpen           = "filter_open"
+	hotkeyJumpRootGroup1       = "jump_root_group_1"
+	hotkeyJumpRootGroup2       = "jump_root_group_2"
+	hotkeyJumpRootGroup3       = "jump_root_group_3"
+	hotkeyJumpRootGroup4       = "jump_root_group_4"
+	hotkeyJumpRootGroup5       = "jump_root_group_5"
+	hotkeyJumpRootGroup6       = "jump_root_group_6"
+	hotkeyJumpRootGroup7       = "jump_root_group_7"
+	hotkeyJumpRootGroup8       = "jump_root_group_8"
+	hotkeyJumpRootGroup9       = "jump_root_group_9"
+	hotkeyJumpMode             = "jump_mode"
+	hotkeyNthGroupSession1     = "nth_group_session_1"
+	hotkeyNthGroupSession2     = "nth_group_session_2"
+	hotkeyNthGroupSession3     = "nth_group_session_3"
+	hotkeyNthGroupSession4     = "nth_group_session_4"
+	hotkeyNthGroupSession5     = "nth_group_session_5"
+	hotkeyNthGroupSession6     = "nth_group_session_6"
+	hotkeyNthGroupSession7     = "nth_group_session_7"
+	hotkeyNthGroupSession8     = "nth_group_session_8"
+	hotkeyNthGroupSession9     = "nth_group_session_9"
 	// Session switcher. While attached it is intercepted in the tmux attach
 	// loop (see internal/tmux/pty.go AttachOptions); on the home screen it is
 	// dispatched like any other hotkey. Must resolve to a "ctrl+<letter>" chord.
@@ -117,52 +177,172 @@ var hotkeyActionOrder = []string{
 	hotkeyDetach,
 	hotkeyWatcherPanel,
 	hotkeySwitchSession,
+	hotkeyNavigateUp,
+	hotkeyNavigateDown,
+	hotkeyPageUp,
+	hotkeyPageDown,
+	hotkeyFullPageUp,
+	hotkeyFullPageDown,
+	hotkeyFirstItem,
+	hotkeyLastItem,
+	hotkeyNextGroupSession,
+	hotkeyPreviousGroupSession,
+	hotkeyFirstGroupSession,
+	hotkeyLastGroupSession,
+	hotkeySearchGroup,
+	hotkeyOpenNewWindow,
+	hotkeyToggleExpand,
+	hotkeyCollapse,
+	hotkeyMoveUp,
+	hotkeyMoveDown,
+	hotkeyPromote,
+	hotkeyDemote,
+	hotkeyCyclePin,
+	hotkeyPreviewSmaller,
+	hotkeyPreviewLarger,
+	hotkeyPreviewOrientation,
+	hotkeyQuickOpen,
+	hotkeyRemoveSession,
+	hotkeyBulkRemoveErrored,
+	hotkeyInsertMode,
+	hotkeyHubAdmin,
+	hotkeyHandover,
+	hotkeyCopyInfo,
+	hotkeyCopyCodeBlock,
+	hotkeyGeminiModel,
+	hotkeyFeedback,
+	hotkeyClearFilter,
+	hotkeyFilterRunning,
+	hotkeyFilterWaiting,
+	hotkeyFilterIdle,
+	hotkeyFilterErrorOrCost,
+	hotkeyCostDashboard,
+	hotkeyFilterOpen,
+	hotkeyJumpRootGroup1,
+	hotkeyJumpRootGroup2,
+	hotkeyJumpRootGroup3,
+	hotkeyJumpRootGroup4,
+	hotkeyJumpRootGroup5,
+	hotkeyJumpRootGroup6,
+	hotkeyJumpRootGroup7,
+	hotkeyJumpRootGroup8,
+	hotkeyJumpRootGroup9,
+	hotkeyJumpMode,
+	hotkeyNthGroupSession1,
+	hotkeyNthGroupSession2,
+	hotkeyNthGroupSession3,
+	hotkeyNthGroupSession4,
+	hotkeyNthGroupSession5,
+	hotkeyNthGroupSession6,
+	hotkeyNthGroupSession7,
+	hotkeyNthGroupSession8,
+	hotkeyNthGroupSession9,
 }
 
 var defaultHotkeyBindings = map[string]string{
-	hotkeyQuit:             "q",
-	hotkeyNewSession:       "n",
-	hotkeyQuickCreate:      "N",
-	hotkeyRename:           "r",
-	hotkeyRestart:          "R",
-	hotkeyRestartFresh:     "T",
-	hotkeyDelete:           "d",
-	hotkeyCloseSession:     "D",
-	hotkeyArchiveSession:   "A",
-	hotkeyUnarchiveSession: "shift+u",
-	hotkeyViewArchived:     "^",
-	hotkeyUndoDelete:       "ctrl+z",
-	hotkeyMoveToGroup:      "M",
-	hotkeyMCPManager:       "m",
-	hotkeyPluginManager:    "L",
-	hotkeySkillsManager:    "s",
-	hotkeyTogglePreview:    "v",
-	hotkeyCycleGroupView:   "t",
-	hotkeyMarkUnread:       "u",
-	hotkeyQuickApprove:     "a",
-	hotkeyPromptSession:    "o",
-	hotkeyToggleYolo:       "y",
-	hotkeyQuickFork:        "f",
-	hotkeyForkWithOptions:  "F",
-	hotkeyCopyOutput:       "c",
-	hotkeyCopyPane:         "V",
-	hotkeySendOutput:       "x",
-	hotkeyExecShell:        "E",
-	hotkeyOpenShellHere:    "H",
-	hotkeyEditNotes:        "e",
-	hotkeyEditPaths:        "p",
-	hotkeyEditSession:      "P",
-	hotkeyWorktreeSetup:    "b",
-	hotkeyWorktreeFinish:   "W",
-	hotkeyCreateGroup:      "g",
-	hotkeySearch:           "/",
-	hotkeyHelp:             "?",
-	hotkeySettings:         "S",
-	hotkeyImport:           "i",
-	hotkeyReload:           "ctrl+r",
-	hotkeyDetach:           "ctrl+q",
-	hotkeyWatcherPanel:     "w",
-	hotkeySwitchSession:    "ctrl+s",
+	hotkeyQuit:                 "q",
+	hotkeyNewSession:           "n",
+	hotkeyQuickCreate:          "N",
+	hotkeyRename:               "r",
+	hotkeyRestart:              "R",
+	hotkeyRestartFresh:         "T",
+	hotkeyDelete:               "d",
+	hotkeyCloseSession:         "D",
+	hotkeyArchiveSession:       "A",
+	hotkeyUnarchiveSession:     "shift+u",
+	hotkeyViewArchived:         "^",
+	hotkeyUndoDelete:           "ctrl+z",
+	hotkeyMoveToGroup:          "M",
+	hotkeyMCPManager:           "m",
+	hotkeyPluginManager:        "L",
+	hotkeySkillsManager:        "s",
+	hotkeyTogglePreview:        "v",
+	hotkeyCycleGroupView:       "t",
+	hotkeyMarkUnread:           "u",
+	hotkeyQuickApprove:         "a",
+	hotkeyPromptSession:        "o",
+	hotkeyToggleYolo:           "y",
+	hotkeyQuickFork:            "f",
+	hotkeyForkWithOptions:      "F",
+	hotkeyCopyOutput:           "c",
+	hotkeyCopyPane:             "V",
+	hotkeySendOutput:           "x",
+	hotkeyExecShell:            "E",
+	hotkeyOpenShellHere:        "H",
+	hotkeyEditNotes:            "e",
+	hotkeyEditPaths:            "p",
+	hotkeyEditSession:          "P",
+	hotkeyWorktreeSetup:        "b",
+	hotkeyWorktreeFinish:       "W",
+	hotkeyCreateGroup:          "g",
+	hotkeySearch:               "/",
+	hotkeyHelp:                 "?",
+	hotkeySettings:             "S",
+	hotkeyImport:               "i",
+	hotkeyReload:               "ctrl+r",
+	hotkeyDetach:               "ctrl+q",
+	hotkeyWatcherPanel:         "w",
+	hotkeySwitchSession:        "ctrl+s",
+	hotkeyNavigateUp:           "k",
+	hotkeyNavigateDown:         "j",
+	hotkeyPageUp:               "pgup",
+	hotkeyPageDown:             "pgdown",
+	hotkeyFullPageUp:           "ctrl+b",
+	hotkeyFullPageDown:         "ctrl+f",
+	hotkeyFirstItem:            "home",
+	hotkeyLastItem:             "end",
+	hotkeyNextGroupSession:     "alt+j",
+	hotkeyPreviousGroupSession: "alt+k",
+	hotkeyFirstGroupSession:    "alt+g",
+	hotkeyLastGroupSession:     "alt+G",
+	hotkeySearchGroup:          "alt+/",
+	hotkeyOpenNewWindow:        "shift+enter",
+	hotkeyToggleExpand:         "tab",
+	hotkeyCollapse:             "h",
+	hotkeyMoveUp:               "shift+up",
+	hotkeyMoveDown:             "shift+down",
+	hotkeyPromote:              "shift+left",
+	hotkeyDemote:               "shift+right",
+	hotkeyCyclePin:             ",",
+	hotkeyPreviewSmaller:       "<",
+	hotkeyPreviewLarger:        ">",
+	hotkeyPreviewOrientation:   "O",
+	hotkeyQuickOpen:            "z",
+	hotkeyRemoveSession:        "X",
+	hotkeyBulkRemoveErrored:    "ctrl+x",
+	hotkeyInsertMode:           "I",
+	hotkeyHubAdmin:             "alt+a",
+	hotkeyHandover:             "alt+h",
+	hotkeyCopyInfo:             "C",
+	hotkeyCopyCodeBlock:        "Y",
+	hotkeyGeminiModel:          "ctrl+g",
+	hotkeyFeedback:             "ctrl+e",
+	hotkeyClearFilter:          "0",
+	hotkeyFilterRunning:        "!",
+	hotkeyFilterWaiting:        "@",
+	hotkeyFilterIdle:           "#",
+	hotkeyFilterErrorOrCost:    "$",
+	hotkeyCostDashboard:        "alt+$",
+	hotkeyFilterOpen:           "%",
+	hotkeyJumpRootGroup1:       "1",
+	hotkeyJumpRootGroup2:       "2",
+	hotkeyJumpRootGroup3:       "3",
+	hotkeyJumpRootGroup4:       "4",
+	hotkeyJumpRootGroup5:       "5",
+	hotkeyJumpRootGroup6:       "6",
+	hotkeyJumpRootGroup7:       "7",
+	hotkeyJumpRootGroup8:       "8",
+	hotkeyJumpRootGroup9:       "9",
+	hotkeyJumpMode:             "alt+space",
+	hotkeyNthGroupSession1:     "alt+1",
+	hotkeyNthGroupSession2:     "alt+2",
+	hotkeyNthGroupSession3:     "alt+3",
+	hotkeyNthGroupSession4:     "alt+4",
+	hotkeyNthGroupSession5:     "alt+5",
+	hotkeyNthGroupSession6:     "alt+6",
+	hotkeyNthGroupSession7:     "alt+7",
+	hotkeyNthGroupSession8:     "alt+8",
+	hotkeyNthGroupSession9:     "alt+9",
 }
 
 var hotkeyActionDefaultTriggers = map[string][]string{
@@ -171,6 +351,14 @@ var hotkeyActionDefaultTriggers = map[string][]string{
 	hotkeyMoveToGroup:     {"M", "shift+m"},
 	hotkeyWorktreeFinish:  {"W", "shift+w"},
 	hotkeyEditSession:     {"P", "shift+p"},
+	hotkeyNavigateUp:      {"k", "ctrl+p"},
+	hotkeyNavigateDown:    {"j", "ctrl+n"},
+	hotkeyPageUp:          {"pgup", "ctrl+u"},
+	hotkeyPageDown:        {"pgdown", "ctrl+d"},
+	hotkeyToggleExpand:    {"tab", "l"},
+	hotkeyMoveUp:          {"shift+up", "ctrl+up", "+", "K"},
+	hotkeyMoveDown:        {"shift+down", "ctrl+down", "-", "J"},
+	hotkeySearch:          {"/", "G"},
 }
 
 // renamedHotkeys maps old action names to new names for backward compatibility.
@@ -188,6 +376,11 @@ var renamedHotkeys = map[string]string{
 // attached tool.
 var defaultDisabledHotkeys = map[string]bool{
 	hotkeySwitchSession: true,
+	// These actions had no unambiguous reachable legacy shortcut: H was already
+	// consumed by open_shell_here, while handover lived behind the overloaded
+	// P-prefix. They are menu-first and may be enabled explicitly.
+	hotkeyHubAdmin: true,
+	hotkeyHandover: true,
 }
 
 func resolveHotkeys(overrides map[string]string) map[string]string {
@@ -329,7 +522,7 @@ func supportedHotkeyBinding(key string) bool {
 func supportedNamedHotkey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "backspace", "delete", "insert", "home", "end", "pgup", "pgdown", "pageup", "pagedown",
-		"tab", "enter", "esc", "up", "down", "left", "right":
+		"tab", "enter", "esc", "space", "up", "down", "left", "right":
 		return true
 	default:
 		return false

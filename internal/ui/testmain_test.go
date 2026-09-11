@@ -52,6 +52,11 @@ func runTestMain(m *testing.M) int {
 	// checks. Their production workers are unrelated to those assertions and
 	// must not outlive each test.
 	homeBackgroundWorkersEnabled = false
+	// Production defaults to the new menu-first interaction model. Existing UI
+	// operation tests intentionally exercise the legacy accelerators, so retain
+	// those bindings in the package test harness; menu-first behavior has focused
+	// tests that set bindings explicitly.
+	defaultShortcutMode = shortcutModeLegacy
 	// The remote-session startup cache is per-profile persistent state, and
 	// every test here shares the one _test profile. Left on, a test that pumps
 	// a remoteSessionsFetchedMsg writes a snapshot that every later NewHome()

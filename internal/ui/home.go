@@ -261,6 +261,7 @@ type Home struct {
 	headless bool
 
 	// Components
+	actionMenu                *ActionMenu
 	search                    *Search
 	globalSearch              *GlobalSearch              // Global session search across all Claude conversations
 	globalSearchIndex         *session.GlobalSearchIndex // Search index (nil if disabled)
@@ -327,6 +328,7 @@ type Home struct {
 	hotkeys        map[string]string // action -> configured key
 	hotkeyLookup   map[string]string // pressed key -> canonical key used by switch cases
 	blockedHotkeys map[string]bool   // canonical keys disabled via remap/unbind
+	shortcutMode   string            // menu (default) or legacy
 
 	// Inline preview notes editing
 	notesEditor           textarea.Model
@@ -881,8 +883,20 @@ func (h *Home) saveToolVisibilityConfig() error {
 	return session.SaveUserConfig(&merged)
 }
 
+// defaultShortcutMode is menu-first in production. UI TestMain switches this
+// seam to legacy so the large body of operation tests can keep exercising the
+// historical accelerators without weakening the shipped default.
+var defaultShortcutMode = shortcutModeMenu
+
 func (h *Home) reloadHotkeysFromConfig() {
-	h.setHotkeys(resolveHotkeys(session.GetHotkeyOverrides()))
+	mode := defaultShortcutMode
+	if cfg, err := session.LoadUserConfig(); err == nil && cfg != nil {
+		if strings.TrimSpace(cfg.UI.ShortcutMode) != "" {
+			mode = cfg.UI.GetShortcutMode()
+		}
+	}
+	h.shortcutMode = mode
+	h.setHotkeys(resolveHotkeysForMode(session.GetHotkeyOverrides(), mode))
 }
 
 func (h *Home) detachByte() byte {
@@ -1186,6 +1200,11 @@ func buildRemoteAttachRequest(remoteName, sessionID, openAs string) (terminal.At
 }
 
 func (h *Home) normalizeMainKey(pressed string) string {
+	// Bubble Tea renders Alt+Space as "alt+ ". Normalize it to a readable
+	// structural token now that plain Space owns the action menu.
+	if pressed == "alt+ " {
+		pressed = "alt+space"
+	}
 	// Shift+Enter relay: csiuReader emits the Private-Use rune
 	// shiftEnterMarker (U+E5E5) when it sees a Shift+Enter CSI u or
 	// modifyOtherKeys sequence (issue #1093). Bubble Tea v1.3.10 has no
@@ -1744,6 +1763,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		profile:              actualProfile,
 		storage:              storage,
 		storageWarning:       storageWarning,
+		actionMenu:           NewActionMenu(),
 		search:               NewSearch(),
 		newDialog:            NewNewDialog(),
 		groupDialog:          NewGroupDialog(),
@@ -7380,6 +7400,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			h.handoverDialog.SetSize(msg.Width, msg.Height)
 		}
 		h.scrollbackPager.SetSize(msg.Width, msg.Height)
+		if h.actionMenu != nil {
+			h.actionMenu.SetSize(msg.Width, msg.Height)
+		}
 		// Issue #1366: a resize can reveal the preview pane (single -> stacked/dual).
 		// fetchSelectedPreview self-guards to nil in single-column, so this only
 		// fetches when a preview pane is actually visible.
@@ -7391,6 +7414,11 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Non-wheel events are silently ignored (O(1), no blocking I/O).
 		switch msg.Button {
 		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+			if h.actionMenu != nil && h.actionMenu.IsVisible() {
+				var cmd tea.Cmd
+				h.actionMenu, cmd = h.actionMenu.Update(msg)
+				return h, cmd
+			}
 			if h.setupWizard.IsVisible() {
 				return h, nil
 			}
@@ -9846,6 +9874,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return h.handleJumpKey(msg)
 		}
 
+		// The global action menu owns all input while visible. Its selection is
+		// dispatched by stable ActionID, never translated into a shortcut key.
+		if h.actionMenu != nil && h.actionMenu.IsVisible() {
+			return h.handleActionMenuKey(msg)
+		}
+
 		// Handle setup wizard first (modal, blocks everything)
 		if h.setupWizard.IsVisible() {
 			var cmd tea.Cmd
@@ -11029,6 +11063,7 @@ func (h *Home) finishJumpMode() (bool, tea.Cmd) {
 // hasModalVisible returns true if any modal dialog or overlay is currently visible
 func (h *Home) hasModalVisible() bool {
 	return h.initialLoading || h.isQuitting || h.notesEditing || h.jumpMode ||
+		(h.actionMenu != nil && h.actionMenu.IsVisible()) ||
 		h.setupWizard.IsVisible() || h.settingsPanel.IsVisible() ||
 		(h.toolVisibilityPanel != nil && h.toolVisibilityPanel.IsVisible()) ||
 		h.watcherPanel.IsVisible() || // hotkeyWatcherPanel overlay
@@ -11237,6 +11272,13 @@ func (h *Home) mouseYToItemIndex(y int) int {
 
 // handleMainKey handles keys in main view
 func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return h.handleMainDispatch(msg, "")
+}
+
+// handleMainDispatch is the shared action implementation for both keyboard
+// accelerators and menu selections. A non-empty directAction bypasses key
+// normalization entirely and switches on the stable ActionID.
+func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Model, tea.Cmd) {
 	// Insert mode (#1069): short-circuit before any normal-mode handling.
 	// Keystrokes are sent to the focused session's tmux pane; Esc exits.
 	if h.insertMode {
@@ -11253,7 +11295,21 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	raw := msg.String()
-	key := h.normalizeMainKey(raw)
+	key := ""
+	if directAction != "" {
+		key = string(directAction)
+		raw = "<menu>"
+	} else {
+		key = h.normalizeMainKey(raw)
+		if h.shortcutMode == shortcutModeMenu && !isStructuralOverviewKey(key) {
+			if actionIDForCanonicalKey(key) == "" {
+				return h, nil
+			}
+		}
+		if action := actionIDForCanonicalKey(key); action != "" {
+			key = string(action)
+		}
+	}
 	uiLog.Info("keypress", "raw", raw, "normalized", key, "type", msg.Type, "runes", string(msg.Runes))
 	if key == "" {
 		return h, nil
@@ -11274,7 +11330,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch key {
-	case "q", "ctrl+c":
+	case hotkeyQuit:
 		return h.tryQuit()
 
 	case "U":
@@ -11310,7 +11366,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.lastEscTime = time.Now()
 		return h, nil
 
-	case "up", "k", "ctrl+p":
+	case "up", hotkeyNavigateUp:
 		h.previewScrollOffset = 0
 		if h.cursor > 0 {
 			h.cursor--
@@ -11323,7 +11379,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "down", "j", "ctrl+n":
+	case "down", hotkeyNavigateDown:
 		h.previewScrollOffset = 0
 		if h.cursor < len(h.flatItems)-1 {
 			h.cursor++
@@ -11337,7 +11393,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 		// Vi-style pagination (#38) - half/full page scrolling
-	case "ctrl+u", "pgup": // Half page up
+	case hotkeyPageUp: // Half page up
 		pageSize := h.getVisibleHeight() / 2
 		if pageSize < 1 {
 			pageSize = 1
@@ -11352,7 +11408,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "ctrl+d", "pgdown": // Half page down
+	case hotkeyPageDown: // Half page down
 		pageSize := h.getVisibleHeight() / 2
 		if pageSize < 1 {
 			pageSize = 1
@@ -11370,7 +11426,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "ctrl+b": // Full page up (backward)
+	case hotkeyFullPageUp: // Full page up (backward)
 		pageSize := h.getVisibleHeight()
 		if pageSize < 1 {
 			pageSize = 1
@@ -11385,7 +11441,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "ctrl+f": // Full page down (forward)
+	case hotkeyFullPageDown: // Full page down (forward)
 		pageSize := h.getVisibleHeight()
 		if pageSize < 1 {
 			pageSize = 1
@@ -11403,7 +11459,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "home": // Jump to first item
+	case hotkeyFirstItem: // Jump to first item
 		h.cursor = 0
 		h.skipDivider(1)
 		h.previewScrollOffset = 0
@@ -11411,7 +11467,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "end": // Jump to last item
+	case hotkeyLastItem: // Jump to last item
 		h.cursor = len(h.flatItems) - 1
 		if h.cursor < 0 {
 			h.cursor = 0
@@ -11422,27 +11478,25 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.markNavigationActivity()
 		return h, h.fetchSelectedPreview()
 
-	case "G": // Open fleet-wide session search.
-		h.openFleetSearch()
-		return h, nil
-
 	// Group-scoped navigation layer (v1.7.60): Alt+* keys navigate only within
 	// the cursor's current group. Plain j/k/1-9/g/G// remain unchanged above.
-	case "alt+j": // Next session in current group
+	case hotkeyNextGroupSession: // Next session in current group
 		if target := h.nextSessionInCurrentGroup(); target >= 0 {
 			h.jumpToIndex(target)
 			return h, h.fetchSelectedPreview()
 		}
 		return h, nil
 
-	case "alt+k": // Previous session in current group
+	case hotkeyPreviousGroupSession: // Previous session in current group
 		if target := h.prevSessionInCurrentGroup(); target >= 0 {
 			h.jumpToIndex(target)
 			return h, h.fetchSelectedPreview()
 		}
 		return h, nil
 
-	case "alt+1", "alt+2", "alt+3", "alt+4", "alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+	case hotkeyNthGroupSession1, hotkeyNthGroupSession2, hotkeyNthGroupSession3,
+		hotkeyNthGroupSession4, hotkeyNthGroupSession5, hotkeyNthGroupSession6,
+		hotkeyNthGroupSession7, hotkeyNthGroupSession8, hotkeyNthGroupSession9:
 		// Jump to Nth session in current group (1-indexed).
 		n := int(key[len(key)-1] - '0')
 		if target := h.nthSessionInCurrentGroup(n); target >= 0 {
@@ -11451,26 +11505,26 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "alt+g": // First session in current group
+	case hotkeyFirstGroupSession: // First session in current group
 		if target := h.firstSessionInCurrentGroup(); target >= 0 {
 			h.jumpToIndex(target)
 			return h, h.fetchSelectedPreview()
 		}
 		return h, nil
 
-	case "alt+G": // Last session in current group
+	case hotkeyLastGroupSession: // Last session in current group
 		if target := h.lastSessionInCurrentGroup(); target >= 0 {
 			h.jumpToIndex(target)
 			return h, h.fetchSelectedPreview()
 		}
 		return h, nil
 
-	case "alt+/": // In-group filter search
+	case hotkeySearchGroup: // In-group filter search
 		h.search.SetSize(h.width, h.height)
 		h.openInGroupSearch()
 		return h, nil
 
-	case h.actionKey(hotkeyOpenShellHere):
+	case hotkeyOpenShellHere:
 		// Open a shell sub-session in the focused session's worktree (or
 		// project path) as an iTerm2 split pane or new tmux window,
 		// depending on [ui].shell_split and auto-detection. Issue #1470.
@@ -11485,7 +11539,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.collapseOrNavUp()
 		return h, nil
 
-	case "shift+enter":
+	case hotkeyOpenNewWindow:
 		// Open the focused session in a new native terminal tab (or
 		// window, per [ui] iterm_open_as), leaving agent-deck running
 		// here. Issue #1069 feature 2 + #1100 remote-session support,
@@ -11521,7 +11575,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "enter":
+	case "enter", string(ActionOpen):
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil {
@@ -11592,7 +11646,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "tab", "l", "right":
+	case "right", hotkeyToggleExpand:
 		// Expand/collapse group, or toggle session windows
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11624,12 +11678,12 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "h", "left":
+	case "left", hotkeyCollapse:
 		// Collapse group, session windows, or navigate up
 		h.collapseOrNavUp()
 		return h, nil
 
-	case "shift+up", "ctrl+up", "+", "K":
+	case hotkeyMoveUp:
 		// Move item up
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11671,7 +11725,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "shift+down", "ctrl+down", "-", "J":
+	case hotkeyMoveDown:
 		// Move item down
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11705,7 +11759,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "shift+left":
+	case hotkeyPromote:
 		// Hub node: demote from admin. Local session: promote/outdent a
 		// sub-session to top-level peer in the same group.
 		if h.cursor < len(h.flatItems) {
@@ -11726,7 +11780,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "shift+right":
+	case hotkeyDemote:
 		// Hub node: promote to admin. Local session: demote/nest under the
 		// previous top-level peer in the same group.
 		if h.cursor < len(h.flatItems) {
@@ -11747,7 +11801,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case ",":
+	case hotkeyCyclePin:
 		// Cycle pin: off → top → bottom → off (pin-sessions #1335).
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11768,7 +11822,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "p":
+	case hotkeyEditPaths:
 		// Edit multi-repo paths
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11779,14 +11833,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "P", "shift+p":
-		if h.getSelectedSession() != nil || h.getSelectedHubSessionItem() != nil {
-			h.sessionActionPrefix = true
-			h.maintenanceMsg = "P: h handover, e edit, P edit"
-		}
+	case hotkeyEditSession:
+		h.openEditSessionDialogForSelected()
 		return h, nil
 
-	case "m":
+	case string(ActionHandover):
+		return h, h.openHandoverDialogForSelected()
+
+	case hotkeyMCPManager:
 		// MCP Manager — Claude, Gemini, and Cursor Agent CLI
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11804,7 +11858,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "L":
+	case hotkeyPluginManager:
 		// Plugin Manager — claude-only (RFC docs/rfc/PLUGIN_ATTACH.md).
 		// Mirrors the MCP-manager UX (`m`): toggleable list of catalog
 		// plugins from ~/.agent-deck/config.toml. Apply persists via
@@ -11825,7 +11879,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "f":
+	case hotkeyQuickFork:
 		// Quick fork session (same title with " (fork)" suffix)
 		// Only available when the selected tool supports Agent Deck forking
 		if h.cursor < len(h.flatItems) {
@@ -11849,7 +11903,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "F", "shift+f":
+	case hotkeyForkWithOptions:
 		// Fork with dialog (customize title and group)
 		// Only available when the selected tool supports Agent Deck forking
 		if h.cursor < len(h.flatItems) {
@@ -11874,7 +11928,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "s":
+	case hotkeySkillsManager:
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil &&
@@ -11891,7 +11945,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "M", "shift+m":
+	case hotkeyMoveToGroup:
 		// Move session to a different group, or reparent a group.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11909,7 +11963,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "b":
+	case hotkeyWorktreeSetup:
 		// Re-run worktree setup script (bootstrap)
 		if h.cursor >= len(h.flatItems) {
 			return h, nil
@@ -11943,7 +11997,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "W", "shift+w":
+	case hotkeyWorktreeFinish:
 		// Worktree finish - merge + cleanup for worktree sessions
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -11973,7 +12027,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "g":
+	case hotkeyCreateGroup:
 		// Vi-style gg to jump to top (#38) - check for double-tap first
 		if time.Since(h.lastGTime) < 500*time.Millisecond {
 			// Double g - jump to top
@@ -12037,7 +12091,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "r":
+	case hotkeyRename:
 		// Rename group or session
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12066,16 +12120,16 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "/":
+	case hotkeySearch:
 		h.openFleetSearch()
 		return h, nil
 
-	case "?":
+	case hotkeyHelp:
 		h.helpOverlay.SetSize(h.width, h.height)
 		h.helpOverlay.Show()
 		return h, nil
 
-	case "<":
+	case hotkeyPreviewSmaller:
 		// Sessions/Preview split: shrink preview by previewPctStep (#1092).
 		// Works in dual (horizontal) and stacked (vertical) layouts — the
 		// same previewPct drives both splits. Single layout has nothing to
@@ -12085,14 +12139,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case ">":
+	case hotkeyPreviewLarger:
 		// Sessions/Preview split: grow preview by previewPctStep (#1092).
 		if mode := h.getLayoutMode(); mode == LayoutModeDual || mode == LayoutModeStacked {
 			h.adjustPreviewPct(previewPctStep)
 		}
 		return h, nil
 
-	case "O":
+	case hotkeyPreviewOrientation:
 		// Toggle preview-pane orientation on wide terminals: side-by-side
 		// (right) <-> stacked (below). Persists to config.toml. No-op visual
 		// effect on narrow terminals (always stacked) but the preference is
@@ -12101,20 +12155,20 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.togglePreviewOrientation()
 		return h, nil
 
-	case "S":
+	case hotkeySettings:
 		// Open settings panel
 		h.settingsPanel.Show()
 		h.settingsPanel.SetSize(h.width, h.height)
 		return h, nil
 
-	case "w":
+	case hotkeyWatcherPanel:
 		// Open watcher panel
 		h.refreshWatcherPanel()
 		h.watcherPanel.Show()
 		h.watcherPanel.SetSize(h.width, h.height)
 		return h, nil
 
-	case "E":
+	case hotkeyExecShell:
 		// Exec an interactive shell inside the sandbox container.
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12142,7 +12196,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "n":
+	case hotkeyNewSession:
 		// Reset any stale remote target from a previously abandoned flow.
 		h.pendingRemoteName = ""
 		h.pendingHubNodeID = ""
@@ -12261,7 +12315,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.newDialog.ShowInGroup(groupPath, groupName, defaultPath, conductors, suggestedParentID)
 		return h, nil
 
-	case "N":
+	case hotkeyQuickCreate:
 		// Check if cursor is on a remote group/session — create on remote instead
 		if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12275,13 +12329,13 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Quick create: auto-generated name, smart defaults from group context
 		return h, h.quickCreateSession()
 
-	case "z":
+	case hotkeyQuickOpen:
 		h.zoxidePicker.SetSize(h.width, h.height)
 		h.zoxidePicker.SetSuggestProvider(h.pathSuggestProvider())
 		h.zoxidePicker.Show()
 		return h, nil
 
-	case "d":
+	case hotkeyDelete:
 		// Show confirmation dialog before deletion (prevents accidental deletion)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12326,7 +12380,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "D":
+	case hotkeyCloseSession:
 		// Close session process without deleting metadata from the list/storage.
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12340,7 +12394,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "A":
+	case hotkeyArchiveSession:
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
 			if item.Type == session.ItemTypeSession && item.Session != nil && !item.Session.IsArchived() {
@@ -12351,7 +12405,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "shift+u":
+	case hotkeyUnarchiveSession:
 		if h.statusFilter != FilterModeArchived {
 			return h, nil
 		}
@@ -12365,7 +12419,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "X":
+	case hotkeyRemoveSession:
 		// Status-gated registry-only remove. For stopped/errored sessions only;
 		// use 'd' for destructive delete (kills process + removes worktree).
 		if h.cursor < len(h.flatItems) {
@@ -12388,7 +12442,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "ctrl+x":
+	case hotkeyBulkRemoveErrored:
 		// Bulk remove all errored sessions from the registry.
 		count := 0
 		h.instancesMu.RLock()
@@ -12405,7 +12459,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.confirmDialog.ShowBulkRemoveErrored(count)
 		return h, nil
 
-	case "i":
+	case hotkeyImport:
 		if h.importSourceDialog != nil {
 			h.importSourceDialog.Show(ImportSourceCounts{})
 			h.importSourceDialog.SetSize(h.width, h.height)
@@ -12420,7 +12474,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.kiroImportEntries = nil
 		return h, h.openImportDialog
 
-	case "I":
+	case hotkeyInsertMode:
 		// Enter insert mode (#1069 feature 1): subsequent keystrokes are
 		// routed to the currently-selected session's tmux pane. Esc exits.
 		// `i` is taken by import; `I` follows the vim convention (Insert).
@@ -12429,10 +12483,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "H":
+	case hotkeyHubAdmin:
 		return h, h.openHubAdminDialog()
 
-	case "u":
+	case hotkeyMarkUnread:
 		// Mark session as unread (idle → waiting)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12458,7 +12512,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case defaultHotkeyBindings[hotkeyQuickApprove]:
+	case hotkeyQuickApprove:
 		// Quick approve: send "1" + Enter to the highlighted Claude session/window
 		// without attaching. Gated to Claude-compatible tools so a stray press
 		// on a vim/shell session cannot dump a "1" into the buffer. No status
@@ -12491,7 +12545,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case defaultHotkeyBindings[hotkeyPromptSession]:
+	case hotkeyPromptSession:
 		// #1410: open a one-line prompt input for the highlighted session and
 		// send it via the prompt-state-aware send path WITHOUT attaching. The
 		// submit path handles delivery for the selected session's live tmux pane;
@@ -12517,6 +12571,10 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 
 	case " ":
+		h.showActionMenu()
+		return h, nil
+
+	case hotkeyJumpMode:
 		if len(h.flatItems) > 0 {
 			h.markNavigationActivity()
 			h.jumpMode = true
@@ -12524,12 +12582,12 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "v":
+	case hotkeyTogglePreview:
 		// Toggle preview mode (cycle: both → output-only → analytics-only → both)
 		h.previewMode = (h.previewMode + 1) % 3
 		return h, nil
 
-	case "t":
+	case hotkeyCycleGroupView:
 		// Cycle list partition: normal → active-on-top → populated-on-top → normal.
 		// Preserve the cursor's row identity across the rebuild.
 		selectedBefore := h.captureSelectedItemIdentity()
@@ -12540,7 +12598,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.saveUIState()
 		return h, h.fetchSelectedPreview()
 
-	case "y":
+	case hotkeyToggleYolo:
 		// Toggle YOLO mode for Gemini or Codex sessions (requires restart)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12618,7 +12676,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "R":
+	case hotkeyRestart:
 		// Restart session (recreate tmux session with resume)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12639,7 +12697,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "T":
+	case hotkeyRestartFresh:
 		// Restart session fresh (discard current tool session binding first)
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12657,7 +12715,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "c":
+	case hotkeyCopyOutput:
 		// Copy last AI response to system clipboard
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12670,7 +12728,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "C", "shift+c":
+	case hotkeyCopyInfo:
 		// Copy preview pane info (Repo / Path / Branch) to system clipboard (#791).
 		// Pairs with `c` (copy session output): same fallback chain, different payload.
 		if h.cursor < len(h.flatItems) {
@@ -12684,7 +12742,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case defaultHotkeyBindings[hotkeyCopyPane]:
+	case hotkeyCopyPane:
 		// Copy the selected local session's current visible tmux pane. The key
 		// reaches this canonical case through the configurable hotkey lookup.
 		if h.cursor < len(h.flatItems) {
@@ -12695,7 +12753,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "Y", "shift+y":
+	case hotkeyCopyCodeBlock:
 		// Extract fenced code blocks from this session's recent output and
 		// copy one (OSC52, SSH-safe). Single block -> copy directly; multiple
 		// -> open the picker. Pairs with `c`/`C` in the copy family (#1412).
@@ -12711,7 +12769,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "x":
+	case hotkeySendOutput:
 		// Send session output to another session
 		if h.cursor < len(h.flatItems) {
 			item := h.flatItems[h.cursor]
@@ -12737,7 +12795,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "e":
+	case hotkeyEditNotes:
 		if config, _ := session.LoadUserConfig(); config != nil && !config.GetShowNotes() {
 			return h, nil
 		}
@@ -12755,7 +12813,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "ctrl+g":
+	case hotkeyGeminiModel:
 		// Open Gemini model selection dialog (only for Gemini sessions)
 		if inst := h.getSelectedSession(); inst != nil && inst.Tool == "gemini" {
 			cmd := h.geminiModelDialog.Show(inst.ID, inst.GeminiModel)
@@ -12763,7 +12821,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "ctrl+z":
+	case hotkeyUndoDelete:
 		// Undo last session delete (Chrome-style: restores in reverse order)
 		if len(h.undoStack) == 0 {
 			h.setError(fmt.Errorf("nothing to undo"))
@@ -12788,7 +12846,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case "ctrl+r":
+	case hotkeyReload:
 		// Manual refresh (useful if watcher fails or for user preference)
 		state := h.preserveState()
 
@@ -12804,7 +12862,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		return h, cmd
 
-	case "ctrl+s":
+	case hotkeySwitchSession:
 		// Open the session switcher from the overview too, with the same key
 		// used while attached. Pre-highlight the session under the cursor (if
 		// any) so it lines up with what the user is already looking at; Esc just
@@ -12816,7 +12874,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.openSessionSwitcher(fromID, false)
 		return h, nil
 
-	case "ctrl+e":
+	case hotkeyFeedback:
 		// Open feedback dialog on demand (per D-11: bypasses ShouldShow -- user-initiated)
 		if h.feedbackDialog != nil {
 			st := h.feedbackState
@@ -12850,19 +12908,21 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return h, nil
 
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+	case hotkeyJumpRootGroup1, hotkeyJumpRootGroup2, hotkeyJumpRootGroup3,
+		hotkeyJumpRootGroup4, hotkeyJumpRootGroup5, hotkeyJumpRootGroup6,
+		hotkeyJumpRootGroup7, hotkeyJumpRootGroup8, hotkeyJumpRootGroup9:
 		// Quick jump to Nth root group (1-indexed)
-		targetNum := int(key[0] - '0') // Convert "1" -> 1, "2" -> 2, etc.
+		targetNum := int(key[len(key)-1] - '0')
 		h.jumpToRootGroup(targetNum)
 		return h, nil
 
-	case "0":
+	case hotkeyClearFilter:
 		// Clear status filter (show all)
 		h.statusFilter = ""
 		h.rebuildFlatItems()
 		return h, nil
 
-	case "!", "shift+1":
+	case hotkeyFilterRunning:
 		// Filter to running sessions only
 		if h.statusFilter == session.StatusRunning {
 			h.statusFilter = "" // Toggle off
@@ -12872,7 +12932,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
-	case "@", "shift+2":
+	case hotkeyFilterWaiting:
 		// Filter to waiting sessions only
 		if h.statusFilter == session.StatusWaiting {
 			h.statusFilter = "" // Toggle off
@@ -12882,7 +12942,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
-	case "#", "shift+3":
+	case hotkeyFilterIdle:
 		// Filter to idle sessions only
 		if h.statusFilter == session.StatusIdle {
 			h.statusFilter = "" // Toggle off
@@ -12892,14 +12952,8 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
-	case "$", "shift+4":
-		// Cost dashboard (when cost tracking is active), otherwise filter to error sessions
-		if h.costStore != nil {
-			h.showCostDashboard = true
-			h.costDashboard = newCostDashboard(h.costStore, h.width, h.height)
-			return h, nil
-		}
-		// Fallback: filter to error sessions only
+	case hotkeyFilterErrorOrCost:
+		// Filter to error sessions only.
 		if h.statusFilter == session.StatusError {
 			h.statusFilter = "" // Toggle off
 		} else {
@@ -12908,7 +12962,14 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
-	case FilterKeyActive, "shift+5":
+	case hotkeyCostDashboard:
+		if h.costStore != nil {
+			h.showCostDashboard = true
+			h.costDashboard = newCostDashboard(h.costStore, h.width, h.height)
+		}
+		return h, nil
+
+	case hotkeyFilterOpen:
 		// Filter to open sessions (excludes error/stopped)
 		if h.statusFilter == FilterModeActive {
 			h.statusFilter = "" // Toggle off
@@ -12918,7 +12979,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.rebuildFlatItems()
 		return h, nil
 
-	case FilterKeyArchived, "shift+6":
+	case hotkeyViewArchived:
 		if h.statusFilter == FilterModeArchived {
 			h.statusFilter = ""
 		} else {
@@ -12929,6 +12990,15 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return h, nil
+}
+
+func isStructuralOverviewKey(key string) bool {
+	switch key {
+	case "up", "down", "left", "right", "enter", "esc", " ":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Home) handleSessionActionPrefixKey(key string) (tea.Model, tea.Cmd) {
@@ -20271,6 +20341,9 @@ func (h *Home) renderFrame() string {
 	}
 
 	// Overlays take full screen
+	if h.actionMenu != nil && h.actionMenu.IsVisible() {
+		return h.actionMenu.View()
+	}
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()
 	}

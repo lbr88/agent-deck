@@ -77,7 +77,7 @@ func TestHandoverDialog_SetSourceToolIDRejectsStaleResult(t *testing.T) {
 	}
 }
 
-func TestHomeHandoverActionOpensDialogWithPrefix(t *testing.T) {
+func TestHomeHandoverActionOpensDialogDirectly(t *testing.T) {
 	h := NewHome()
 	source := session.NewInstanceWithGroupAndTool("source", "/repo", "grp", "claude")
 	h.instances = []*session.Instance{source}
@@ -86,18 +86,13 @@ func TestHomeHandoverActionOpensDialogWithPrefix(t *testing.T) {
 	h.rebuildFlatItems()
 	h.moveCursorToSession(source.ID)
 
-	model, _ := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
-	h = model.(*Home)
-	if !h.sessionActionPrefix {
-		t.Fatal("P should arm the session action prefix")
-	}
-	model, _ = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model, _ := h.dispatchAction(ActionHandover)
 	h = model.(*Home)
 	if h.handoverDialog == nil || !h.handoverDialog.IsVisible() {
-		t.Fatal("P then h should open the handover dialog")
+		t.Fatal("handover action should open the handover dialog")
 	}
 	if h.editSessionDialog.IsVisible() {
-		t.Fatal("P then h should not open the edit session dialog")
+		t.Fatal("handover action should not open the edit session dialog")
 	}
 }
 
@@ -121,12 +116,10 @@ func TestHomeHandoverActionDefersOmpSourceIdentityLookup(t *testing.T) {
 	h.rebuildFlatItems()
 	h.moveCursorToSession(source.ID)
 
-	model, _ := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
-	h = model.(*Home)
-	model, cmd := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model, cmd := h.dispatchAction(ActionHandover)
 	h = model.(*Home)
 	if cmd == nil {
-		t.Fatal("P then h for OMP should return deferred identity lookup command")
+		t.Fatal("OMP handover action should return deferred identity lookup command")
 	}
 	if calls != 0 {
 		t.Fatalf("resolver calls before command execution = %d, want 0", calls)
@@ -158,9 +151,7 @@ func TestHomeHandoverActionRendersDialog(t *testing.T) {
 	h.rebuildFlatItems()
 	h.moveCursorToSession(source.ID)
 
-	model, _ := h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
-	h = model.(*Home)
-	model, _ = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model, _ := h.dispatchAction(ActionHandover)
 	h = model.(*Home)
 
 	if got := h.View(); !strings.Contains(got, "Hand Over Session") {

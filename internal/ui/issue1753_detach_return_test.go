@@ -381,7 +381,7 @@ func TestIssue1753_AttachReturnHandlersHaveNoInlineTmuxCalls(t *testing.T) {
 
 	// Every local attach path must wire onExit, or the first repaint goes back to
 	// racing the ExecCallback goroutine.
-	mainKeyBody := funcBody(t, text, "func (h *Home) handleMainKey(")
+	mainKeyBody := funcBody(t, text, "func (h *Home) handleMainDispatch(")
 	attachSites := []struct {
 		name string
 		body string
@@ -394,12 +394,12 @@ func TestIssue1753_AttachReturnHandlersHaveNoInlineTmuxCalls(t *testing.T) {
 		},
 		{
 			name: "window",
-			body: braceBlock(t, handlerBlock(t, mainKeyBody, `case "enter":`), "attachWindowCmd{"),
+			body: braceBlock(t, handlerBlock(t, mainKeyBody, `case "enter", string(ActionOpen):`), "attachWindowCmd{"),
 			cmd:  "attachWindowCmd{",
 		},
 		{
 			name: "sandbox terminal",
-			body: braceBlock(t, handlerBlock(t, mainKeyBody, `case "E":`), "attachCmd{"),
+			body: braceBlock(t, handlerBlock(t, mainKeyBody, `case hotkeyExecShell:`), "attachCmd{"),
 			cmd:  "attachCmd{",
 		},
 	}
