@@ -56,7 +56,22 @@ func TestTestMainDoesNotLeakBootstrapServer(t *testing.T) {
 	for _, pkg := range []string{"./internal/tmux/", "./internal/session/"} {
 		pkg := pkg
 		t.Run(pkg, func(t *testing.T) {
-			before := snapshotADTmuxDirs()
+			// Give the child an exclusive short temp root. Scanning every new
+			// ad-tmux-* directory under the machine-wide temp roots races with
+			// other package tests in `go test ./...`: their live bootstrap server
+			// can appear after our snapshot and be mistaken for this child's leak.
+			// Confining discovery to this child-owned root makes ownership exact.
+			childTmpBase, err := os.MkdirTemp("/var/tmp", "ad-sentinel-")
+			if err != nil {
+				t.Fatalf("create child temp root: %v", err)
+			}
+			t.Cleanup(func() {
+				// The child may fail after its bootstrap server starts but before
+				// the explicit leak probe below. Kill before unlinking sockets so a
+				// failing sentinel cannot strand an unreachable tmux daemon/pty.
+				testutil.KillTmuxServersUnder(childTmpBase)
+				_ = os.RemoveAll(childTmpBase)
+			})
 
 			// Bound the child run so a hung child (e.g. a stalled tmux call)
 			// fails this guard with a clear message instead of pinning the
@@ -68,7 +83,7 @@ func TestTestMainDoesNotLeakBootstrapServer(t *testing.T) {
 			cmd := exec.CommandContext(ctx, "go", "test", "-count=1", "-timeout", "60s",
 				"-run", "TestTmuxBootstrap_ServerIsRunning", pkg)
 			cmd.Dir = repoRoot
-			cmd.Env = os.Environ()
+			cmd.Env = envWithValue(os.Environ(), "TMPDIR", childTmpBase)
 			out, err := cmd.CombinedOutput()
 			if ctx.Err() == context.DeadlineExceeded {
 				t.Fatalf("child `go test %s` did not finish within 2m (hung?); output:\n%s", pkg, out)
@@ -81,7 +96,10 @@ func TestTestMainDoesNotLeakBootstrapServer(t *testing.T) {
 			// exited. The bootstrap tmux server is a separate daemon: if the
 			// kill-server defer ran it is gone; if os.Exit skipped it, it is
 			// still alive on its isolated socket.
-			newDirs := diffDirs(before, snapshotADTmuxDirs())
+			newDirs, err := filepath.Glob(filepath.Join(childTmpBase, "ad-tmux-*"))
+			if err != nil {
+				t.Fatalf("discover child tmux dirs: %v", err)
+			}
 
 			// Defense-in-depth: strip TMUX/TMUX_PANE from the probe/kill calls.
 			// `-S <path>` already pins the socket (verified: it is NOT overridden
@@ -137,42 +155,19 @@ func envWithoutTmux() []string {
 	return out
 }
 
-// adTmuxBases returns the candidate base dirs where IsolateTmuxSocket creates
-// its per-run TMUX_TMPDIR (shortTmuxTmpBase prefers TMPDIR, then /var/tmp).
-func adTmuxBases() []string {
-	bases := map[string]struct{}{"/tmp": {}, "/var/tmp": {}, os.TempDir(): {}}
-	if configured := strings.TrimSpace(os.Getenv("TMPDIR")); configured != "" {
-		bases[configured] = struct{}{}
-	}
-	out := make([]string, 0, len(bases))
-	for b := range bases {
-		out = append(out, b)
-	}
-	return out
-}
-
-// snapshotADTmuxDirs returns the set of existing ad-tmux-* dirs across the
-// candidate bases.
-func snapshotADTmuxDirs() map[string]struct{} {
-	set := map[string]struct{}{}
-	for _, base := range adTmuxBases() {
-		matches, _ := filepath.Glob(filepath.Join(base, "ad-tmux-*"))
-		for _, m := range matches {
-			set[m] = struct{}{}
+// envWithValue returns env with exactly one key=value entry. It lets the
+// sentinel give each child a private TMPDIR without mutating the parent test
+// process or leaving duplicate entries whose precedence varies by platform.
+func envWithValue(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue
 		}
+		out = append(out, kv)
 	}
-	return set
-}
-
-// diffDirs returns dirs present in after but not before.
-func diffDirs(before, after map[string]struct{}) []string {
-	var out []string
-	for d := range after {
-		if _, seen := before[d]; !seen {
-			out = append(out, d)
-		}
-	}
-	return out
+	return append(out, prefix+value)
 }
 
 // socketsUnder returns the tmux socket paths a server would bind under an
