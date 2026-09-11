@@ -245,6 +245,97 @@ func resolveHotkeys(overrides map[string]string) map[string]string {
 	return bindings
 }
 
+// resolveHotkeysForMode applies either the historical implicit bindings or the
+// menu-first policy where only explicit bindings are enabled. Detach remains
+// structural in both modes so an attached session always has an escape route.
+func resolveHotkeysForMode(overrides map[string]string, mode string) map[string]string {
+	if strings.EqualFold(strings.TrimSpace(mode), shortcutModeLegacy) {
+		return resolveHotkeys(overrides)
+	}
+
+	bindings := make(map[string]string)
+	for rawAction, rawKey := range overrides {
+		action := strings.TrimSpace(strings.ToLower(rawAction))
+		if renamed, ok := renamedHotkeys[action]; ok {
+			action = renamed
+		}
+		if _, ok := defaultHotkeyBindings[action]; !ok {
+			continue
+		}
+		if key := strings.TrimSpace(rawKey); key != "" {
+			bindings[action] = key
+		}
+	}
+	if strings.TrimSpace(bindings[hotkeyDetach]) == "" {
+		bindings[hotkeyDetach] = defaultHotkeyBindings[hotkeyDetach]
+	}
+	return bindings
+}
+
+func validateHotkeyBindings(bindings map[string]string) error {
+	seen := make(map[string]string)
+	for action, rawKey := range bindings {
+		if _, ok := defaultHotkeyBindings[action]; !ok {
+			return fmt.Errorf("unknown shortcut action %q", action)
+		}
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		if strings.EqualFold(key, "space") || key == " " {
+			return fmt.Errorf("shortcut %q cannot use Space because Space opens the global menu", action)
+		}
+		if !supportedHotkeyBinding(key) {
+			return fmt.Errorf("shortcut %q uses unsupported key %q", action, rawKey)
+		}
+		for _, alias := range hotkeyAliases(normalizeHotkeyBinding(key)) {
+			if previous, ok := seen[alias]; ok && previous != action {
+				return fmt.Errorf("shortcut %q conflicts with %q on %q", action, previous, key)
+			}
+			seen[alias] = action
+		}
+	}
+	return nil
+}
+
+func normalizeHotkeyBinding(key string) string {
+	key = strings.TrimSpace(key)
+	if len([]rune(key)) == 1 {
+		return key
+	}
+	return strings.ToLower(key)
+}
+
+func supportedHotkeyBinding(key string) bool {
+	key = normalizeHotkeyBinding(key)
+	if runes := []rune(key); len(runes) == 1 {
+		return !unicode.IsControl(runes[0]) && !unicode.IsSpace(runes[0])
+	}
+	parts := strings.Split(key, "+")
+	if len(parts) < 2 || len(parts) > 4 {
+		return supportedNamedHotkey(key)
+	}
+	modifiers := make(map[string]bool)
+	for _, modifier := range parts[:len(parts)-1] {
+		if modifier != "ctrl" && modifier != "alt" && modifier != "shift" || modifiers[modifier] {
+			return false
+		}
+		modifiers[modifier] = true
+	}
+	base := parts[len(parts)-1]
+	return len([]rune(base)) == 1 || supportedNamedHotkey(base)
+}
+
+func supportedNamedHotkey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "backspace", "delete", "insert", "home", "end", "pgup", "pgdown", "pageup", "pagedown",
+		"tab", "enter", "esc", "up", "down", "left", "right":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildHotkeyLookup(bindings map[string]string) (map[string]string, map[string]bool) {
 	keyToCanonical := make(map[string]string, len(bindings))
 	blockedCanonical := make(map[string]bool)
