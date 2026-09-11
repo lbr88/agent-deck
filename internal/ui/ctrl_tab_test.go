@@ -125,6 +125,26 @@ func TestCtrlTabChoosesMostRecentOtherWhenOriginIsNotNewest(t *testing.T) {
 	}
 }
 
+func TestCtrlTabFromNonSwitchableOverviewRowSelectsNewestSession(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		item session.Item
+	}{
+		{name: "group", item: session.Item{Type: session.ItemTypeGroup, Group: &session.Group{Name: "group"}}},
+		{name: "stopped session", item: session.Item{Type: session.ItemTypeSession, Session: &session.Instance{ID: "dead", Status: session.StatusStopped}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := quickSwitchHome()
+			h.flatItems = []session.Item{tt.item}
+
+			_, _ = h.handleMainKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{testCtrlTabMarker}})
+			if selected := h.sessionSwitcher.GetSelected(); selected == nil || selected.ID != "a" {
+				t.Fatalf("Ctrl+Tab from a non-switchable row selected %v, want newest session a", selected)
+			}
+		})
+	}
+}
+
 func TestCtrlTabCyclesVisibleSwitcherAndPlainTabDoesNot(t *testing.T) {
 	h := quickSwitchHome()
 	h.sessionSwitcher.Show("a", h.instances, nil)

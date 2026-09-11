@@ -21789,7 +21789,7 @@ func (h *Home) renderHelpBarMinimal() string {
 
 	// Context-specific keys (left side)
 	contextKeys := globalStyleForMenu().Render(menuAffordanceText)
-	for _, shortcut := range h.enabledMenuShortcutHints() {
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutMinimal) {
 		contextKeys += " " + renderKeys(shortcut.key)
 	}
 	newKey := h.actionKey(hotkeyNewSession)
@@ -21898,7 +21898,7 @@ func (h *Home) renderHelpBarCompact() string {
 
 	// Abbreviated key+short desc
 	contextHints := []string{globalStyleForMenu().Render(menuAffordanceText)}
-	for _, shortcut := range h.enabledMenuShortcutHints() {
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutCompact) {
 		contextHints = append(contextHints, h.helpKeyShort(shortcut.key, shortcut.label))
 	}
 	if len(h.flatItems) == 0 {
@@ -22062,7 +22062,7 @@ func (h *Home) renderHelpBarFull() string {
 
 	// Determine context-specific hints grouped by action type
 	primaryHints := []string{globalStyleForMenu().Render(menuAffordanceText)} // Always available.
-	for _, shortcut := range h.enabledMenuShortcutHints() {
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutFull) {
 		primaryHints = append(primaryHints, h.helpKey(shortcut.key, shortcut.label))
 	}
 	var secondaryHints []string // Edit actions (rename, move, delete)
@@ -22293,19 +22293,160 @@ type footerShortcut struct {
 // non-structural binding in h.hotkeys represents a deliberate choice that the
 // footer must surface. Global shortcuts already rendered by every footer are
 // skipped to avoid duplicates.
-func (h *Home) enabledMenuShortcutHints() []footerHint {
+func (h *Home) enabledMenuShortcutHints(layouts ...footerLayout) []footerHint {
 	if h.shortcutMode != shortcutModeMenu {
 		return nil
 	}
+	excluded := make(map[ActionID]struct{})
+	if len(layouts) > 0 {
+		excluded = h.contextualFooterActions(layouts[0])
+	}
 	hints := make([]footerHint, 0, len(h.footerShortcuts))
 	for _, shortcut := range h.footerShortcuts {
-		enabled, _, include := h.actionAvailability(shortcut.action)
+		if _, duplicate := excluded[shortcut.action]; duplicate {
+			continue
+		}
+		enabled, _, include := h.footerActionAvailability(shortcut.action)
 		if !include || !enabled {
 			continue
 		}
 		hints = append(hints, shortcut.hint)
 	}
 	return hints
+}
+
+type footerLayout uint8
+
+const (
+	footerLayoutMinimal footerLayout = iota
+	footerLayoutCompact
+	footerLayoutFull
+)
+
+// contextualFooterActions returns actions that the selected footer layout
+// already renders through its ordinary context hints. Explicit menu-mode
+// shortcuts for these actions must not be prepended a second time.
+func (h *Home) contextualFooterActions(layout footerLayout) map[ActionID]struct{} {
+	actions := make(map[ActionID]struct{})
+	add := func(ids ...ActionID) {
+		for _, id := range ids {
+			actions[id] = struct{}{}
+		}
+	}
+	if h.jumpMode {
+		return actions
+	}
+	if len(h.flatItems) == 0 {
+		add(ActionNewSession, ActionQuickCreate, ActionImport)
+		if layout != footerLayoutCompact {
+			add(ActionCreateGroup)
+		}
+		return actions
+	}
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return actions
+	}
+
+	item := h.flatItems[h.cursor]
+	if item.Type == session.ItemTypeGroup {
+		add(ActionNewSession, ActionQuickCreate)
+		if layout != footerLayoutCompact {
+			add(ActionCreateGroup)
+		}
+		if layout == footerLayoutFull {
+			add(ActionRename, ActionDelete)
+		}
+		return actions
+	}
+
+	add(ActionNewSession, ActionQuickCreate, ActionRestart)
+	switch layout {
+	case footerLayoutMinimal:
+		add(ActionRestartFresh, ActionQuickFork, ActionMCPManager, ActionSkillsManager, ActionEditNotes)
+	case footerLayoutCompact:
+		add(ActionRestartFresh, ActionQuickFork, ActionMCPManager, ActionSkillsManager,
+			ActionCopyOutput, ActionCopyPane, ActionSendOutput, ActionEditNotes)
+		if item.Session != nil && session.ToolSupportsMCPManager(item.Session.Tool) {
+			add(ActionTogglePreview)
+		}
+		if len(h.undoStack) > 0 {
+			add(ActionUndoDelete)
+		}
+	case footerLayoutFull:
+		add(ActionCreateGroup, ActionRestartFresh, ActionQuickFork, ActionForkWithOptions,
+			ActionMCPManager, ActionSkillsManager, ActionExecShell, ActionOpenShellHere,
+			ActionEditPaths, ActionCopyOutput, ActionCopyPane, ActionSendOutput,
+			ActionEditNotes, ActionRename, ActionMoveToGroup, ActionDelete, ActionCloseSession)
+		if item.Session != nil && session.ToolSupportsMCPManager(item.Session.Tool) {
+			add(ActionTogglePreview)
+		}
+		if len(h.undoStack) > 0 {
+			add(ActionUndoDelete)
+		}
+	}
+	return actions
+}
+
+// footerActionAvailability keeps deck-wide status scans off the render path.
+// The immutable render snapshot is refreshed by the background status loop and
+// is sufficient for deciding whether these optional hints should be visible.
+func (h *Home) footerActionAvailability(id ActionID) (enabled bool, reason string, include bool) {
+	if id != ActionSwitchSession && id != ActionBulkRemoveErrored {
+		return h.actionAvailability(id)
+	}
+
+	snapshot := h.getSessionRenderSnapshot()
+	h.instancesMu.RLock()
+	defer h.instancesMu.RUnlock()
+	switchable := 0
+	for _, inst := range h.instances {
+		if inst == nil {
+			continue
+		}
+		state, ok := snapshot[inst.ID]
+		if !ok {
+			continue
+		}
+		if id == ActionBulkRemoveErrored && state.status == session.StatusError {
+			return true, "", true
+		}
+		if id == ActionSwitchSession && state.status != session.StatusError && state.status != session.StatusStopped {
+			switchable++
+			if switchable >= 2 {
+				return true, "", true
+			}
+		}
+	}
+	if id == ActionBulkRemoveErrored {
+		return false, "No errored local sessions", true
+	}
+	return false, "Fewer than two switchable local sessions", true
+}
+
+func dedupeFooterHints(hints []footerHint) []footerHint {
+	seen := make(map[string]struct{}, len(hints))
+	kept := hints[:0]
+	for _, hint := range hints {
+		duplicate := false
+		keys := strings.Split(strings.ToLower(hint.key), "/")
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if _, ok := seen[key]; key != "" && ok {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		kept = append(kept, hint)
+		for _, key := range keys {
+			if key = strings.TrimSpace(key); key != "" {
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return kept
 }
 
 // curatedHint formats a single footer hint as dim, plain inline text — the key
@@ -22522,6 +22663,7 @@ func (h *Home) renderHelpBarCurated() string {
 	case h.cursor >= 0 && h.cursor < len(h.flatItems):
 		contextHints = append(contextHints, h.curatedContextHints(h.flatItems[h.cursor])...)
 	}
+	contextHints = dedupeFooterHints(contextHints)
 	if len(contextHints) > maxCuratedContextHints {
 		contextHints = contextHints[:maxCuratedContextHints]
 	}
@@ -26396,9 +26538,9 @@ func (h *Home) openQuickSessionSwitcher(fromID string, reattachOnCancel, forward
 	if !h.openSessionSwitcher(fromID, reattachOnCancel) {
 		return nil
 	}
-	if forward {
+	if forward && h.sessionSwitcher.hasOrigin {
 		h.sessionSwitcher.next()
-	} else {
+	} else if !forward {
 		h.sessionSwitcher.prev()
 	}
 	h.sessionSwitcher.lastCycleAt = time.Now()

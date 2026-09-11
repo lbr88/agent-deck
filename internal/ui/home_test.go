@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/update"
@@ -3388,6 +3389,77 @@ func TestMenuModeFooterHidesUnavailableEnabledShortcut(t *testing.T) {
 
 	if footer := home.renderHelpBar(); strings.Contains(footer, "restart") {
 		t.Fatalf("footer advertised restart without a selected session: %q", footer)
+	}
+}
+
+func TestMenuModeFooterUsesRenderSnapshotForDeckWideAvailability(t *testing.T) {
+	home := NewHome()
+	home.shortcutMode = shortcutModeMenu
+	home.setHotkeys(resolveHotkeysForMode(map[string]string{
+		hotkeySwitchSession:     "ctrl+s",
+		hotkeyBulkRemoveErrored: "ctrl+x",
+	}, shortcutModeMenu))
+	home.instances = []*session.Instance{
+		{ID: "a", Status: session.StatusStopped},
+		{ID: "b", Status: session.StatusStopped},
+		{ID: "c", Status: session.StatusStopped},
+	}
+	home.sessionRenderSnapshot.Store(map[string]sessionRenderState{
+		"a": {status: session.StatusError},
+		"b": {status: session.StatusRunning},
+		"c": {status: session.StatusIdle},
+	})
+
+	hints := home.enabledMenuShortcutHints()
+	got := make(map[string]bool, len(hints))
+	for _, hint := range hints {
+		got[hint.key] = true
+	}
+	for _, key := range []string{"ctrl+s", "ctrl+x"} {
+		if !got[key] {
+			t.Fatalf("snapshot-available shortcut %q missing from hints: %+v", key, hints)
+		}
+	}
+}
+
+func TestMenuModeFooterDoesNotDuplicateContextualShortcut(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		footer string
+		width  int
+	}{
+		{name: "full", footer: session.FooterFull, width: 180},
+		{name: "compact", footer: session.FooterCompact, width: 140},
+		{name: "minimal", footer: session.FooterMinimal, width: 100},
+		{name: "curated", footer: session.FooterCurated, width: 140},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := NewHome()
+			home.width = tt.width
+			home.height = 30
+			home.footerMode = tt.footer
+			home.shortcutMode = shortcutModeMenu
+			home.setHotkeys(resolveHotkeysForMode(map[string]string{hotkeyRestart: "r"}, shortcutModeMenu))
+			home.flatItems = []session.Item{{
+				Type:    session.ItemTypeSession,
+				Session: &session.Instance{ID: "s1", Tool: "codex", Status: session.StatusRunning},
+			}}
+			home.cursor = 0
+
+			clean := strings.ToLower(ansi.Strip(home.renderHelpBar()))
+			count := strings.Count(clean, "restart")
+			if tt.footer == session.FooterMinimal {
+				count = 0
+				for _, field := range strings.Fields(clean) {
+					if field == "r" {
+						count++
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("%s footer rendered restart shortcut %d times, want once: %q", tt.name, count, strings.Join(strings.Fields(clean), " "))
+			}
+		})
 	}
 }
 

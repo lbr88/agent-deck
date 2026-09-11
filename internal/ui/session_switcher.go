@@ -44,6 +44,7 @@ type SessionSwitcher struct {
 	// callers/tests) falls back to the Instance getters.
 	labels           map[string]sessionRenderState
 	reattachOnCancel bool // Esc re-attaches to fromID (opened while attached) vs. just closing (opened from the overview)
+	hasOrigin        bool // fromID was present in the switchable list and occupies index zero
 	// commitGen is bumped on every open/cycle/cancel so a stale idle-commit
 	// timer (scheduled before a later keypress) is ignored when it fires. It is
 	// intentionally monotonic — never reset — so a timer from a previous
@@ -145,6 +146,7 @@ func (s *SessionSwitcher) Show(fromID string, allInstances []*session.Instance, 
 	s.sessions = list
 	s.cursor = 0
 	s.fromID = fromID
+	s.hasOrigin = origin >= 0
 	s.subtitles = subtitles
 	return true
 }
@@ -160,6 +162,7 @@ func (s *SessionSwitcher) Hide() {
 	s.subtitles = nil
 	s.labels = nil
 	s.reattachOnCancel = false
+	s.hasOrigin = false
 	s.lastCycleAt = time.Time{}
 }
 
