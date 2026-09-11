@@ -2,6 +2,8 @@ package ui
 
 import "testing"
 
+var benchmarkActionID ActionID
+
 func TestActionDefinitionsHaveUniqueStableIDsAndBindings(t *testing.T) {
 	seenIDs := make(map[ActionID]bool)
 	seenHotkeys := make(map[string]bool)
@@ -27,6 +29,21 @@ func TestActionDefinitionsHaveUniqueStableIDsAndBindings(t *testing.T) {
 	for _, action := range hotkeyActionOrder {
 		if !seenHotkeys[action] {
 			t.Errorf("configurable hotkey action %q is missing from the action catalog", action)
+		}
+	}
+}
+
+func TestCanonicalActionTriggersDoNotCollideAcrossActions(t *testing.T) {
+	seen := make(map[string]string)
+	for _, action := range hotkeyActionOrder {
+		for _, trigger := range defaultTriggersForAction(action) {
+			if previous, exists := seen[trigger]; exists && previous != action {
+				t.Fatalf("canonical trigger %q maps to both %q and %q", trigger, previous, action)
+			}
+			seen[trigger] = action
+			if got := actionIDForCanonicalKey(trigger); got != ActionID(action) {
+				t.Fatalf("actionIDForCanonicalKey(%q) = %q, want %q", trigger, got, action)
+			}
 		}
 	}
 }
@@ -91,5 +108,11 @@ func TestResolveHotkeysIgnoresStructuralOverrideInEveryMode(t *testing.T) {
 func TestValidateHotkeyBindingsRejectsUnsupportedKey(t *testing.T) {
 	if err := validateHotkeyBindings(map[string]string{hotkeyRename: "ctrl+shift+definitely-not-a-key"}); err == nil {
 		t.Fatal("expected unsupported key to be rejected")
+	}
+}
+
+func BenchmarkActionIDForCanonicalKey(b *testing.B) {
+	for b.Loop() {
+		benchmarkActionID = actionIDForCanonicalKey("ctrl+n")
 	}
 }

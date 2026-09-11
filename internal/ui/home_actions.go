@@ -170,15 +170,20 @@ func actionLabel(id ActionID) string {
 // actionIDForCanonicalKey converts the already-resolved canonical key into its
 // action identity. normalizeMainKey has already rejected disabled shortcuts at
 // this point, so raw legacy keys cannot accidentally re-enable an action.
-func actionIDForCanonicalKey(key string) ActionID {
+var actionIDByCanonicalKey = func() map[string]ActionID {
+	lookup := make(map[string]ActionID, len(hotkeyActionOrder))
 	for _, action := range hotkeyActionOrder {
 		for _, trigger := range defaultTriggersForAction(action) {
-			if key == trigger {
-				return ActionID(action)
+			if _, exists := lookup[trigger]; !exists {
+				lookup[trigger] = ActionID(action)
 			}
 		}
 	}
-	return ""
+	return lookup
+}()
+
+func actionIDForCanonicalKey(key string) ActionID {
+	return actionIDByCanonicalKey[key]
 }
 
 func (h *Home) availableActionMenuItems() []ActionMenuItem {
