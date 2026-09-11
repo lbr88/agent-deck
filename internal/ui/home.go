@@ -22522,6 +22522,9 @@ func (h *Home) renderHelpBarCurated() string {
 	case h.cursor >= 0 && h.cursor < len(h.flatItems):
 		contextHints = append(contextHints, h.curatedContextHints(h.flatItems[h.cursor])...)
 	}
+	if len(contextHints) > maxCuratedContextHints {
+		contextHints = contextHints[:maxCuratedContextHints]
+	}
 
 	// Settings then help are the always-kept global hints, in that order. They
 	// are never dropped: when the terminal is too narrow, lower-priority context

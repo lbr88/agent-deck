@@ -3391,6 +3391,29 @@ func TestMenuModeFooterHidesUnavailableEnabledShortcut(t *testing.T) {
 	}
 }
 
+func TestMenuModeCuratedFooterCapsEnabledShortcutHints(t *testing.T) {
+	home := curatedHome()
+	home.width = 240
+	home.shortcutMode = shortcutModeMenu
+	home.footerShortcuts = []footerShortcut{
+		{action: ActionFilterOpen, hint: footerHint{key: "1", label: "enabled one"}},
+		{action: ActionFilterOpen, hint: footerHint{key: "2", label: "enabled two"}},
+		{action: ActionFilterOpen, hint: footerHint{key: "3", label: "enabled three"}},
+		{action: ActionFilterOpen, hint: footerHint{key: "4", label: "enabled four"}},
+		{action: ActionFilterOpen, hint: footerHint{key: "5", label: "enabled five"}},
+	}
+
+	footer := home.renderHelpBar()
+	for _, label := range []string{"enabled one", "enabled two", "enabled three", "enabled four"} {
+		if !strings.Contains(footer, label) {
+			t.Fatalf("curated footer omitted in-budget shortcut %q: %q", label, footer)
+		}
+	}
+	if strings.Contains(footer, "enabled five") {
+		t.Fatalf("curated footer exceeded %d context hints: %q", maxCuratedContextHints, footer)
+	}
+}
+
 func TestMenuModeFooterHidesSwitcherUntilTwoSessionsExist(t *testing.T) {
 	home := NewHome()
 	home.width = 120
