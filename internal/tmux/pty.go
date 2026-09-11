@@ -118,6 +118,12 @@ const (
 	// deck's Enter-attach owns the viewport, so tmux's own copy-mode is
 	// unreachable there (#1491); this intent is the escape hatch.
 	ScrollbackRequested
+	// SwitchNextRequested means an enhanced keyboard protocol reported
+	// Ctrl+Tab. Unlike SwitchRequested, the caller immediately advances to the
+	// next MRU session before showing the switcher.
+	SwitchNextRequested
+	// SwitchPreviousRequested is the Ctrl+Shift+Tab counterpart.
+	SwitchPreviousRequested
 )
 
 // pageUpSeq is the exact CSI sequence a bare PageUp emits. Modified variants
@@ -128,18 +134,27 @@ const (
 // editors running inside the session.
 const pageUpSeq = "\x1b[5~"
 
+var enhancedSwitchKeys = [...]struct {
+	sequence []byte
+	intent   SwitchIntent
+}{
+	{sequence: []byte("\x1b[9;5u"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[27;5;9~"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[9;6u"), intent: SwitchPreviousRequested},
+	{sequence: []byte("\x1b[27;6;9~"), intent: SwitchPreviousRequested},
+}
+
 // AttachOptions configures AttachWithOptions. The zero value attaches with the
-// default Ctrl+Q detach key and no session-switch key.
+// default Ctrl+Q detach key and enhanced Ctrl+Tab switching; the portable
+// Ctrl-letter fallback remains disabled until configured.
 type AttachOptions struct {
 	// DetachByte is the raw control byte that detaches (0 => default Ctrl+Q).
 	DetachByte byte
 	// SwitchKeyByte is the control byte (e.g. Ctrl+S, 0x13) that hands control
 	// back to the caller to open the in-attach session switcher. 0 disables it.
 	//
-	// This is deliberately a plain control byte, not Ctrl+Tab: terminals only
-	// emit a distinct sequence for Ctrl+Tab under an enhanced keyboard protocol
-	// that is not reliably available during attach, so a control byte is the
-	// only portable trigger (the cycling/commit UX then lives in the TUI).
+	// This is deliberately a plain control byte used only as the portable
+	// fallback when the terminal cannot emit distinct enhanced Ctrl+Tab input.
 	SwitchKeyByte byte
 	// ScrollbackKeyByte is a control byte (e.g. Ctrl+G, 0x07) that hands control
 	// back to the caller to open the in-view scrollback pager (#1491). 0
@@ -163,18 +178,27 @@ type AttachOptions struct {
 	ScrollbackGate func() bool
 }
 
-// indexSwitchKey returns the index of the switch key in data and
-// SwitchRequested, or (-1, SwitchNone) if it is absent or disabled. It handles
-// the raw byte plus the xterm modifyOtherKeys and kitty CSI-u encodings (via
-// IndexDetachKey). The caller resolves precedence against the detach key.
+// indexSwitchKey returns the earliest configured switch chord or enhanced
+// Ctrl+Tab sequence in data. A raw Tab byte is deliberately never matched:
+// Ctrl+Tab is available only when the terminal reports it distinctly via
+// kitty CSI-u or xterm modifyOtherKeys.
 func indexSwitchKey(data []byte, opts AttachOptions) (int, SwitchIntent) {
-	if opts.SwitchKeyByte == 0 {
-		return -1, SwitchNone
+	bestIdx := -1
+	bestIntent := SwitchNone
+	consider := func(idx int, intent SwitchIntent) {
+		if idx >= 0 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+			bestIntent = intent
+		}
 	}
-	if idx := IndexDetachKey(data, opts.SwitchKeyByte); idx >= 0 {
-		return idx, SwitchRequested
+
+	if opts.SwitchKeyByte != 0 {
+		consider(IndexDetachKey(data, opts.SwitchKeyByte), SwitchRequested)
 	}
-	return -1, SwitchNone
+	for _, key := range enhancedSwitchKeys {
+		consider(bytes.Index(data, key.sequence), key.intent)
+	}
+	return bestIdx, bestIntent
 }
 
 // indexScrollbackTrigger returns the index in data at which a scrollback
@@ -223,7 +247,8 @@ func scrollbackPageUpAllowed(opts AttachOptions) bool {
 //
 // The intent it returns is what the caller assigns to switchOutcome:
 //   - SwitchNone         => detach (or nothing found),
-//   - SwitchRequested    => open the session switcher,
+//   - SwitchRequested    => open the session switcher on the origin,
+//   - SwitchNextRequested / SwitchPreviousRequested => open and advance,
 //   - ScrollbackRequested => open the scrollback pager.
 //
 // Extracted from the stdin goroutine so the precedence is unit-testable without
@@ -673,7 +698,7 @@ func (s *Session) AttachWithOptions(ctx context.Context, opts AttachOptions) (Sw
 		// The atomic store is the belt-and-suspenders half, for the backstop
 		// timeout path where cleanupAttach can read switchOutcome before this
 		// goroutine ever reaches this line.
-		switchOutcome.Store(int32(outcome)) // #nosec G115 -- SwitchIntent is a 3-value iota enum, always in int32 range
+		switchOutcome.Store(int32(outcome)) // #nosec G115 -- SwitchIntent is a small iota enum, always in int32 range
 		close(detachCh)
 		cancel()
 	}()

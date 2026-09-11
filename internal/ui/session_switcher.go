@@ -11,24 +11,25 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
-// switcherIdleCommit is how long the switcher waits after the last Ctrl+S /
-// Ctrl+A before auto-committing to the highlighted session. It approximates
+// switcherIdleCommit is how long the switcher waits after the last quick-cycle
+// key before auto-committing to the highlighted session. It approximates
 // "switch when I let go of the key" — terminals do not deliver key-release
 // events, so we commit on a brief idle instead. Enter commits immediately; Esc
 // cancels; arrow-key navigation cancels the auto-commit (manual mode).
 const switcherIdleCommit = 1 * time.Second
 
-// switcherRepeatGuard is the minimum gap between accepted Ctrl+S / Ctrl+A
+// switcherRepeatGuard is the minimum gap between accepted quick-cycle
 // advances. Terminal auto-repeat fires far faster than this (~15–40ms), so
 // holding the key down advances at most a step or two instead of spinning
 // through every session; deliberate taps (~100ms+ apart) all register.
 const switcherRepeatGuard = 80 * time.Millisecond
 
-// SessionSwitcher is the session switcher overlay. It opens on Ctrl+S — both
-// while attached (the tmux attach loop hands control back to the TUI) and from
-// the overview — pre-highlighted on the session you came from. Ctrl+S / Ctrl+A
-// cycle forward / backward, arrow keys browse, and the highlight is attached on
-// Enter or after a brief idle once you've cycled.
+// SessionSwitcher is the session switcher overlay. Ctrl+Tab opens it from the
+// overview or an attached session and immediately selects the most recent other
+// session. Ctrl+Tab / Ctrl+Shift+Tab cycle forward / backward; the configurable
+// Ctrl-letter fallback still opens on the origin and uses Ctrl+S / Ctrl+A for
+// cycling. Arrow keys browse, and the highlight is attached on Enter or after a
+// brief idle once quick cycling starts.
 type SessionSwitcher struct {
 	visible       bool
 	width, height int
@@ -48,7 +49,7 @@ type SessionSwitcher struct {
 	// intentionally monotonic — never reset — so a timer from a previous
 	// switcher session can never collide with a new one.
 	commitGen int
-	// lastCycleAt is the time of the last accepted Ctrl+S / Ctrl+A advance, used
+	// lastCycleAt is the time of the last accepted quick-cycle advance, used
 	// to swallow terminal key-repeat (see switcherRepeatGuard).
 	lastCycleAt time.Time
 }
@@ -65,7 +66,7 @@ func (s *SessionSwitcher) bumpCommitGen() int {
 
 // cycle advances the highlight one step (forward => next, else prev) unless the
 // previous accepted advance was within switcherRepeatGuard, which swallows
-// key-repeat from a held Ctrl+S / Ctrl+A. It reports whether it moved.
+// key-repeat from a held shortcut. It reports whether it moved.
 func (s *SessionSwitcher) cycle(forward bool, now time.Time) bool {
 	if !s.lastCycleAt.IsZero() && now.Sub(s.lastCycleAt) < switcherRepeatGuard {
 		return false
@@ -82,9 +83,11 @@ func (s *SessionSwitcher) cycle(forward bool, now time.Time) bool {
 // NewSessionSwitcher creates a new (hidden) session switcher.
 func NewSessionSwitcher() *SessionSwitcher { return &SessionSwitcher{} }
 
-// Show builds the MRU-ordered list of switchable sessions and pre-selects the
-// session the picker was opened from (fromID), so an immediate Enter drops the
-// user right back where they were and Ctrl+S/Ctrl+A step away from there.
+// Show builds the switchable list with the origin first and every other session
+// in MRU order. This makes the first forward step the most recently used other
+// session even when the overview cursor was not already on the newest row. It
+// pre-selects the origin, so an immediate Enter still drops the user right back
+// where they were.
 // subtitles maps a session ID to its dim conversation/pane title (the same text
 // the overview shows next to an entry); a nil map renders no subtitles. It
 // returns false (and stays hidden) when fewer than two sessions are available —
@@ -117,24 +120,30 @@ func (s *SessionSwitcher) Show(fromID string, allInstances []*session.Instance, 
 		return false
 	}
 
-	// Most-recently-accessed first. The just-detached session was
-	// MarkAccessed'd on detach, so it sorts to the front — pre-selecting it
-	// means the first Ctrl+S step lands on the most-recent other session.
+	// Most-recently-accessed first, then move the origin to the front while
+	// preserving the remaining MRU order. The just-detached session is normally
+	// already first because attachSession marks it accessed; the move also makes
+	// overview-triggered switching correct when the cursor is on an older row.
 	sort.SliceStable(list, func(i, j int) bool {
 		return list[i].LastAccessedAt.After(list[j].LastAccessedAt)
 	})
 
-	cursor := 0
+	origin := -1
 	for i, inst := range list {
 		if inst.ID == fromID {
-			cursor = i
+			origin = i
 			break
 		}
+	}
+	if origin > 0 {
+		from := list[origin]
+		copy(list[1:origin+1], list[:origin])
+		list[0] = from
 	}
 
 	s.visible = true
 	s.sessions = list
-	s.cursor = cursor
+	s.cursor = 0
 	s.fromID = fromID
 	s.subtitles = subtitles
 	return true
@@ -202,9 +211,8 @@ func (s *SessionSwitcher) View() string {
 		Italic(true)
 
 	header := "Switch session"
-	// The forward/back cycle keys are fixed (the attach loop and
-	// handleSessionSwitcherKey both match Ctrl+S / Ctrl+A regardless of the
-	// configurable open binding), so the labels stay literal. Esc, however,
+	// The primary forward/back cycle keys are fixed. The configurable Ctrl-letter
+	// fallback remains available but is intentionally secondary. Esc, however,
 	// re-attaches to the origin only when the picker was opened while attached;
 	// from the overview it just closes, so the hint reflects that. Built up front
 	// so the footer width feeds the natural-width measurement below.
@@ -212,7 +220,7 @@ func (s *SessionSwitcher) View() string {
 	if s.reattachOnCancel {
 		escHint = "Esc back"
 	}
-	footerCycle := "Ctrl+S next · Ctrl+A prev"
+	footerCycle := "Ctrl+Tab next · Ctrl+Shift+Tab prev"
 	footerNav := "↑/↓ browse · Enter attach · " + escHint
 
 	// Precompute each row once so we can measure the widest row (to auto-expand

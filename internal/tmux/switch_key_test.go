@@ -44,11 +44,46 @@ func TestIndexSwitchKey_PlainTabIgnored(t *testing.T) {
 	}
 }
 
+func TestIndexSwitchKey_EnhancedCtrlTabDirections(t *testing.T) {
+	const (
+		wantNext     SwitchIntent = 3
+		wantPrevious SwitchIntent = 4
+	)
+	tests := []struct {
+		name  string
+		input string
+		want  SwitchIntent
+	}{
+		{name: "CSI u next", input: "\x1b[9;5u", want: wantNext},
+		{name: "CSI u previous", input: "\x1b[9;6u", want: wantPrevious},
+		{name: "modifyOtherKeys next", input: "\x1b[27;5;9~", want: wantNext},
+		{name: "modifyOtherKeys previous", input: "\x1b[27;6;9~", want: wantPrevious},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx, got := indexSwitchKey([]byte(tt.input), AttachOptions{})
+			if idx != 0 || got != tt.want {
+				t.Fatalf("indexSwitchKey(%q) = (%d, %v), want (0, %v)", tt.input, idx, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIndexSwitchKey_OrdinaryInputDoesNotAllocate(t *testing.T) {
+	input := []byte("ordinary attached input")
+	if got := testing.AllocsPerRun(1000, func() {
+		_, _ = indexSwitchKey(input, AttachOptions{})
+	}); got != 0 {
+		t.Fatalf("indexSwitchKey allocated %.1f times per ordinary input chunk, want 0", got)
+	}
+}
+
 // The reply filter the attach loop runs over stdin must pass the switch key
 // through unchanged (same guarantee the detach key relies on). Cover both the
 // raw control byte and its CSI-u encoding.
 func TestReplyFilterPreservesSwitchKey(t *testing.T) {
-	for _, seq := range []string{"\x13", "\x1b[115;5u"} {
+	for _, seq := range []string{"\x13", "\x1b[115;5u", "\x1b[9;5u", "\x1b[27;6;9~"} {
 		var f termreply.Filter
 		out := f.Consume([]byte(seq), true, false) // armed = stricter post-attach state
 		if string(out) != seq {

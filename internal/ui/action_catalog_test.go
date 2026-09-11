@@ -89,7 +89,7 @@ func TestValidateHotkeyBindingsRejectsAliasCollision(t *testing.T) {
 }
 
 func TestValidateHotkeyBindingsRejectsStructuralKeys(t *testing.T) {
-	for _, key := range []string{"space", "up", "down", "left", "right", "enter", "esc"} {
+	for _, key := range []string{"space", "up", "down", "left", "right", "enter", "esc", "ctrl+tab", "ctrl+shift+tab"} {
 		if err := validateHotkeyBindings(map[string]string{hotkeyRename: key}); err == nil {
 			t.Fatalf("expected structural %s key to be rejected", key)
 		}
@@ -98,9 +98,11 @@ func TestValidateHotkeyBindingsRejectsStructuralKeys(t *testing.T) {
 
 func TestResolveHotkeysIgnoresStructuralOverrideInEveryMode(t *testing.T) {
 	for _, mode := range []string{shortcutModeMenu, shortcutModeLegacy} {
-		got := resolveHotkeysForMode(map[string]string{hotkeyRename: "up"}, mode)
-		if key := got[hotkeyRename]; key == "up" {
-			t.Fatalf("structural override was enabled in %s mode: %#v", mode, got)
+		for _, reserved := range []string{"up", "ctrl+tab", "ctrl+shift+tab"} {
+			got := resolveHotkeysForMode(map[string]string{hotkeyRename: reserved}, mode)
+			if key := got[hotkeyRename]; key == reserved {
+				t.Fatalf("structural override %q was enabled in %s mode: %#v", reserved, mode, got)
+			}
 		}
 	}
 }

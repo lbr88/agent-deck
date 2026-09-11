@@ -38,7 +38,11 @@ import (
 // U+E5E5 sits in the Basic Multilingual Plane Private Use Area
 // (U+E000..U+F8FF), which Unicode reserves for application-private use
 // and no standard keyboard or input method can produce.
-const shiftEnterMarker rune = 0xE5E5
+const (
+	shiftEnterMarker   rune = 0xE5E5
+	ctrlTabMarker      rune = 0xE5E6
+	ctrlShiftTabMarker rune = 0xE5E7
+)
 
 // DisableKittyKeyboard writes the escape sequence that pops the Kitty keyboard
 // protocol stack, restoring the previous keyboard mode. If nothing was on the
@@ -164,7 +168,7 @@ func ParseCSIu(data []byte) *tea.KeyMsg {
 	// Decode modifier bitmask (modifier = 1 + bitmask)
 	bitmask := modifier - 1
 	shiftHeld := (bitmask & 0x01) != 0
-	// altHeld   := (bitmask & 0x02) != 0  // reserved for future use
+	altHeld := (bitmask & 0x02) != 0
 	ctrlHeld := (bitmask & 0x04) != 0
 
 	// Map well-known control codepoints to tea key types.
@@ -181,6 +185,14 @@ func ParseCSIu(data []byte) *tea.KeyMsg {
 		msg := tea.KeyMsg{Type: tea.KeyEnter}
 		return &msg
 	case 9: // HT = Tab
+		if ctrlHeld && !altHeld {
+			marker := ctrlTabMarker
+			if shiftHeld {
+				marker = ctrlShiftTabMarker
+			}
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{marker}}
+			return &msg
+		}
 		if shiftHeld {
 			msg := tea.KeyMsg{Type: tea.KeyShiftTab}
 			return &msg
@@ -260,6 +272,7 @@ func ParseModifyOtherKeys(data []byte) *tea.KeyMsg {
 	// Reuse the same modifier logic as ParseCSIu
 	bitmask := modifier - 1
 	shiftHeld := (bitmask & 0x01) != 0
+	altHeld := (bitmask & 0x02) != 0
 	ctrlHeld := (bitmask & 0x04) != 0
 
 	switch codepoint {
@@ -272,6 +285,14 @@ func ParseModifyOtherKeys(data []byte) *tea.KeyMsg {
 		msg := tea.KeyMsg{Type: tea.KeyEnter}
 		return &msg
 	case 9:
+		if ctrlHeld && !altHeld {
+			marker := ctrlTabMarker
+			if shiftHeld {
+				marker = ctrlShiftTabMarker
+			}
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{marker}}
+			return &msg
+		}
 		if shiftHeld {
 			msg := tea.KeyMsg{Type: tea.KeyShiftTab}
 			return &msg
