@@ -364,6 +364,11 @@ func (c *UserConfig) ClaimPollingEnabled() bool {
 // UISettings controls TUI layout proportions.
 // See issue #1092.
 type UISettings struct {
+	// ShortcutMode controls whether optional TUI action shortcuts are enabled
+	// implicitly. "menu" (the default) enables only explicit [hotkeys]
+	// bindings; "legacy" restores the historical default bindings.
+	ShortcutMode string `toml:"shortcut_mode,omitempty"`
+
 	// PreviewPct is the percentage of horizontal width allocated to the
 	// preview pane (sessions list gets the remainder). Valid range: 10-90.
 	// Default: 65 (current behavior — sessions 35 / preview 65).
@@ -458,6 +463,15 @@ type UISettings struct {
 	// `add`/`session start` are unaffected by this flag — they attach only
 	// with an explicit `--attach`.
 	AttachOnCreate bool `toml:"attach_on_create,omitempty"`
+}
+
+// GetShortcutMode returns the normalized shortcut mode. Menu-first is the safe
+// default for missing and unknown values.
+func (u UISettings) GetShortcutMode() string {
+	if strings.EqualFold(strings.TrimSpace(u.ShortcutMode), "legacy") {
+		return "legacy"
+	}
+	return "menu"
 }
 
 // normalizeUIHiddenTools lowercases, dedupes, and drops unknown entries from

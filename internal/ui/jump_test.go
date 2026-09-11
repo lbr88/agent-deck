@@ -244,7 +244,7 @@ func TestJumpHintSurvivesAsyncRefreshUntilMultiKeySelectionCompletes(t *testing.
 		t.Fatalf("precondition: %q missing from %d generated hints", targetHint, len(hints))
 	}
 
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	if !home.jumpMode {
 		t.Fatal("space did not enter jump mode")
 	}
@@ -281,7 +281,7 @@ func TestJumpHintSurvivesAsyncRefreshUntilMultiKeySelectionCompletes(t *testing.
 
 func TestJumpHintSurvivesAttachReturnRebuild(t *testing.T) {
 	home, _ := buildTwoGroupHome(t)
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	home.isNavigating = false
 
 	home.Update(attachReturnSyncedMsg{})
@@ -294,7 +294,7 @@ func TestJumpHintSurvivesAttachReturnRebuild(t *testing.T) {
 func TestJumpHintSurvivesStorageReload(t *testing.T) {
 	home, _ := buildTwoGroupHome(t)
 	state := home.preserveState()
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	home.isNavigating = false
 
 	home.Update(loadSessionsMsg{
@@ -367,7 +367,7 @@ func TestJumpTargetRemovalCancelsActivation(t *testing.T) {
 	}
 	targetItem := home.flatItems[selectable[targetHintIndex]]
 
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	home.groupTree.DeleteGroup(targetItem.Path)
 	home.pendingListRebuild = true
@@ -407,7 +407,7 @@ func TestFailedDeferredReloadStillAppliesRemovedJumpTarget(t *testing.T) {
 	}
 	targetItem := home.flatItems[selectable[targetHintIndex]]
 
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	home.groupTree.DeleteGroup(targetItem.Path)
 	home.pendingListRebuild = true
@@ -461,7 +461,7 @@ func TestJumpWindowRemovalDoesNotActivateParentSession(t *testing.T) {
 		WindowName:      "removed-window",
 	}
 
-	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	home.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}, Alt: true})
 	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	home.pendingListRebuild = true // Backing tree no longer contains the window row.
 	home.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})

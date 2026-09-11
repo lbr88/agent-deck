@@ -96,30 +96,22 @@ agent-deck web                    # Start web UI on http://127.0.0.1:8420
 
 > **⚠️ Changed in v1.9.55:** in the new-session dialog (`n`), **Enter advances to the next field** on the Name and Branch inputs instead of submitting — typing a name and hitting Enter no longer creates a session with all defaults. **Ctrl+S creates the session from any field.** The dialog also remembers your last-used tool. Restore the old behavior with `[ui].new_session_enter_advances = false`.
 
-### Key Shortcuts
+### TUI controls
 
-| Key | Action |
-|-----|--------|
-| `Enter` | Attach to session |
-| `n` | New session |
-| `i` | Import existing tmux or saved Codex/Claude/OpenCode/Kiro session |
-| `f` / `F` | Fork (quick / dialog) |
-| `P h` | Handover to another supported tool |
-| `A` / `Shift+U` | Archive / unarchive session |
-| `^` | Show archived sessions |
-| `m` | MCP Manager |
-| `s` | Skills Manager |
-| `$` | Cost Dashboard |
-| `M` | Move session to group |
-| `S` | Settings |
-| `/` / `G` | Search / Global search |
-| `r` / `R` | Rename / Restart session |
-| `d` | Delete |
-| `b` | Re-run worktree setup script |
-| `E` | Container shell (sandboxed sessions) |
-| `?` | Full help |
+Agent Deck is menu-first: press `Space` anywhere in the overview, or click the
+visible `Space Menu` footer target, to search and run every available action.
+The menu also works when the session list is empty or nothing is selected.
 
-See [TUI Reference](skills/agent-deck/references/tui-reference.md) for all shortcuts and [CLI Reference](skills/agent-deck/references/cli-reference.md) for all commands.
+The always-on controls are deliberately small: arrow keys move and
+expand/collapse, `Enter` opens the selected item, `Esc` goes back, and `Ctrl+Q`
+returns from an attached session. Optional accelerators can be enabled, disabled,
+or rebound individually from **Menu → Application → Keyboard shortcuts**. The
+Legacy preset restores the historical shortcut set; Menu-first removes optional
+bindings while preserving explicit choices.
+
+See [Terminal shortcuts and gotchas](docs/terminal-shortcuts.md),
+[TUI Reference](skills/agent-deck/references/tui-reference.md), and
+[CLI Reference](skills/agent-deck/references/cli-reference.md).
 
 ## Quickstart: orchestrate a fleet of AI agents
 
@@ -267,11 +259,17 @@ Running many sessions? Socket pooling shares MCP processes across all sessions v
 
 ### Search
 
-Press `/` to fuzzy-search across all sessions. Filter by status with `!` (running), `@` (waiting), `#` (idle), `$` (error). Press `G` for global search across all Claude conversations.
+Open `Space Menu` and choose **Search** to search across the fleet, or choose a
+status filter under **View**. The Legacy preset also provides `/` and `G` for
+fleet search, `Alt+/` for the current group, and `!`, `@`, `#`, `$` for status
+filters.
 
-### Keyboard navigation (v1.7.60)
+### Keyboard navigation (legacy shortcut preset)
 
-Two tiers of keybindings move the cursor around the session list. The global tier is unchanged from earlier versions; the `Alt+` tier (added in v1.7.60) restricts movement to the current group only. Press `?` in the TUI to see the full table in-app.
+Arrow keys are always available. The additional bindings below are available
+when enabled individually or when the Legacy preset is selected in **Keyboard
+shortcuts**. Open the in-app menu with `Space` to reach the same actions without
+memorizing keys.
 
 | Scope | Keys | What it does |
 |---|---|---|

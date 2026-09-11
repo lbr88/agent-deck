@@ -4,6 +4,46 @@ This page documents keyboard shortcuts that interact with agent-deck's
 tmux-backed session model — and the small set of platform / terminal
 quirks that can surprise users.
 
+## Overview action menu
+
+Press `Space` anywhere in the session overview to open Agent Deck's global
+action menu. The persistent `Space Menu` footer label is also clickable. The
+menu is available with an empty list and without a selected row; actions that
+need a selection are omitted or shown with an explanation when unavailable.
+
+Type to filter actions, use `Up` / `Down` to select, `Enter` to run, and `Esc`
+to close. Choosing an action invokes it directly, so it remains available even
+when its optional keyboard accelerator is disabled. Existing confirmation
+dialogs still guard destructive actions.
+
+### Configure optional accelerators
+
+Open **Space → Application → Keyboard shortcuts**. Each optional accelerator
+can be toggled individually or rebound. Agent Deck rejects unsupported keys and
+collisions before saving, and names both conflicting actions. Changes apply
+immediately.
+
+- `Alt+M` applies the Menu-first preset after confirmation. It disables all
+  optional accelerators while retaining the essential controls and attached
+  session detach key.
+- `Alt+L` applies the Legacy preset after confirmation. It restores the
+  historical default accelerator set.
+- `Ctrl+S` saves the current shortcut preferences.
+
+The equivalent configuration switch is:
+
+```toml
+[ui]
+shortcut_mode = "menu" # "menu" (default) or "legacy"
+
+[hotkeys]
+restart = "alt+r"      # explicit bindings remain enabled in menu mode
+delete = ""            # explicitly disabled
+```
+
+`[hotkeys]` is authoritative for individual bindings. The shortcut editor
+merges changes into the existing config so unrelated settings are preserved.
+
 ## Detach from an attached session
 
 | Keystroke | What happens |
