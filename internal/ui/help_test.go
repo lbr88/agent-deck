@@ -72,6 +72,7 @@ func TestHelpOverlayShowsArchiveKeys(t *testing.T) {
 
 func TestHelpOverlayDocumentsHubManagement(t *testing.T) {
 	overlay := NewHelpOverlay()
+	overlay.SetHotkeys(resolveHotkeys(map[string]string{hotkeyHubAdmin: "alt+a"}))
 	overlay.SetSize(100, 140)
 	overlay.Show()
 

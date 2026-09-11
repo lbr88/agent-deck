@@ -644,6 +644,12 @@ type Home struct {
 	// the first keypress (handleMainKey).
 	navHintActive bool
 
+	// menuHintActive is the one-time migration hint for the menu-first input
+	// model. menuHintShown is persisted in ui_state rather than config.toml so
+	// acknowledging a local UI tip never changes fleet configuration.
+	menuHintActive bool
+	menuHintShown  bool
+
 	// Cursor sync: track last notification bar switch during attach
 	// When user switches sessions via Ctrl+b N while attached (tea.Exec),
 	// we record the target session ID so cursor can follow after detach
@@ -837,6 +843,7 @@ type uiState struct {
 	PreviewMode     int    `json:"preview_mode"`
 	StatusFilter    string `json:"status_filter,omitempty"`
 	GroupViewMode   int    `json:"group_view_mode,omitempty"`
+	MenuHintShown   bool   `json:"menu_hint_shown,omitempty"`
 	// Collapsed remote headers, keyed like Item.Path. Local group folds live in
 	// groupTree, which is persisted separately by saveGroupState; remote groups
 	// are synthetic UI rows and have no home there.
@@ -2151,6 +2158,12 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.maintenanceMsgTime = time.Now()
 		h.navHintActive = true
 		markNavHintShown()
+	}
+	if h.shortcutMode == shortcutModeMenu && !h.menuHintShown {
+		h.maintenanceMsg = menuMigrationHintText
+		h.maintenanceMsgTime = time.Now()
+		h.navHintActive = false
+		h.menuHintActive = true
 	}
 
 	return h
@@ -9873,6 +9886,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		// Track user activity for adaptive status updates
 		h.lastUserInputTime = time.Now()
+		h.dismissMenuMigrationHint()
 
 		// Handle jump mode input (before modals)
 		if h.jumpMode {
@@ -11147,6 +11161,13 @@ func (h *Home) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			h.draggingDivider = false
 			persistPreviewPct(h.getPreviewPct())
 		}
+		return h, nil
+	}
+
+	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && h.isMenuAffordanceClick(msg) {
+		h.lastUserInputTime = time.Now()
+		h.dismissMenuMigrationHint()
+		h.showActionMenu()
 		return h, nil
 	}
 
@@ -15116,6 +15137,7 @@ func (h *Home) saveUIStateErr() error {
 		PreviewMode:        int(h.previewMode),
 		StatusFilter:       string(h.statusFilter),
 		GroupViewMode:      int(h.groupViewMode),
+		MenuHintShown:      h.menuHintShown,
 		RemoteSessionOrder: h.remoteSessionOrder,
 	}
 
@@ -15195,6 +15217,7 @@ func (h *Home) loadUIState() {
 	h.previewMode = PreviewMode(state.PreviewMode)
 	h.statusFilter = session.Status(state.StatusFilter)
 	h.groupViewMode = session.GroupViewMode(state.GroupViewMode)
+	h.menuHintShown = state.MenuHintShown
 	if h.groupViewMode < session.GroupViewNormal || h.groupViewMode >= session.GroupViewModeCount {
 		h.groupViewMode = session.GroupViewNormal
 	}
@@ -21541,6 +21564,51 @@ func renderSimpleMCPLine(b *strings.Builder, mcpInfo *session.MCPInfo, width int
 	b.WriteString("\n")
 }
 
+const (
+	menuAffordanceText    = "Space Menu"
+	menuMigrationHintText = "Space: Menu · Enable legacy accelerators in Keyboard shortcuts"
+)
+
+// dismissMenuMigrationHint records acknowledgement in the machine-local UI
+// state. The hint may disappear on any interaction; failure to persist merely
+// means it can be shown again next launch.
+func (h *Home) dismissMenuMigrationHint() {
+	if !h.menuHintActive {
+		return
+	}
+	h.menuHintActive = false
+	h.menuHintShown = true
+	if h.maintenanceMsg == menuMigrationHintText {
+		h.maintenanceMsg = ""
+	}
+	h.saveUIState()
+}
+
+// menuAffordanceBounds resolves the visible footer label to terminal cells.
+// Computing it on click keeps the target correct across every footer mode and
+// terminal width without coupling mouse handling to rendering internals.
+func (h *Home) menuAffordanceBounds() (startX, endX, y int) {
+	lines := strings.Split(ansi.Strip(h.renderHelpBar()), "\n")
+	lineIndex := len(lines) - 1
+	if lineIndex < 0 {
+		return -1, -1, -1
+	}
+	startX = strings.Index(lines[lineIndex], menuAffordanceText)
+	if startX < 0 {
+		return -1, -1, -1
+	}
+	y = h.height - 1
+	if h.debugMode {
+		y--
+	}
+	return startX, startX + len(menuAffordanceText), y
+}
+
+func (h *Home) isMenuAffordanceClick(msg tea.MouseMsg) bool {
+	startX, endX, y := h.menuAffordanceBounds()
+	return startX >= 0 && msg.Y == y && msg.X >= startX && msg.X < endX
+}
+
 // renderHelpBar renders context-aware keyboard shortcuts. The style is
 // selected by config.toml [ui] footer (cached in h.footerMode):
 //
@@ -21597,11 +21665,14 @@ func (h *Home) renderHelpBarTiny() string {
 	helpKey := h.actionKey(hotkeyHelp)
 	var hint string
 	if h.jumpMode {
-		hint = lipgloss.NewStyle().Foreground(ColorYellow).Bold(true).Render("Jump: a-z/esc")
+		hint = globalStyleForMenu().Render(menuAffordanceText) + " · " +
+			lipgloss.NewStyle().Foreground(ColorYellow).Bold(true).Render("Jump: a-z/esc")
 	} else {
-		hintText := "Help key unbound"
+		hintText := menuAffordanceText
 		if helpKey != "" {
-			hintText = helpKey + " for help"
+			hintText += " · " + helpKey + " for help"
+		} else {
+			hintText += " · Help key unbound"
 		}
 		hint = hintStyle.Render(hintText)
 	}
@@ -21640,7 +21711,7 @@ func (h *Home) renderHelpBarMinimal() string {
 	}
 
 	// Context-specific keys (left side)
-	var contextKeys string
+	contextKeys := globalStyleForMenu().Render(menuAffordanceText)
 	newKey := h.actionKey(hotkeyNewSession)
 	quickKey := h.actionKey(hotkeyQuickCreate)
 	importKey := h.actionKey(hotkeyImport)
@@ -21655,19 +21726,19 @@ func (h *Home) renderHelpBarMinimal() string {
 		notesKey = ""
 	}
 	if h.jumpMode {
-		contextKeys = keyStyle.Render("a-z") + " " + keyStyle.Render("esc")
+		contextKeys += " " + keyStyle.Render("a-z") + " " + keyStyle.Render("esc")
 		if h.jumpBuffer != "" {
 			bufStyle := lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
 			contextKeys = bufStyle.Render(h.jumpBuffer+"…") + " " + contextKeys
 		}
 	} else if len(h.flatItems) == 0 {
-		contextKeys = renderKeys(newKey, quickKey, importKey, groupKey)
+		contextKeys += " " + renderKeys(newKey, quickKey, importKey, groupKey)
 	} else if h.cursor >= 0 && h.cursor < len(h.flatItems) {
 		item := h.flatItems[h.cursor]
 		if item.Type == session.ItemTypeGroup {
-			contextKeys = renderKeys("⏎", newKey, quickKey, groupKey)
+			contextKeys += " " + renderKeys("⏎", newKey, quickKey, groupKey)
 		} else {
-			contextKeys = renderKeys("⏎", newKey, quickKey, restartKey)
+			contextKeys += " " + renderKeys("⏎", newKey, quickKey, restartKey)
 			if item.Session != nil && item.Session.CanRestartFresh() {
 				freshRendered := renderKeys(restartFreshKey)
 				if freshRendered != "" {
@@ -21715,9 +21786,6 @@ func (h *Home) renderHelpBarMinimal() string {
 		globalParts = append(globalParts, globalStyle.Render(key))
 	}
 	globalKeys := strings.Join(globalParts, " ")
-	if contextKeys == "" {
-		contextKeys = globalStyle.Render("No actions bound")
-	}
 
 	// Calculate padding
 	leftPart := contextKeys
@@ -21749,7 +21817,7 @@ func (h *Home) renderHelpBarCompact() string {
 	restartFreshKey := h.actionKey(hotkeyRestartFresh)
 
 	// Abbreviated key+short desc
-	var contextHints []string
+	contextHints := []string{globalStyleForMenu().Render(menuAffordanceText)}
 	if len(h.flatItems) == 0 {
 		if newQuickKey != "" {
 			contextHints = append(contextHints, h.helpKeyShort(newQuickKey, "New"))
@@ -21817,7 +21885,7 @@ func (h *Home) renderHelpBarCompact() string {
 
 	// Jump mode overrides all context hints
 	if h.jumpMode {
-		contextHints = []string{
+		contextHints = []string{globalStyleForMenu().Render(menuAffordanceText),
 			h.helpKeyShort("a-z", "Hint"),
 			h.helpKeyShort("esc", "Cancel"),
 		}
@@ -21910,8 +21978,8 @@ func (h *Home) renderHelpBarFull() string {
 	undoKey := h.actionKey(hotkeyUndoDelete)
 
 	// Determine context-specific hints grouped by action type
-	var primaryHints []string   // Main actions (attach, toggle, etc.)
-	var secondaryHints []string // Edit actions (rename, move, delete)
+	primaryHints := []string{globalStyleForMenu().Render(menuAffordanceText)} // Always available.
+	var secondaryHints []string                                               // Edit actions (rename, move, delete)
 	var contextTitle string
 
 	if len(h.flatItems) == 0 {
@@ -22027,7 +22095,7 @@ func (h *Home) renderHelpBarFull() string {
 	// Jump mode overrides all context hints
 	if h.jumpMode {
 		contextTitle = "Jump"
-		primaryHints = []string{
+		primaryHints = []string{globalStyleForMenu().Render(menuAffordanceText),
 			h.helpKey("a-z", "Type hint"),
 			h.helpKey("esc", "Cancel"),
 		}
@@ -22129,6 +22197,10 @@ func (h *Home) curatedHint(hint footerHint) string {
 	keyStyle := lipgloss.NewStyle().Foreground(ColorComment).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(ColorComment)
 	return keyStyle.Render(hint.key) + " " + labelStyle.Render(hint.label)
+}
+
+func globalStyleForMenu() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(ColorComment).Bold(true)
 }
 
 // fitCuratedHints returns the global hints (settings/help) preceded by as many
@@ -22337,7 +22409,7 @@ func (h *Home) renderHelpBarCurated() string {
 	// are never dropped: when the terminal is too narrow, lower-priority context
 	// hints are trimmed from the right instead so these two always survive
 	// (PR #1289 review nit 2a — previously MaxWidth truncation could clip them).
-	var globalHints []footerHint
+	globalHints := []footerHint{{key: "Space", label: "Menu"}}
 	if key := h.actionKey(hotkeySettings); key != "" {
 		globalHints = append(globalHints, footerHint{key: key, label: "settings"})
 	}

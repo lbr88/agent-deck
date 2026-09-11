@@ -236,11 +236,11 @@ func TestHomeHandoverStartErrorKeepsCreatedRow(t *testing.T) {
 	}
 }
 
-func TestHelpIncludesHandoverAction(t *testing.T) {
-	h := NewHelpOverlay()
-	h.SetSize(100, 100)
-	h.Show()
-	if got := h.View(); !strings.Contains(got, "P h") || !strings.Contains(strings.ToLower(got), "handover") {
-		t.Fatalf("help missing P h handover action:\n%s", got)
+func TestActionCatalogIncludesHandover(t *testing.T) {
+	for _, definition := range actionDefinitions() {
+		if definition.ID == ActionHandover && strings.Contains(strings.ToLower(definition.Label), "hand over") {
+			return
+		}
 	}
+	t.Fatal("action catalog missing handover action")
 }
