@@ -271,7 +271,6 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	isRemoteSession := item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil
 	isHubSession := item.Type == session.ItemTypeHubSession && item.HubSession != nil
 	isHubGroup := item.Type == session.ItemTypeHubGroup
-	isHubNode := item.Type == session.ItemTypeHubNode
 	tool := ""
 	if isLocalSession {
 		tool = item.Session.Tool
@@ -328,7 +327,10 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	case ActionOpenShellHere:
 		supported = isLocalSession
 	case ActionEditNotes:
-		supported = isLocalSession || isHubSession
+		if isLocalSession || isHubSession {
+			config, err := session.LoadUserConfig()
+			supported = err == nil && config != nil && config.GetShowNotes()
+		}
 	case ActionEditPaths:
 		supported = isLocalSession && item.Session.IsMultiRepo()
 	case ActionEditSession:
@@ -346,7 +348,10 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	case ActionMoveUp, ActionMoveDown:
 		supported = isLocalSession || isLocalGroup || isRemoteSession || item.Type == session.ItemTypeRemoteGroup || isHubGroup
 	case ActionPromote, ActionDemote:
-		supported = isLocalSession || isHubNode
+		// Hub-node privilege changes belong to the explicitly labeled Hub
+		// management dialog. Reusing session hierarchy actions here would put a
+		// security-sensitive mutation behind misleading move/nest labels.
+		supported = isLocalSession
 	case ActionCyclePin:
 		supported = isLocalSession
 	case ActionRemoveSession:

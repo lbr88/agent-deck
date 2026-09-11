@@ -97,6 +97,8 @@ func TestHomeActionMenuOmitsHandlersThatWouldNoOpForSelectedRow(t *testing.T) {
 		{name: "hub group cannot open", item: session.Item{Type: session.ItemTypeHubGroup, HubNodeID: "node-1", HubGroupPath: "grp"}, action: ActionOpen},
 		{name: "remote session cannot move group", item: session.Item{Type: session.ItemTypeRemoteSession, RemoteName: "node", RemoteSession: &session.RemoteSessionInfo{ID: "remote-1"}}, action: ActionMoveToGroup},
 		{name: "ordinary session has no sandbox shell", item: session.Item{Type: session.ItemTypeSession, Session: nonsandbox}, action: ActionExecShell},
+		{name: "hub node cannot use session promote label", item: session.Item{Type: session.ItemTypeHubNode, HubNodeID: "node-1"}, action: ActionPromote},
+		{name: "hub node cannot use session demote label", item: session.Item{Type: session.ItemTypeHubNode, HubNodeID: "node-1"}, action: ActionDemote},
 	}
 
 	for _, tt := range tests {
@@ -106,6 +108,25 @@ func TestHomeActionMenuOmitsHandlersThatWouldNoOpForSelectedRow(t *testing.T) {
 				t.Fatalf("action %q was enabled even though its handler would do nothing: %#v", tt.action, action)
 			}
 		})
+	}
+}
+
+func TestHomeActionMenuEditNotesFollowsPreviewSetting(t *testing.T) {
+	local := session.NewInstanceWithGroupAndTool("local", ".", session.DefaultGroupPath, "codex")
+	item := session.Item{Type: session.ItemTypeSession, Session: local}
+
+	disabled := false
+	setPreviewShowNotesConfigForTest(t, &disabled)
+	disabledItems := homeForActionMenu([]session.Item{item}).availableActionMenuItems()
+	if action, ok := menuItemByID(disabledItems, ActionEditNotes); ok && action.Enabled {
+		t.Fatalf("Edit notes was enabled with preview.show_notes=false: %#v", action)
+	}
+
+	enabled := true
+	setPreviewShowNotesConfigForTest(t, &enabled)
+	enabledItems := homeForActionMenu([]session.Item{item}).availableActionMenuItems()
+	if action, ok := menuItemByID(enabledItems, ActionEditNotes); !ok || !action.Enabled {
+		t.Fatalf("Edit notes = %#v, %v with preview.show_notes=true; want enabled", action, ok)
 	}
 }
 
