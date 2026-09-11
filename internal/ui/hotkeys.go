@@ -500,7 +500,7 @@ func validateHotkeyBindings(bindings map[string]string) error {
 
 func isReservedOverviewBinding(key string) bool {
 	switch strings.ToLower(normalizeHotkeyBinding(key)) {
-	case "space", "up", "down", "left", "right", "enter", "esc":
+	case "space", "up", "down", "left", "right", "enter", "esc", "ctrl+tab", "ctrl+shift+tab":
 		return true
 	default:
 		return false

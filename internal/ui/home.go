@@ -328,10 +328,11 @@ type Home struct {
 	watcherEngine             *watcher.Engine      // nil until Init (D-07: lifecycle tied to TUI startup)
 
 	// Configurable hotkeys
-	hotkeys        map[string]string // action -> configured key
-	hotkeyLookup   map[string]string // pressed key -> canonical key used by switch cases
-	blockedHotkeys map[string]bool   // canonical keys disabled via remap/unbind
-	shortcutMode   string            // menu (default) or legacy
+	hotkeys         map[string]string // action -> configured key
+	hotkeyLookup    map[string]string // pressed key -> canonical key used by switch cases
+	blockedHotkeys  map[string]bool   // canonical keys disabled via remap/unbind
+	shortcutMode    string            // menu (default) or legacy
+	footerShortcuts []footerShortcut  // explicitly enabled menu-mode footer hints
 
 	// Inline preview notes editing
 	notesEditor           textarea.Model
@@ -966,6 +967,22 @@ func (h *Home) setHotkeys(bindings map[string]string) {
 	}
 	h.hotkeys = bindings
 	h.hotkeyLookup, h.blockedHotkeys = buildHotkeyLookup(bindings)
+	h.footerShortcuts = h.footerShortcuts[:0]
+	if h.shortcutMode == shortcutModeMenu {
+		for _, definition := range actionDefinitions() {
+			if definition.HotkeyAction == "" || definition.ID == ActionDetach ||
+				definition.ID == ActionSearch || definition.ID == ActionSettings ||
+				definition.ID == ActionHelp || definition.ID == ActionQuit {
+				continue
+			}
+			if key := strings.TrimSpace(actionHotkey(bindings, definition.HotkeyAction)); key != "" {
+				h.footerShortcuts = append(h.footerShortcuts, footerShortcut{
+					action: definition.ID,
+					hint:   footerHint{key: key, label: strings.ToLower(definition.Label)},
+				})
+			}
+		}
+	}
 	if h.helpOverlay != nil {
 		h.helpOverlay.SetHotkeys(bindings)
 	}
@@ -1223,6 +1240,12 @@ func normalizeOverviewKeyToken(pressed string) string {
 	// `case "shift+enter":` is reachable.
 	if pressed == string(shiftEnterMarker) {
 		pressed = "shift+enter"
+	}
+	if pressed == string(ctrlTabMarker) {
+		pressed = "ctrl+tab"
+	}
+	if pressed == string(ctrlShiftTabMarker) {
+		pressed = "ctrl+shift+tab"
 	}
 	return pressed
 }
@@ -1513,9 +1536,18 @@ type hubSkillApplyResultMsg struct {
 // attached. It carries the same post-attach reconciliation data as
 // statusUpdateMsg; the switcher always opens pre-highlighted on the session we
 // came from.
+type switcherDirection int
+
+const (
+	switcherStay switcherDirection = iota
+	switcherNext
+	switcherPrevious
+)
+
 type openSwitcherMsg struct {
 	fromSessionID   string // session we just detached from
 	attachedWorkDir string // pane_current_path captured after attach returns
+	quickDirection  switcherDirection
 }
 
 // openScrollbackMsg is emitted when the user pressed the scrollback trigger
@@ -9155,12 +9187,21 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the trade the issue asks for: the picker appears at once instead of after
 		// an O(fleet) tmux stall, and the stale value is a secondary hint, never a
 		// status.
-		h.openSessionSwitcher(msg.fromSessionID, true)
+		var switchCmd tea.Cmd
+		switch msg.quickDirection {
+		case switcherNext:
+			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, true)
+		case switcherPrevious:
+			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, false)
+		default:
+			h.openSessionSwitcher(msg.fromSessionID, true)
+		}
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
 			RestoreLegacyKeyboardCmd(os.Stdout),
 			tea.WindowSize(),
 			syncCmd,
+			switchCmd,
 			tea.Tick(attachReturnRefreshDelay, func(time.Time) tea.Msg { return attachReturnRefreshMsg{} }),
 		)
 
@@ -11373,6 +11414,13 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 	}
 
 	switch key {
+	case "ctrl+tab", "ctrl+shift+tab":
+		fromID := ""
+		if sel := h.getSelectedSession(); sel != nil {
+			fromID = sel.ID
+		}
+		return h, h.openQuickSessionSwitcher(fromID, false, key == "ctrl+tab")
+
 	case hotkeyQuit:
 		return h.tryQuit()
 
@@ -13051,7 +13099,7 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 
 func isStructuralOverviewKey(key string) bool {
 	switch key {
-	case "up", "down", "left", "right", "enter", "esc", " ":
+	case "up", "down", "left", "right", "enter", "esc", " ", "ctrl+tab", "ctrl+shift+tab":
 		return true
 	default:
 		return false
@@ -17700,9 +17748,16 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 					attachedWorkDir: fromWorkDir,
 				}
 			}
+			quickDirection := switcherStay
+			if res.intent == tmux.SwitchNextRequested {
+				quickDirection = switcherNext
+			} else if res.intent == tmux.SwitchPreviousRequested {
+				quickDirection = switcherPrevious
+			}
 			return openSwitcherMsg{
 				fromSessionID:   fromID,
 				attachedWorkDir: fromWorkDir,
+				quickDirection:  quickDirection,
 			}
 		}
 
@@ -21688,6 +21743,9 @@ func (h *Home) renderHelpBarTiny() string {
 			lipgloss.NewStyle().Foreground(ColorYellow).Bold(true).Render("Jump: a-z/esc")
 	} else {
 		hintText := menuAffordanceText
+		for _, shortcut := range h.enabledMenuShortcutHints() {
+			hintText += " · " + shortcut.key
+		}
 		if helpKey != "" {
 			hintText += " · " + helpKey + " for help"
 		} else {
@@ -21731,6 +21789,9 @@ func (h *Home) renderHelpBarMinimal() string {
 
 	// Context-specific keys (left side)
 	contextKeys := globalStyleForMenu().Render(menuAffordanceText)
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutMinimal) {
+		contextKeys += " " + renderKeys(shortcut.key)
+	}
 	newKey := h.actionKey(hotkeyNewSession)
 	quickKey := h.actionKey(hotkeyQuickCreate)
 	importKey := h.actionKey(hotkeyImport)
@@ -21837,6 +21898,9 @@ func (h *Home) renderHelpBarCompact() string {
 
 	// Abbreviated key+short desc
 	contextHints := []string{globalStyleForMenu().Render(menuAffordanceText)}
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutCompact) {
+		contextHints = append(contextHints, h.helpKeyShort(shortcut.key, shortcut.label))
+	}
 	if len(h.flatItems) == 0 {
 		if newQuickKey != "" {
 			contextHints = append(contextHints, h.helpKeyShort(newQuickKey, "New"))
@@ -21998,7 +22062,10 @@ func (h *Home) renderHelpBarFull() string {
 
 	// Determine context-specific hints grouped by action type
 	primaryHints := []string{globalStyleForMenu().Render(menuAffordanceText)} // Always available.
-	var secondaryHints []string                                               // Edit actions (rename, move, delete)
+	for _, shortcut := range h.enabledMenuShortcutHints(footerLayoutFull) {
+		primaryHints = append(primaryHints, h.helpKey(shortcut.key, shortcut.label))
+	}
+	var secondaryHints []string // Edit actions (rename, move, delete)
 	var contextTitle string
 
 	if len(h.flatItems) == 0 {
@@ -22157,11 +22224,17 @@ func (h *Home) renderHelpBarFull() string {
 	// Global shortcuts (right side) - more compact with separators
 	globalStyle := lipgloss.NewStyle().Foreground(ColorComment)
 	globalParts := []string{globalStyle.Render("↑↓ Nav")}
-	globalParts = append(globalParts, globalStyle.Render("+/- Move"))
+	if h.shortcutMode == shortcutModeLegacy {
+		globalParts = append(globalParts, globalStyle.Render("+/- Move"))
+	} else if moveKeys := joinHotkeyLabels(h.actionKey(hotkeyMoveUp), h.actionKey(hotkeyMoveDown)); moveKeys != "" {
+		globalParts = append(globalParts, globalStyle.Render(moveKeys+" Move"))
+	}
 	if key := h.actionKey(hotkeySearch); key != "" {
 		globalParts = append(globalParts, globalStyle.Render(key+" Search"))
 	}
-	globalParts = append(globalParts, globalStyle.Render("G Global"))
+	if h.shortcutMode == shortcutModeLegacy {
+		globalParts = append(globalParts, globalStyle.Render("G Global"))
+	}
 	if key := h.actionKey(hotkeySettings); key != "" {
 		globalParts = append(globalParts, globalStyle.Render(key+" Settings"))
 	}
@@ -22207,6 +22280,173 @@ func (h *Home) helpKey(key, desc string) string {
 type footerHint struct {
 	key   string
 	label string
+}
+
+type footerShortcut struct {
+	action ActionID
+	hint   footerHint
+}
+
+// enabledMenuShortcutHints returns the optional overview shortcuts the user
+// explicitly enabled in the menu-first preset and that are usable for the
+// current selection. Menu-first has no implicit accelerators, so every
+// non-structural binding in h.hotkeys represents a deliberate choice that the
+// footer must surface. Global shortcuts already rendered by every footer are
+// skipped to avoid duplicates.
+func (h *Home) enabledMenuShortcutHints(layouts ...footerLayout) []footerHint {
+	if h.shortcutMode != shortcutModeMenu {
+		return nil
+	}
+	excluded := make(map[ActionID]struct{})
+	if len(layouts) > 0 {
+		excluded = h.contextualFooterActions(layouts[0])
+	}
+	hints := make([]footerHint, 0, len(h.footerShortcuts))
+	for _, shortcut := range h.footerShortcuts {
+		if _, duplicate := excluded[shortcut.action]; duplicate {
+			continue
+		}
+		enabled, _, include := h.footerActionAvailability(shortcut.action)
+		if !include || !enabled {
+			continue
+		}
+		hints = append(hints, shortcut.hint)
+	}
+	return hints
+}
+
+type footerLayout uint8
+
+const (
+	footerLayoutMinimal footerLayout = iota
+	footerLayoutCompact
+	footerLayoutFull
+)
+
+// contextualFooterActions returns actions that the selected footer layout
+// already renders through its ordinary context hints. Explicit menu-mode
+// shortcuts for these actions must not be prepended a second time.
+func (h *Home) contextualFooterActions(layout footerLayout) map[ActionID]struct{} {
+	actions := make(map[ActionID]struct{})
+	add := func(ids ...ActionID) {
+		for _, id := range ids {
+			actions[id] = struct{}{}
+		}
+	}
+	if h.jumpMode {
+		return actions
+	}
+	if len(h.flatItems) == 0 {
+		add(ActionNewSession, ActionQuickCreate, ActionImport)
+		if layout != footerLayoutCompact {
+			add(ActionCreateGroup)
+		}
+		return actions
+	}
+	if h.cursor < 0 || h.cursor >= len(h.flatItems) {
+		return actions
+	}
+
+	item := h.flatItems[h.cursor]
+	if item.Type == session.ItemTypeGroup {
+		add(ActionNewSession, ActionQuickCreate)
+		if layout != footerLayoutCompact {
+			add(ActionCreateGroup)
+		}
+		if layout == footerLayoutFull {
+			add(ActionRename, ActionDelete)
+		}
+		return actions
+	}
+
+	add(ActionNewSession, ActionQuickCreate, ActionRestart)
+	switch layout {
+	case footerLayoutMinimal:
+		add(ActionRestartFresh, ActionQuickFork, ActionMCPManager, ActionSkillsManager, ActionEditNotes)
+	case footerLayoutCompact:
+		add(ActionRestartFresh, ActionQuickFork, ActionMCPManager, ActionSkillsManager,
+			ActionCopyOutput, ActionCopyPane, ActionSendOutput, ActionEditNotes)
+		if item.Session != nil && session.ToolSupportsMCPManager(item.Session.Tool) {
+			add(ActionTogglePreview)
+		}
+		if len(h.undoStack) > 0 {
+			add(ActionUndoDelete)
+		}
+	case footerLayoutFull:
+		add(ActionCreateGroup, ActionRestartFresh, ActionQuickFork, ActionForkWithOptions,
+			ActionMCPManager, ActionSkillsManager, ActionExecShell, ActionOpenShellHere,
+			ActionEditPaths, ActionCopyOutput, ActionCopyPane, ActionSendOutput,
+			ActionEditNotes, ActionRename, ActionMoveToGroup, ActionDelete, ActionCloseSession)
+		if item.Session != nil && session.ToolSupportsMCPManager(item.Session.Tool) {
+			add(ActionTogglePreview)
+		}
+		if len(h.undoStack) > 0 {
+			add(ActionUndoDelete)
+		}
+	}
+	return actions
+}
+
+// footerActionAvailability keeps deck-wide status scans off the render path.
+// The immutable render snapshot is refreshed by the background status loop and
+// is sufficient for deciding whether these optional hints should be visible.
+func (h *Home) footerActionAvailability(id ActionID) (enabled bool, reason string, include bool) {
+	if id != ActionSwitchSession && id != ActionBulkRemoveErrored {
+		return h.actionAvailability(id)
+	}
+
+	snapshot := h.getSessionRenderSnapshot()
+	h.instancesMu.RLock()
+	defer h.instancesMu.RUnlock()
+	switchable := 0
+	for _, inst := range h.instances {
+		if inst == nil {
+			continue
+		}
+		state, ok := snapshot[inst.ID]
+		if !ok {
+			continue
+		}
+		if id == ActionBulkRemoveErrored && state.status == session.StatusError {
+			return true, "", true
+		}
+		if id == ActionSwitchSession && state.status != session.StatusError && state.status != session.StatusStopped {
+			switchable++
+			if switchable >= 2 {
+				return true, "", true
+			}
+		}
+	}
+	if id == ActionBulkRemoveErrored {
+		return false, "No errored local sessions", true
+	}
+	return false, "Fewer than two switchable local sessions", true
+}
+
+func dedupeFooterHints(hints []footerHint) []footerHint {
+	seen := make(map[string]struct{}, len(hints))
+	kept := hints[:0]
+	for _, hint := range hints {
+		duplicate := false
+		keys := strings.Split(strings.ToLower(hint.key), "/")
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if _, ok := seen[key]; key != "" && ok {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		kept = append(kept, hint)
+		for _, key := range keys {
+			if key = strings.TrimSpace(key); key != "" {
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return kept
 }
 
 // curatedHint formats a single footer hint as dim, plain inline text — the key
@@ -22401,7 +22641,7 @@ func (h *Home) renderHelpBarCurated() string {
 	// Context hints (jump / empty-list / selected-row actions) are
 	// lower-priority and listed in descending priority order, so they are the
 	// ones dropped first when the bar is too narrow.
-	var contextHints []footerHint
+	contextHints := h.enabledMenuShortcutHints()
 
 	switch {
 	case h.jumpMode:
@@ -22422,6 +22662,10 @@ func (h *Home) renderHelpBarCurated() string {
 		add(h.actionKey(hotkeyCreateGroup), "group")
 	case h.cursor >= 0 && h.cursor < len(h.flatItems):
 		contextHints = append(contextHints, h.curatedContextHints(h.flatItems[h.cursor])...)
+	}
+	contextHints = dedupeFooterHints(contextHints)
+	if len(contextHints) > maxCuratedContextHints {
+		contextHints = contextHints[:maxCuratedContextHints]
 	}
 
 	// Settings then help are the always-kept global hints, in that order. They
@@ -26234,8 +26478,8 @@ func (h *Home) handleSessionPickerDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 // whether Esc should re-attach to fromID (true when opened from an attached
 // session) or simply close back to the overview (false when opened from the
 // overview). It deliberately does NOT arm the idle auto-commit: opening alone
-// never commits, so a stray Ctrl+S just shows the list. Auto-commit is armed
-// only once the user cycles (Ctrl+S/Ctrl+A) at least once inside the picker
+// never commits, so a stray fallback Ctrl+S just shows the list. Auto-commit is
+// armed only once the user cycles inside the picker
 // (see handleSessionSwitcherKey). When fewer than two switchable sessions exist
 // the picker stays closed.
 //
@@ -26243,7 +26487,7 @@ func (h *Home) handleSessionPickerDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 // local tmux attach loop. Remote (ItemTypeRemoteSession) rows are intentionally
 // excluded for now — see SessionSwitcher.Show and
 // TestSessionSwitcher_RemoteSessionsUnsupported.
-func (h *Home) openSessionSwitcher(fromID string, reattachOnCancel bool) {
+func (h *Home) openSessionSwitcher(fromID string, reattachOnCancel bool) bool {
 	h.instancesMu.RLock()
 	instances := make([]*session.Instance, len(h.instances))
 	copy(instances, h.instances)
@@ -26263,7 +26507,7 @@ func (h *Home) openSessionSwitcher(fromID string, reattachOnCancel bool) {
 
 	h.sessionSwitcher.SetSize(h.width, h.height)
 	if !h.sessionSwitcher.Show(fromID, instances, subtitles) {
-		return
+		return false
 	}
 	// Snapshot the row labels at open time so the switcher's View renders
 	// lock-free (#1753) — see SessionSwitcher.labels.
@@ -26282,10 +26526,29 @@ func (h *Home) openSessionSwitcher(fromID string, reattachOnCancel bool) {
 	// session, and schedule none: auto-commit arms only once the user cycles
 	// (Ctrl+S/Ctrl+A) inside this picker.
 	h.sessionSwitcher.bumpCommitGen()
+	return true
+}
+
+// openQuickSessionSwitcher opens the MRU picker, immediately advances away
+// from the current session, and arms the idle attach timer. This is the
+// Windows-style Ctrl+Tab path: the first press targets the most recently used
+// other session, while repeated Ctrl+Tab / Ctrl+Shift+Tab presses cycle before
+// the one-second idle commit fires.
+func (h *Home) openQuickSessionSwitcher(fromID string, reattachOnCancel, forward bool) tea.Cmd {
+	if !h.openSessionSwitcher(fromID, reattachOnCancel) {
+		return nil
+	}
+	if forward && h.sessionSwitcher.hasOrigin {
+		h.sessionSwitcher.next()
+	} else if !forward {
+		h.sessionSwitcher.prev()
+	}
+	h.sessionSwitcher.lastCycleAt = time.Now()
+	return h.armSwitcherCommit()
 }
 
 // armSwitcherCommit (re)starts the idle-commit countdown and returns the timer
-// command. Ctrl+S / Ctrl+A call this, so the timer only fires once the user
+// command. Quick-cycle keys call this, so the timer only fires once the user
 // stops tapping — the closest we can get to "commit on key release".
 func (h *Home) armSwitcherCommit() tea.Cmd {
 	gen := h.sessionSwitcher.bumpCommitGen()
@@ -26401,7 +26664,8 @@ func (h *Home) attachToSwitchTarget(id string) tea.Cmd {
 // handleSessionSwitcherKey handles key events when the in-attach switcher is
 // visible. Two interaction modes share the overlay:
 //
-//   - Ctrl+S (forward) / Ctrl+A (backward): the quick "tap and let go" mode.
+//   - Ctrl+Tab (forward) / Ctrl+Shift+Tab (backward): the primary quick mode.
+//     Ctrl+S / Ctrl+A remain the configurable Ctrl-letter fallback pair.
 //     Each tap re-arms the idle-commit timer (so it fires ~1s after you stop),
 //     and the advance is throttled so holding the key cannot spin the list.
 //   - Up / Down: deliberate browsing. These cancel the pending auto-commit, so
@@ -26412,7 +26676,7 @@ func (h *Home) attachToSwitchTarget(id string) tea.Cmd {
 // not to leave); when opened from the overview it just closes. Ctrl+Q (the
 // detach key) always drops to the overview.
 func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	switch normalizeOverviewKeyToken(msg.String()) {
 	case "enter":
 		return h, h.commitSessionSwitch()
 	case "esc":
@@ -26427,10 +26691,10 @@ func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Detach key: leave the switcher (and any session), landing in the overview.
 		h.sessionSwitcher.Hide()
 		return h, nil
-	case "ctrl+s":
+	case "ctrl+s", "ctrl+tab":
 		h.sessionSwitcher.cycle(true, time.Now())
 		return h, h.armSwitcherCommit()
-	case "ctrl+a":
+	case "ctrl+a", "ctrl+shift+tab":
 		h.sessionSwitcher.cycle(false, time.Now())
 		return h, h.armSwitcherCommit()
 	case "up":

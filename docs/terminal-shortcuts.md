@@ -21,7 +21,9 @@ dialogs still guard destructive actions.
 Open **Space → Application → Keyboard shortcuts**. Each optional accelerator
 can be toggled individually or rebound. Agent Deck rejects unsupported keys and
 collisions before saving, and names both conflicting actions. Changes apply
-immediately.
+immediately. In Menu-first mode, enabled shortcuts that are available for the
+current selection are prioritized in the footer so the visible hints stay in
+sync with the shortcut editor.
 
 - `Alt+M` applies the Menu-first preset after confirmation. It disables all
   optional accelerators while retaining the essential controls and attached
@@ -59,13 +61,30 @@ Alacritty, Ghostty, gnome-terminal, kitty, WezTerm, the Linux console).
 Cycle between sessions while staying attached — no detach-then-reattach
 round trip through the list.
 
-> **Opt-in — unbound by default.** Switching *while attached* requires
+| Keystroke | What happens |
+| --------- | ------------ |
+| `Ctrl-Tab` | Open the MRU switcher and immediately highlight the most recently used other local session. Repeated presses cycle forward. |
+| `Ctrl-Shift-Tab` | Open or cycle the MRU switcher backward. |
+
+After the last quick-switch press, Agent Deck attaches to the highlighted
+session after about one second of idle. `Enter` attaches immediately, `Esc`
+cancels, and `Up` / `Down` switch to deliberate browsing without auto-attach.
+
+Terminals that report `Ctrl-Tab` through kitty CSI-u or xterm
+modifyOtherKeys work automatically, both in the overview and while attached.
+Terminals that collapse it to a plain `Tab` keep their normal Tab behavior;
+Agent Deck never guesses that a raw Tab was Ctrl-Tab.
+
+### Portable Ctrl-letter fallback
+
+> **Opt-in — unbound by default.** The fallback for terminals that cannot
+> distinguish `Ctrl-Tab` requires
 > intercepting a control byte in the attach loop **before the attached
 > program sees it**, so the chord is taken from whatever runs inside the
 > session. There is no control byte that's safe to steal from every tool:
 > the previously-suggested `Ctrl-S` is Claude Code's "stash prompt" key and
 > the terminal XOFF flow-control freeze. The switcher therefore ships
-> **disabled**. Enable it by binding a `ctrl+<letter>` chord your attached
+> without a Ctrl-letter fallback. Enable one by binding a `ctrl+<letter>` chord your attached
 > tools don't use:
 >
 > ```toml
@@ -79,7 +98,7 @@ round trip through the list.
 | --------- | ------------ |
 | `Ctrl-S` | Open the session switcher, pre-highlighted on the session you're currently in. |
 
-With the switcher open:
+With the switcher open, the fallback keys behave as follows:
 
 - **`Ctrl-S`** again — cycle **forward** (the first step lands on the
   most-recently-used *other* session); **`Ctrl-A`** — cycle **backward**.
@@ -96,7 +115,7 @@ With the switcher open:
 - **`Ctrl-Q`** (the detach key) — leave the switcher *and* the session,
   dropping you in the overview.
 
-The same `Ctrl-S` also works **from the overview list** — it opens the
+The same fallback `Ctrl-S` also works **from the overview list** — it opens the
 switcher pre-highlighted on the session under the cursor, so you can hop
 to a recent session without scrolling the grouped list.
 
@@ -108,11 +127,10 @@ already in, so an immediate `Enter` is a no-op) and waits — it only starts
 the auto-attach countdown once you actually cycle inside it, so an
 accidental press never yanks you away.
 
-**Why a `ctrl+<letter>` chord and not `Ctrl-Tab` / `Ctrl-Shift-Tab`?**
-Those chords only produce a distinct keystroke on terminals running an
-enhanced keyboard protocol (kitty / Ghostty / WezTerm / foot), and not
-reliably through an attach — everywhere else `Ctrl-Tab` is indistinguishable
-from a plain `Tab`. A `ctrl+<letter>` byte is the only portable trigger.
+**Why keep a `ctrl+<letter>` fallback?** `Ctrl-Tab` only produces a distinct
+keystroke on terminals running an enhanced keyboard protocol. Everywhere else
+it is indistinguishable from plain `Tab`, which Agent Deck must not steal. A
+`ctrl+<letter>` byte remains the portable fallback.
 
 **Why is it opt-in, and why not a built-in default key?** Because the
 trigger is only useful if the attach loop grabs it *before* forwarding to
@@ -124,15 +142,14 @@ the switcher ships unbound and you pick a key that's free in the tools you
 actually attach to.
 
 **Why does it auto-commit instead of switching on key release?**
-Terminals don't deliver key-*release* events without an enhanced
-keyboard protocol that isn't available here, so "switch the moment you
-release Ctrl" can't be detected. The idle auto-commit (~1s) approximates
-it: tap to cycle, stop, and it lands. Press `Enter` to commit instantly
-or `Esc` to back out.
+The keyboard modes Agent Deck can safely enable report key presses, not the
+Ctrl release needed for Windows' exact behavior. The idle auto-commit (~1s)
+approximates it: tap to cycle, stop, and it lands. Press `Enter` to commit
+instantly or `Esc` to back out.
 
-The trigger is configured under `[hotkeys]` as `switch_session` (must be a
-`ctrl+<letter>` chord); it is unbound by default and never overrides the
-detach key.
+The portable fallback is configured under `[hotkeys]` as `switch_session`
+(must be a `ctrl+<letter>` chord); it is unbound by default and never
+overrides the detach key.
 
 ## Known terminal gotchas
 

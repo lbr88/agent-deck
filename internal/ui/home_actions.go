@@ -233,8 +233,10 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 		ActionJumpMode, ActionHubAdmin, ActionFeedback, ActionKeyboardShortcuts:
 		return true, "", true
 	case ActionBulkRemoveErrored:
+		h.instancesMu.RLock()
+		defer h.instancesMu.RUnlock()
 		for _, inst := range h.instances {
-			if inst != nil && inst.Status == session.StatusError {
+			if inst != nil && inst.GetStatusThreadSafe() == session.StatusError {
 				return true, "", true
 			}
 		}
@@ -250,10 +252,23 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 		}
 		return true, "", true
 	case ActionSwitchSession:
-		if len(h.instances) == 0 {
-			return false, "No local sessions available", true
+		h.instancesMu.RLock()
+		defer h.instancesMu.RUnlock()
+		switchable := 0
+		for _, inst := range h.instances {
+			if inst == nil {
+				continue
+			}
+			switch inst.GetStatusThreadSafe() {
+			case session.StatusError, session.StatusStopped:
+				continue
+			}
+			switchable++
+			if switchable >= 2 {
+				return true, "", true
+			}
 		}
-		return true, "", true
+		return false, "Fewer than two switchable local sessions", true
 	case ActionDetach:
 		// Detach is structural inside an attached session, not an overview
 		// command. Keeping it out avoids a permanently disabled menu row.

@@ -177,6 +177,41 @@ func TestAttachStdinPump_ReportsSwitchIntent(t *testing.T) {
 	}
 }
 
+func TestAttachStdinPump_ReportsEnhancedCtrlTabDirection(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  SwitchIntent
+	}{
+		{name: "next", input: "\x1b[9;5u", want: SwitchNextRequested},
+		{name: "previous", input: "\x1b[9;6u", want: SwitchPreviousRequested},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pump, w, out := newTestPump(t, AttachOptions{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := runPump(ctx, pump)
+
+			if _, err := w.Write([]byte(tt.input)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			select {
+			case res := <-done:
+				if !res.interrupted || res.outcome != tt.want {
+					t.Fatalf("pump result = %+v, want interrupted with intent %v", res, tt.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("pump did not exit on enhanced Ctrl+Tab")
+			}
+			if out.Len() != 0 {
+				t.Fatalf("enhanced Ctrl+Tab leaked to attached program: %q", out.String())
+			}
+		})
+	}
+}
+
 // TestAttachStdinPump_StopsOnEOF covers the closed-stdin path: the pump must
 // report a non-interrupt exit rather than spinning on a dead descriptor.
 func TestAttachStdinPump_StopsOnEOF(t *testing.T) {
