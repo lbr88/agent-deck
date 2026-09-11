@@ -259,7 +259,10 @@ Running many sessions? Socket pooling shares MCP processes across all sessions v
 
 ### Search
 
-Press `/` to fuzzy-search across all sessions. Filter by status with `!` (running), `@` (waiting), `#` (idle), `$` (error). Press `G` for global search across all Claude conversations.
+Open `Space Menu` and choose **Search** to search across the fleet, or choose a
+status filter under **View**. The Legacy preset also provides `/` and `G` for
+fleet search, `Alt+/` for the current group, and `!`, `@`, `#`, `$` for status
+filters.
 
 ### Keyboard navigation (legacy shortcut preset)
 

@@ -400,6 +400,9 @@ func resolveHotkeys(overrides map[string]string) map[string]string {
 		key := overrides[action]
 		normalizedAction := strings.TrimSpace(strings.ToLower(action))
 		normalizedKey := strings.TrimSpace(key)
+		if isReservedOverviewBinding(normalizedKey) {
+			continue
+		}
 
 		if _, ok := defaultHotkeyBindings[normalizedAction]; ok {
 			canonicalOverrides[normalizedAction] = normalizedKey
@@ -415,7 +418,11 @@ func resolveHotkeys(overrides map[string]string) map[string]string {
 		if _, exists := canonicalOverrides[newName]; exists {
 			continue
 		}
-		canonicalOverrides[newName] = strings.TrimSpace(key)
+		normalizedKey := strings.TrimSpace(key)
+		if isReservedOverviewBinding(normalizedKey) {
+			continue
+		}
+		canonicalOverrides[newName] = normalizedKey
 	}
 
 	for action, key := range canonicalOverrides {
@@ -455,7 +462,7 @@ func resolveHotkeysForMode(overrides map[string]string, mode string) map[string]
 		if _, ok := defaultHotkeyBindings[action]; !ok {
 			continue
 		}
-		if key := strings.TrimSpace(rawKey); key != "" {
+		if key := strings.TrimSpace(rawKey); key != "" && !isReservedOverviewBinding(key) {
 			bindings[action] = key
 		}
 	}
@@ -475,8 +482,8 @@ func validateHotkeyBindings(bindings map[string]string) error {
 		if key == "" {
 			continue
 		}
-		if strings.EqualFold(key, "space") || key == " " {
-			return fmt.Errorf("shortcut %q cannot use Space because Space opens the global menu", action)
+		if isReservedOverviewBinding(key) {
+			return fmt.Errorf("shortcut %q cannot use reserved overview key %q", action, key)
 		}
 		if !supportedHotkeyBinding(key) {
 			return fmt.Errorf("shortcut %q uses unsupported key %q", action, rawKey)
@@ -489,6 +496,15 @@ func validateHotkeyBindings(bindings map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func isReservedOverviewBinding(key string) bool {
+	switch strings.ToLower(normalizeHotkeyBinding(key)) {
+	case "space", "up", "down", "left", "right", "enter", "esc":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeHotkeyBinding(key string) string {

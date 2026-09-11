@@ -262,6 +262,8 @@ type Home struct {
 
 	// Components
 	actionMenu                *ActionMenu
+	actionMenuTarget          selectedItemIdentity
+	actionMenuHasTarget       bool
 	shortcutSettings          *ShortcutSettings
 	search                    *Search
 	globalSearch              *GlobalSearch              // Global session search across all Claude conversations
@@ -1207,7 +1209,7 @@ func buildRemoteAttachRequest(remoteName, sessionID, openAs string) (terminal.At
 	}, true
 }
 
-func (h *Home) normalizeMainKey(pressed string) string {
+func normalizeOverviewKeyToken(pressed string) string {
 	// Bubble Tea renders Alt+Space as "alt+ ". Normalize it to a readable
 	// structural token now that plain Space owns the action menu.
 	if pressed == "alt+ " {
@@ -1222,6 +1224,11 @@ func (h *Home) normalizeMainKey(pressed string) string {
 	if pressed == string(shiftEnterMarker) {
 		pressed = "shift+enter"
 	}
+	return pressed
+}
+
+func (h *Home) normalizeMainKey(pressed string) string {
+	pressed = normalizeOverviewKeyToken(pressed)
 	if canonical, ok := h.hotkeyLookup[pressed]; ok {
 		return canonical
 	}
@@ -11330,11 +11337,17 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 		key = string(directAction)
 		raw = "<menu>"
 	} else {
-		key = h.normalizeMainKey(raw)
+		pressed := normalizeOverviewKeyToken(raw)
+		key = h.normalizeMainKey(pressed)
 		if h.shortcutMode == shortcutModeMenu && !isStructuralOverviewKey(key) {
-			if actionIDForCanonicalKey(key) == "" {
+			// Menu-first enables exactly the configured binding and its spelling
+			// aliases. Historical extra triggers (for example ctrl+n alongside
+			// configured j) belong only to the Legacy preset.
+			canonical, enabled := h.hotkeyLookup[pressed]
+			if !enabled {
 				return h, nil
 			}
+			key = canonical
 		}
 		if action := actionIDForCanonicalKey(key); action != "" {
 			key = string(action)
@@ -12058,8 +12071,10 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 		return h, nil
 
 	case hotkeyCreateGroup:
-		// Vi-style gg to jump to top (#38) - check for double-tap first
-		if time.Since(h.lastGTime) < 500*time.Millisecond {
+		// Vi-style gg to jump to top (#38) applies only to keyboard input. A
+		// direct menu choice is an explicit create request and must never be
+		// mistaken for the second half of an earlier key sequence.
+		if directAction == "" && time.Since(h.lastGTime) < 500*time.Millisecond {
 			// Double g - jump to top
 			if len(h.flatItems) > 0 {
 				h.cursor = 0
@@ -12069,8 +12084,11 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 			}
 			return h, nil
 		}
-		// Record time for potential gg detection
-		h.lastGTime = time.Now()
+		// Record keyboard input for potential gg detection. Menu dispatch must
+		// not arm a later shortcut as the second half of the sequence either.
+		if directAction == "" {
+			h.lastGTime = time.Now()
+		}
 
 		// Create new group with context-aware Tab toggle (Issue #111):
 		// - Group header: defaults to subgroup, Tab toggles to root
@@ -21593,10 +21611,11 @@ func (h *Home) menuAffordanceBounds() (startX, endX, y int) {
 	if lineIndex < 0 {
 		return -1, -1, -1
 	}
-	startX = strings.Index(lines[lineIndex], menuAffordanceText)
-	if startX < 0 {
+	byteIndex := strings.Index(lines[lineIndex], menuAffordanceText)
+	if byteIndex < 0 {
 		return -1, -1, -1
 	}
+	startX = ansi.StringWidth(lines[lineIndex][:byteIndex])
 	y = h.height - 1
 	if h.debugMode {
 		y--

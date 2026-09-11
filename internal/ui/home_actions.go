@@ -13,6 +13,12 @@ func (h *Home) showActionMenu() {
 		h.actionMenu = NewActionMenu()
 	}
 	h.actionMenu.SetSize(h.width, h.height)
+	_, h.actionMenuHasTarget = h.selectedActionItem()
+	if h.actionMenuHasTarget {
+		h.actionMenuTarget = h.captureSelectedItemIdentity()
+	} else {
+		h.actionMenuTarget = selectedItemIdentity{windowIndex: -1}
+	}
 	h.actionMenu.Show(h.availableActionMenuItems())
 }
 
@@ -23,10 +29,59 @@ func (h *Home) handleActionMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	menu, cmd := h.actionMenu.Update(msg)
 	h.actionMenu = menu
 	if id, ok := h.actionMenu.ConsumeSelection(); ok {
+		if !h.ensureActionMenuTarget(id) {
+			return h, cmd
+		}
 		model, actionCmd := h.dispatchAction(id)
 		return model, tea.Batch(cmd, actionCmd)
 	}
 	return h, cmd
+}
+
+// actionUsesMenuTarget identifies commands whose meaning depends on the row
+// selected when the menu opened. Keeping this separate from current
+// availability is essential: a refresh can leave the same cursor index pointing
+// at a different session, and rechecking only the new row would authorize the
+// action against the wrong target.
+func actionUsesMenuTarget(id ActionID) bool {
+	switch id {
+	case ActionSearch, ActionImport, ActionReload,
+		ActionTogglePreview, ActionCycleGroupView, ActionViewArchived,
+		ActionWatcherPanel, ActionSettings, ActionHelp, ActionQuit,
+		ActionNavigateUp, ActionNavigateDown, ActionPageUp, ActionPageDown,
+		ActionFullPageUp, ActionFullPageDown, ActionFirstItem, ActionLastItem,
+		ActionPreviewSmaller, ActionPreviewLarger, ActionPreviewOrientation,
+		ActionQuickOpen, ActionClearFilter, ActionFilterRunning, ActionFilterWaiting,
+		ActionFilterIdle, ActionFilterErrorOrCost, ActionFilterOpen,
+		ActionJumpRootGroup1, ActionJumpRootGroup2, ActionJumpRootGroup3,
+		ActionJumpRootGroup4, ActionJumpRootGroup5, ActionJumpRootGroup6,
+		ActionJumpRootGroup7, ActionJumpRootGroup8, ActionJumpRootGroup9,
+		ActionJumpMode, ActionHubAdmin, ActionFeedback, ActionKeyboardShortcuts,
+		ActionBulkRemoveErrored, ActionCostDashboard, ActionUndoDelete,
+		ActionSwitchSession, ActionDetach:
+		return false
+	default:
+		return true
+	}
+}
+
+func (h *Home) ensureActionMenuTarget(id ActionID) bool {
+	if !actionUsesMenuTarget(id) {
+		return true
+	}
+	if h.actionMenuHasTarget && h.restoreSelectedItemIdentityExact(h.actionMenuTarget) {
+		return true
+	}
+	// These creation actions are context-aware when a row exists, but remain
+	// valid global actions when the menu opened with no selection at all.
+	if !h.actionMenuHasTarget {
+		switch id {
+		case ActionNewSession, ActionQuickCreate, ActionCreateGroup:
+			return true
+		}
+	}
+	h.setError(fmt.Errorf("%s: selected item changed while the menu was open", actionLabel(id)))
+	return false
 }
 
 func (h *Home) handleShortcutSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -211,6 +266,7 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	isRemoteSession := item.Type == session.ItemTypeRemoteSession && item.RemoteSession != nil
 	isHubSession := item.Type == session.ItemTypeHubSession && item.HubSession != nil
 	isHubGroup := item.Type == session.ItemTypeHubGroup
+	isHubNode := item.Type == session.ItemTypeHubNode
 	tool := ""
 	if isLocalSession {
 		tool = item.Session.Tool
@@ -223,13 +279,14 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	supported := false
 	switch id {
 	case ActionOpen:
-		supported = item.Type != session.ItemTypeDivider
+		supported = isLocalSession || isLocalGroup || isWindow || isRemoteSession ||
+			item.Type == session.ItemTypeRemoteGroup || isHubSession
 	case ActionRename:
 		supported = isLocalSession || isLocalGroup || isRemoteSession || isHubSession || isHubGroup || item.Type == session.ItemTypeHubNode
 	case ActionRestart:
-		supported = isLocalSession || isRemoteSession || isHubSession
+		supported = (isLocalSession && item.Session.CanRestart()) || isRemoteSession || isHubSession
 	case ActionRestartFresh:
-		supported = isLocalSession || isHubSession
+		supported = (isLocalSession && item.Session.CanRestartFresh()) || isHubSession
 	case ActionDelete:
 		supported = isLocalSession || isLocalGroup || isRemoteSession || isHubSession || isHubGroup || item.Type == session.ItemTypeHubNode
 	case ActionCloseSession:
@@ -261,7 +318,8 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 	case ActionCopyPane:
 		supported = isLocalSession
 	case ActionExecShell:
-		supported = isLocalSession || isHubSession
+		supported = (isLocalSession && item.Session.IsSandboxed() && strings.TrimSpace(item.Session.SandboxContainer) != "") ||
+			(isHubSession && item.HubSession.Sandbox != nil && item.HubSession.Sandbox.Enabled && strings.TrimSpace(item.HubSession.SandboxContainer) != "")
 	case ActionOpenShellHere:
 		supported = isLocalSession
 	case ActionEditNotes:
@@ -274,15 +332,26 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 		supported = isLocalSession
 	case ActionOpenNewWindow:
 		supported = isLocalSession || isRemoteSession
-	case ActionToggleExpand, ActionCollapse:
-		supported = item.Type == session.ItemTypeGroup || item.Type == session.ItemTypeRemoteGroup ||
-			isLocalSession || isHubSession || isWindow
+	case ActionToggleExpand:
+		supported = isLocalGroup || item.Type == session.ItemTypeRemoteGroup ||
+			(isLocalSession && h.sessionHasWindows(item)) || (isHubSession && h.hubSessionHasWindows(item))
+	case ActionCollapse:
+		supported = isLocalGroup || item.Type == session.ItemTypeRemoteGroup || isRemoteSession ||
+			isLocalSession || isWindow || (isHubSession && h.hubSessionHasWindows(item))
 	case ActionMoveUp, ActionMoveDown:
 		supported = isLocalSession || isLocalGroup || isRemoteSession || item.Type == session.ItemTypeRemoteGroup || isHubGroup
-	case ActionPromote, ActionDemote, ActionCyclePin:
+	case ActionPromote, ActionDemote:
+		supported = isLocalSession || isHubNode
+	case ActionCyclePin:
 		supported = isLocalSession
 	case ActionRemoveSession:
-		supported = isLocalSession || isHubSession
+		if isLocalSession {
+			status := item.Session.GetStatusThreadSafe()
+			supported = status == session.StatusStopped || status == session.StatusError
+		} else if isHubSession {
+			status := session.Status(strings.TrimSpace(item.HubSession.Status))
+			supported = status == session.StatusStopped || status == session.StatusError
+		}
 	case ActionInsertMode:
 		supported = isLocalSession
 	case ActionCopyInfo, ActionCopyCodeBlock:

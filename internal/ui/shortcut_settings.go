@@ -304,8 +304,8 @@ func (s *ShortcutSettings) assignBinding(definition ActionDefinition, binding st
 	if binding == "" {
 		return fmt.Errorf("%s: press a supported key", definition.Label)
 	}
-	if strings.EqualFold(binding, "space") || binding == " " {
-		return fmt.Errorf("%s cannot use Space because Space opens the global menu", definition.Label)
+	if isReservedOverviewBinding(binding) {
+		return fmt.Errorf("%s cannot use reserved overview key %q", definition.Label, binding)
 	}
 	if !supportedHotkeyBinding(binding) {
 		return fmt.Errorf("%s cannot use unsupported key %q", definition.Label, binding)

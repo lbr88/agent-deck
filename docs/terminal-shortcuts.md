@@ -18,9 +18,10 @@ dialogs still guard destructive actions.
 
 ### Configure optional accelerators
 
-Open **Space → Application → Keyboard shortcuts**. Each action can be toggled
-individually or rebound. Agent Deck rejects unsupported keys and collisions
-before saving, and names both conflicting actions. Changes apply immediately.
+Open **Space → Application → Keyboard shortcuts**. Each optional accelerator
+can be toggled individually or rebound. Agent Deck rejects unsupported keys and
+collisions before saving, and names both conflicting actions. Changes apply
+immediately.
 
 - `Alt+M` applies the Menu-first preset after confirmation. It disables all
   optional accelerators while retaining the essential controls and attached

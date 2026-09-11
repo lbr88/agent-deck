@@ -58,10 +58,10 @@ The menu contains:
 5. `Application` actions such as settings, keyboard shortcuts, help, update,
    and quit.
 
-The menu is searchable by typing. Up/Down changes selection, Enter runs the
-highlighted action, Right enters a submenu where needed, Left returns, and
-Escape closes or returns one level. Disabled actions remain visible only when
-their explanation helps the user understand why they are unavailable.
+The menu is a single searchable list with category headings, avoiding another
+navigation level. Typing filters it, Up/Down changes selection, Enter runs the
+highlighted action, and Escape closes it. Disabled actions remain visible only
+when their explanation helps the user understand why they are unavailable.
 
 ### Context actions
 
@@ -149,7 +149,7 @@ dispatcher.
 
 ### Menu model
 
-Add a focused Bubble Tea model responsible for filtering, navigation, nested
+Add a focused Bubble Tea model responsible for filtering, navigation, grouped
 categories, rendering, and returning a selected action ID. It receives an
 already-evaluated list of action descriptors and does not mutate sessions
 directly.

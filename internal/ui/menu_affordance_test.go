@@ -44,6 +44,25 @@ func TestMenuAffordanceClickOpensWithoutSelectedRow(t *testing.T) {
 	}
 }
 
+func TestMenuAffordanceBoundsUseTerminalCellsAfterUnicodeHints(t *testing.T) {
+	inst := session.NewInstanceWithGroupAndTool("unicode-prefix", ".", session.DefaultGroupPath, "codex")
+	home := newTestHomeWithItems(120, 30, []session.Item{{Type: session.ItemTypeSession, Session: inst}})
+	home.footerMode = session.FooterCurated
+	home.shortcutMode = shortcutModeLegacy
+	home.setHotkeys(resolveHotkeysForMode(nil, shortcutModeLegacy))
+
+	line := strings.Split(ansi.Strip(home.renderHelpBar()), "\n")[1]
+	byteIndex := strings.Index(line, menuAffordanceText)
+	if byteIndex < 0 {
+		t.Fatalf("footer missing %q: %q", menuAffordanceText, line)
+	}
+	wantX := ansi.StringWidth(line[:byteIndex])
+	gotX, _, _ := home.menuAffordanceBounds()
+	if gotX != wantX {
+		t.Fatalf("menu click starts at terminal cell %d, want %d for footer %q", gotX, wantX, line)
+	}
+}
+
 func TestHelpDisabledShortcutIsOmitted(t *testing.T) {
 	help := NewHelpOverlay()
 	help.SetSize(120, 80)
