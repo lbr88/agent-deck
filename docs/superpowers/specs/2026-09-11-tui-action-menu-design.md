@@ -107,7 +107,9 @@ stores an empty string. Explicit user bindings remain enabled after upgrade.
 The screen provides two explicit presets:
 
 - `Menu-first`: disable every optional shortcut.
-- `Legacy`: restore the historical default shortcut set.
+- `Legacy`: restore the historical default shortcut set where it does not
+  conflict with structural menu controls. Because `Space` is reserved for the
+  global menu, legacy jump mode uses `Alt+Space`.
 
 Applying a preset is previewed and requires confirmation because it changes many
 bindings. Individual changes apply without a confirmation dialog.
