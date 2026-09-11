@@ -127,6 +127,7 @@ const (
 	ActionNthGroupSession8     ActionID = hotkeyNthGroupSession8
 	ActionNthGroupSession9     ActionID = hotkeyNthGroupSession9
 	ActionOpen                 ActionID = "open"
+	ActionKeyboardShortcuts    ActionID = "keyboard_shortcuts"
 )
 
 // ActionDefinition contains presentation and accelerator metadata. Runtime
@@ -255,6 +256,7 @@ func actionDefinitions() []ActionDefinition {
 		hotkeyAction(hotkeyNthGroupSession8, "Jump to session 8 in group", ActionCategoryView),
 		hotkeyAction(hotkeyNthGroupSession9, "Jump to session 9 in group", ActionCategoryView),
 		hotkeyAction(hotkeySettings, "Settings", ActionCategoryApp),
+		{ID: ActionKeyboardShortcuts, Label: "Keyboard shortcuts", Category: ActionCategoryApp},
 		hotkeyAction(hotkeyHelp, "Help", ActionCategoryApp),
 		hotkeyAction(hotkeyFeedback, "Send feedback", ActionCategoryApp),
 		hotkeyAction(hotkeySwitchSession, "Switch session while attached", ActionCategoryApp),

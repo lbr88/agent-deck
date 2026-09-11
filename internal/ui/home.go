@@ -262,6 +262,7 @@ type Home struct {
 
 	// Components
 	actionMenu                *ActionMenu
+	shortcutSettings          *ShortcutSettings
 	search                    *Search
 	globalSearch              *GlobalSearch              // Global session search across all Claude conversations
 	globalSearchIndex         *session.GlobalSearchIndex // Search index (nil if disabled)
@@ -1764,6 +1765,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		storage:              storage,
 		storageWarning:       storageWarning,
 		actionMenu:           NewActionMenu(),
+		shortcutSettings:     NewShortcutSettings(),
 		search:               NewSearch(),
 		newDialog:            NewNewDialog(),
 		groupDialog:          NewGroupDialog(),
@@ -7403,6 +7405,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.actionMenu != nil {
 			h.actionMenu.SetSize(msg.Width, msg.Height)
 		}
+		if h.shortcutSettings != nil {
+			h.shortcutSettings.SetSize(msg.Width, msg.Height)
+		}
 		// Issue #1366: a resize can reveal the preview pane (single -> stacked/dual).
 		// fetchSelectedPreview self-guards to nil in single-column, so this only
 		// fetches when a preview pane is actually visible.
@@ -9879,6 +9884,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if h.actionMenu != nil && h.actionMenu.IsVisible() {
 			return h.handleActionMenuKey(msg)
 		}
+		if h.shortcutSettings != nil && h.shortcutSettings.IsVisible() {
+			return h.handleShortcutSettingsKey(msg)
+		}
 
 		// Handle setup wizard first (modal, blocks everything)
 		if h.setupWizard.IsVisible() {
@@ -11064,6 +11072,7 @@ func (h *Home) finishJumpMode() (bool, tea.Cmd) {
 func (h *Home) hasModalVisible() bool {
 	return h.initialLoading || h.isQuitting || h.notesEditing || h.jumpMode ||
 		(h.actionMenu != nil && h.actionMenu.IsVisible()) ||
+		(h.shortcutSettings != nil && h.shortcutSettings.IsVisible()) ||
 		h.setupWizard.IsVisible() || h.settingsPanel.IsVisible() ||
 		(h.toolVisibilityPanel != nil && h.toolVisibilityPanel.IsVisible()) ||
 		h.watcherPanel.IsVisible() || // hotkeyWatcherPanel overlay
@@ -12159,6 +12168,15 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 		// Open settings panel
 		h.settingsPanel.Show()
 		h.settingsPanel.SetSize(h.width, h.height)
+		return h, nil
+
+	case string(ActionKeyboardShortcuts):
+		if h.shortcutSettings == nil {
+			h.shortcutSettings = NewShortcutSettings()
+		}
+		cfg, _ := session.LoadUserConfig()
+		h.shortcutSettings.Show(cfg)
+		h.shortcutSettings.SetSize(h.width, h.height)
 		return h, nil
 
 	case hotkeyWatcherPanel:
@@ -20343,6 +20361,9 @@ func (h *Home) renderFrame() string {
 	// Overlays take full screen
 	if h.actionMenu != nil && h.actionMenu.IsVisible() {
 		return h.actionMenu.View()
+	}
+	if h.shortcutSettings != nil && h.shortcutSettings.IsVisible() {
+		return h.shortcutSettings.View()
 	}
 	if h.helpOverlay.IsVisible() {
 		return h.helpOverlay.View()

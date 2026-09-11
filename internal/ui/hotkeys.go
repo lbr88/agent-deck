@@ -496,7 +496,14 @@ func normalizeHotkeyBinding(key string) string {
 	if len([]rune(key)) == 1 {
 		return key
 	}
-	return strings.ToLower(key)
+	parts := strings.Split(key, "+")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+		if i < len(parts)-1 || len([]rune(parts[i])) != 1 {
+			parts[i] = strings.ToLower(parts[i])
+		}
+	}
+	return strings.Join(parts, "+")
 }
 
 func supportedHotkeyBinding(key string) bool {

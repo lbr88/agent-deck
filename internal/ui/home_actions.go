@@ -29,6 +29,63 @@ func (h *Home) handleActionMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return h, cmd
 }
 
+func (h *Home) handleShortcutSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if h.shortcutSettings == nil || !h.shortcutSettings.IsVisible() {
+		return h, nil
+	}
+	panel, cmd := h.shortcutSettings.Update(msg)
+	h.shortcutSettings = panel
+	if h.shortcutSettings.ConsumeSave() {
+		mode, bindings, err := h.shortcutSettings.Bindings()
+		if err == nil {
+			err = saveShortcutPreferences(mode, bindings)
+		}
+		if err != nil {
+			h.shortcutSettings.errText = err.Error()
+			return h, cmd
+		}
+		h.shortcutMode = mode
+		h.setHotkeys(resolveHotkeysForMode(bindings, mode))
+		h.shortcutSettings.Hide()
+	}
+	return h, cmd
+}
+
+var saveShortcutUserConfig = session.SaveUserConfig
+
+// saveShortcutPreferences merges only the shortcut-owned fields onto the full
+// current config before saving. This prevents the shortcut screen from
+// dropping unrelated sections it neither displays nor understands.
+func saveShortcutPreferences(mode string, bindings map[string]string) error {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != shortcutModeMenu && mode != shortcutModeLegacy {
+		return fmt.Errorf("invalid shortcut mode %q", mode)
+	}
+	known := make(map[string]string)
+	for action, key := range bindings {
+		if _, ok := defaultHotkeyBindings[action]; ok {
+			known[action] = key
+		}
+	}
+	if err := validateHotkeyBindings(known); err != nil {
+		return err
+	}
+	cfg, err := session.LoadUserConfig()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &session.UserConfig{}
+	}
+	merged := *cfg
+	merged.UI.ShortcutMode = mode
+	merged.Hotkeys = make(map[string]string, len(bindings))
+	for action, key := range bindings {
+		merged.Hotkeys[action] = key
+	}
+	return saveShortcutUserConfig(&merged)
+}
+
 // dispatchAction is the common entry point for menu choices and enabled
 // shortcuts. handleMainDispatch switches on the stable action ID for action
 // commands and on the literal key only for structural navigation controls.
@@ -113,7 +170,7 @@ func (h *Home) actionAvailability(id ActionID) (enabled bool, reason string, inc
 		ActionJumpRootGroup1, ActionJumpRootGroup2, ActionJumpRootGroup3,
 		ActionJumpRootGroup4, ActionJumpRootGroup5, ActionJumpRootGroup6,
 		ActionJumpRootGroup7, ActionJumpRootGroup8, ActionJumpRootGroup9,
-		ActionJumpMode, ActionHubAdmin, ActionFeedback:
+		ActionJumpMode, ActionHubAdmin, ActionFeedback, ActionKeyboardShortcuts:
 		return true, "", true
 	case ActionBulkRemoveErrored:
 		for _, inst := range h.instances {
