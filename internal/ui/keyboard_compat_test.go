@@ -730,17 +730,15 @@ func TestCSIuReader_Underscore(t *testing.T) {
 	}
 }
 
-// TestRestoreLegacyKeyboardCmd verifies that the helper returned by
-// RestoreLegacyKeyboardCmd writes the Kitty pop sequence to the supplied
-// writer and returns a no-op message. This is a regression guard for the
-// tmux re-enter fix from PR #613: if a future refactor drops the
-// DisableKittyKeyboard call from the Update handler, the integration test
-// below fails; if a refactor changes the escape sequence, this test fails.
-func TestRestoreLegacyKeyboardCmd(t *testing.T) {
+// TestEnableTUIKeyboardProtocolsCmd verifies that attach return resets any keyboard
+// mode left by tmux and re-enables the protocols the dashboard consumes. A
+// Kitty pop by itself leaves Bubble Tea's alternate screen in legacy mode, so
+// Alacritty collapses Ctrl+Tab to ordinary Tab after the first attach.
+func TestEnableTUIKeyboardProtocolsCmd(t *testing.T) {
 	var buf bytes.Buffer
-	cmd := RestoreLegacyKeyboardCmd(&buf)
+	cmd := EnableTUIKeyboardProtocolsCmd(&buf)
 	if cmd == nil {
-		t.Fatal("RestoreLegacyKeyboardCmd returned nil")
+		t.Fatal("EnableTUIKeyboardProtocolsCmd returned nil")
 	}
 
 	msg := cmd()
@@ -749,9 +747,9 @@ func TestRestoreLegacyKeyboardCmd(t *testing.T) {
 	}
 
 	got := buf.String()
-	want := "\x1b[<u"
+	want := "\x1b[<u\x1b[>1u\x1b[>4;1m"
 	if got != want {
-		t.Errorf("cmd() wrote %q to writer, want %q (Kitty pop sequence)", got, want)
+		t.Errorf("cmd() wrote %q to writer, want %q (dashboard protocol reset)", got, want)
 	}
 }
 

@@ -4767,6 +4767,10 @@ func (h *Home) Init() tea.Cmd {
 	}
 
 	cmds := []tea.Cmd{
+		// Bubble Tea has entered its alternate screen before Init runs. Kitty
+		// keyboard state is screen-local, so enabling it here (rather than before
+		// Program.Run) is what makes physical Ctrl+Tab distinct in Alacritty.
+		EnableTUIKeyboardProtocolsCmd(os.Stdout),
 		h.loadSessions,
 
 		h.tick(),
@@ -8710,13 +8714,14 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// create+attach. Mirror the statusUpdateMsg attach-return cleanup so
 		// detaching from a newly created remote session leaves the terminal in
 		// the same state as detaching from an existing one: re-enable mouse
-		// reporting, restore legacy keyboard mode, force a resize, and schedule
+		// reporting, restore the dashboard keyboard protocols, force a resize,
+		// and schedule
 		// the delayed repaint (see the statusUpdateMsg case for the rationale).
 		h.beginAttachReturnGrace(time.Now())
 		return h, tea.Batch(
 			h.fetchRemoteSessions,
 			tea.EnableMouseCellMotion,
-			RestoreLegacyKeyboardCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsCmd(os.Stdout),
 			tea.WindowSize(),
 			tea.Tick(attachReturnRefreshDelay, func(time.Time) tea.Msg { return attachReturnRefreshMsg{} }),
 		)
@@ -9136,8 +9141,13 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if reloading {
 			// syncCmd still has to run: the inline refresh it replaced happened
 			// before this early return, so dropping it here would leave the row we
-			// just detached from unreconciled.
-			return h, tea.Batch(tea.EnableMouseCellMotion, syncCmd)
+			// just detached from unreconciled. Keyboard protocols must also be
+			// restored after Bubble Tea re-enters its alternate screen.
+			return h, tea.Batch(
+				tea.EnableMouseCellMotion,
+				EnableTUIKeyboardProtocolsCmd(os.Stdout),
+				syncCmd,
+			)
 		}
 
 		h.followAttachReturnCwd(msg)
@@ -9148,9 +9158,9 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// We'll let the next tickMsg handle background save if needed.
 
 		// Re-enable mouse mode after returning from tea.Exec (tmux detach-client
-		// resets mouse reporting), restore legacy keyboard reporting (tmux's
-		// extended-keys setting leaves Kitty/modifyOtherKeys on the outer terminal;
-		// see RestoreLegacyKeyboardCmd for the full rationale), force-poll
+		// resets mouse reporting), restore the dashboard keyboard protocols after
+		// Bubble Tea re-enters its alternate screen (see
+		// EnableTUIKeyboardProtocolsCmd), force-poll
 		// terminal dimensions (#936: SIGWINCH propagation through nested SSH is
 		// late or lost — a host-terminal Cmd++ zoom during attach would otherwise
 		// land us back in the menu with stale pre-zoom column counts, making the
@@ -9159,7 +9169,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cache changes that settle just after tmux restores the outer client.
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
-			RestoreLegacyKeyboardCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsCmd(os.Stdout),
 			tea.WindowSize(),
 			syncCmd,
 			tea.Tick(attachReturnRefreshDelay, func(time.Time) tea.Msg { return attachReturnRefreshMsg{} }),
@@ -9198,7 +9208,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
-			RestoreLegacyKeyboardCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsCmd(os.Stdout),
 			tea.WindowSize(),
 			syncCmd,
 			switchCmd,
@@ -9222,7 +9232,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		captureCmd := h.openScrollbackPager(msg.fromSessionID)
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
-			RestoreLegacyKeyboardCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsCmd(os.Stdout),
 			tea.WindowSize(),
 			syncCmd,
 			captureCmd,
@@ -13592,6 +13602,10 @@ func (h *Home) performFinalShutdown(shutdownPool bool) tea.Cmd {
 		h.saveUIState()
 		// Save both instances AND groups on quit (critical fix: was losing groups!)
 		h.saveInstances()
+		// This command still runs while Bubble Tea owns the alternate screen.
+		// Pop the keyboard mode there before Bubble Tea switches back to the
+		// user's main screen.
+		DisableTUIKeyboardProtocols(os.Stdout)
 
 		return tea.Quit()
 	}

@@ -52,21 +52,19 @@ func DisableKittyKeyboard(w io.Writer) {
 	_, _ = io.WriteString(w, "\x1b[<u")
 }
 
-// RestoreLegacyKeyboardCmd returns a tea.Cmd that pops the Kitty keyboard
-// protocol stack, restoring legacy key reporting on the given writer.
+// EnableTUIKeyboardProtocolsCmd returns a tea.Cmd that resets any keyboard
+// mode left by the foreground process and enables the protocols consumed by
+// the dashboard on the given writer.
 //
-// This is the cleanup half of the attach/detach symmetry: when the dashboard
-// hands control to tmux via tea.Exec, tmux's extended-keys setting activates
-// Kitty/modifyOtherKeys on the outer terminal. Those settings persist after
-// the user detaches, so the outer terminal keeps sending CSI u sequences that
-// Bubble Tea v1.3.10 cannot parse, silently dropping shifted keys (capitals)
-// on the dashboard. Dispatching this command after tea.Exec returns undoes the
-// state tmux set.
+// Bubble Tea invokes Home.Init after entering its alternate screen and invokes
+// attach callbacks after restoring that screen. Kitty-compatible terminals
+// keep separate keyboard state for the main and alternate screens, so both
+// boundaries must enable the protocol after the alternate screen is active.
 //
 // Takes a writer so tests can substitute a buffer for os.Stdout.
-func RestoreLegacyKeyboardCmd(w io.Writer) tea.Cmd {
+func EnableTUIKeyboardProtocolsCmd(w io.Writer) tea.Cmd {
 	return func() tea.Msg {
-		DisableKittyKeyboard(w)
+		EnableTUIKeyboardProtocols(w)
 		return nil
 	}
 }
