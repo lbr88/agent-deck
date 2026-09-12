@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -118,6 +119,66 @@ func TestEnhancedKeyboardInputKeepsPressAndFinalCtrlReleaseAcrossChunks(t *testi
 	want := string([]rune{testCtrlTabMarker, testCtrlReleaseMarker})
 	if string(got) != want {
 		t.Fatalf("translated chunked press/release stream to %q, want %q", string(got), want)
+	}
+}
+
+func TestCtrlReleaseHandoffCancellationPopsAttachedScreenMode(t *testing.T) {
+	var output bytes.Buffer
+	begin, cancel := ctrlReleaseHandoffCallbacks(&output)
+	begin()
+	cancel()
+	if got, want := output.String(), "\x1b[>27u\x1b[<u"; got != want {
+		t.Fatalf("cancelled Ctrl release handoff wrote %q, want %q", got, want)
+	}
+}
+
+func TestCtrlReleaseHandoffPersistsUntilDashboardRestore(t *testing.T) {
+	var output bytes.Buffer
+	begin, _ := ctrlReleaseHandoffCallbacks(&output)
+	begin()
+	if msg := EnableTUIKeyboardProtocolsAfterSwitchCmd(&output, false)(); msg != nil {
+		t.Fatalf("dashboard keyboard restore returned %#v, want nil", msg)
+	}
+	if got, want := output.String(), "\x1b[>27u\x1b[<u\x1b[>27u\x1b[>4;1m"; got != want {
+		t.Fatalf("Ctrl release handoff and dashboard restore wrote %q, want %q", got, want)
+	}
+}
+
+func TestKeyboardRestoreRelaysCoalescedCtrlReleaseAfterProtocolWrite(t *testing.T) {
+	var output bytes.Buffer
+	msg := EnableTUIKeyboardProtocolsAfterSwitchCmd(&output, true)()
+	if got, want := output.String(), "\x1b[<u\x1b[>27u\x1b[>4;1m"; got != want {
+		t.Fatalf("dashboard keyboard restore wrote %q, want %q", got, want)
+	}
+	key, ok := msg.(tea.KeyMsg)
+	if !ok || string(key.Runes) != string(testCtrlReleaseMarker) {
+		t.Fatalf("restore command returned %#v, want final Ctrl release marker", msg)
+	}
+}
+
+func TestQuickSwitchIntentPreservesNativeReleaseLifecycle(t *testing.T) {
+	tests := []struct {
+		intent         tmux.SwitchIntent
+		direction      switcherDirection
+		waitForRelease bool
+		ctrlReleased   bool
+	}{
+		{tmux.SwitchNone, switcherStay, false, false},
+		{tmux.SwitchNextRequested, switcherNext, true, false},
+		{tmux.SwitchPreviousRequested, switcherPrevious, true, false},
+		{tmux.SwitchNextFallbackRequested, switcherNext, false, false},
+		{tmux.SwitchPreviousFallbackRequested, switcherPrevious, false, false},
+		{tmux.SwitchNextReleasedRequested, switcherNext, true, true},
+		{tmux.SwitchPreviousReleasedRequested, switcherPrevious, true, true},
+	}
+
+	for _, tt := range tests {
+		direction, waitForRelease, ctrlReleased := quickSwitchIntent(tt.intent)
+		if direction != tt.direction || waitForRelease != tt.waitForRelease || ctrlReleased != tt.ctrlReleased {
+			t.Fatalf("quickSwitchIntent(%v) = (%v, %v, %v), want (%v, %v, %v)",
+				tt.intent, direction, waitForRelease, ctrlReleased,
+				tt.direction, tt.waitForRelease, tt.ctrlReleased)
+		}
 	}
 }
 
@@ -287,6 +348,24 @@ func TestArrowBrowsingCancelsNativeCtrlReleaseCommit(t *testing.T) {
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{testCtrlReleaseMarker}})
 	if !h.sessionSwitcher.IsVisible() {
 		t.Fatal("Ctrl release must not commit after arrow navigation switches to deliberate browsing")
+	}
+}
+
+func TestNativeCtrlTabInvalidatesPendingFallbackTimer(t *testing.T) {
+	h := quickSwitchHome()
+	h.sessionSwitcher.Show("a", h.instances, nil)
+	_, _ = h.handleSessionSwitcherKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	staleGeneration := h.sessionSwitcher.commitGen
+
+	h.sessionSwitcher.lastCycleAt = time.Time{}
+	_, _ = h.handleSessionSwitcherKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{testCtrlTabMarker}})
+	if h.sessionSwitcher.commitGen == staleGeneration {
+		t.Fatal("native Ctrl+Tab must invalidate the pending fallback timer")
+	}
+
+	_ = h.handleSwitcherCommit(switcherCommitMsg{gen: staleGeneration})
+	if !h.sessionSwitcher.IsVisible() {
+		t.Fatal("stale fallback timer committed while native Ctrl+Tab was still held")
 	}
 }
 

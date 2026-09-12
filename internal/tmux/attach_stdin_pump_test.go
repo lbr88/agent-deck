@@ -216,6 +216,68 @@ func TestAttachStdinPump_ReportsEnhancedCtrlTabDirection(t *testing.T) {
 	}
 }
 
+func TestAttachStdinPump_CarriesCoalescedFinalCtrlRelease(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  SwitchIntent
+	}{
+		{
+			name:  "next",
+			input: "\x1b[9;5:1u\x1b[9;5:3u\x1b[57442;1:3u",
+			want:  SwitchNextReleasedRequested,
+		},
+		{
+			name:  "previous with Shift held",
+			input: "\x1b[9;6:1u\x1b[9;6:3u\x1b[57448;2:3u",
+			want:  SwitchPreviousReleasedRequested,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pump, w, _ := newTestPump(t, AttachOptions{})
+			done := runPump(context.Background(), pump)
+			if _, err := w.Write([]byte(tt.input)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			select {
+			case res := <-done:
+				if !res.interrupted || res.outcome != tt.want {
+					t.Fatalf("pump result = %+v, want interrupted with intent %v", res, tt.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("pump did not exit on coalesced Ctrl+Tab press/release")
+			}
+		})
+	}
+}
+
+func TestAttachStdinPump_BeginsCtrlReleaseHandoffBeforeReturning(t *testing.T) {
+	prepared := make(chan struct{}, 1)
+	pump, w, _ := newTestPump(t, AttachOptions{
+		BeginCtrlReleaseHandoff: func() { prepared <- struct{}{} },
+	})
+	done := runPump(context.Background(), pump)
+
+	if _, err := w.Write([]byte("\x1b[9;5u")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case <-prepared:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native switch did not begin Ctrl-release reporting before pump return")
+	}
+	select {
+	case res := <-done:
+		if res.outcome != SwitchNextRequested {
+			t.Fatalf("outcome = %v, want SwitchNextRequested", res.outcome)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pump did not return after preparing Ctrl-release handoff")
+	}
+}
+
 // TestAttachStdinPump_StopsOnEOF covers the closed-stdin path: the pump must
 // report a non-interrupt exit rather than spinning on a dead descriptor.
 func TestAttachStdinPump_StopsOnEOF(t *testing.T) {
@@ -243,8 +305,8 @@ func TestAttachStdinPump_StopsOnEOF(t *testing.T) {
 //
 // These pin the two invariants cleanupAttach depends on and that the pump tests
 // above cannot see: that the stdin reader is joined BEFORE the input queue is
-// flushed, and that the flush runs on every exit path rather than only after a
-// detach keypress.
+// flushed, and that the caller-selected queue policy runs on every exit path
+// rather than only after a detach keypress.
 
 func TestQuiesceAttachInput_WaitsForReaderBeforeFlushing(t *testing.T) {
 	readerDone := make(chan struct{})
@@ -299,10 +361,11 @@ func TestQuiesceAttachInput_WaitsForReaderBeforeFlushing(t *testing.T) {
 }
 
 // TestQuiesceAttachInput_FlushesOnEveryExitPath guards the removal of the old
-// `if didDetach` gate. The flush used to run only when the user pressed the
-// detach key; on the process-exit path the stale reader incidentally swallowed
-// the terminal's capability replies instead. With the reader now stopping
-// cleanly, skipping the flush here would let those bytes reach the TUI.
+// `if didDetach` gate. The usual flush used to run only when the user pressed
+// the detach key; on the process-exit path the stale reader incidentally
+// swallowed the terminal's capability replies instead. With the reader now
+// stopping cleanly, skipping the caller-selected policy here would let those
+// bytes reach the TUI. Native Ctrl+Tab intentionally injects a no-op policy.
 func TestQuiesceAttachInput_FlushesOnEveryExitPath(t *testing.T) {
 	readerDone := make(chan struct{})
 	close(readerDone) // reader already gone, as on a process-exit teardown

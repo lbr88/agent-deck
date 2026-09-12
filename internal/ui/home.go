@@ -943,11 +943,14 @@ func (h *Home) attachOptions(sess *tmux.Session) tmux.AttachOptions {
 	if scrollByte == detach || (switchByte != 0 && scrollByte == switchByte) {
 		scrollByte = 0
 	}
+	beginCtrlReleaseHandoff, cancelCtrlReleaseHandoff := ctrlReleaseHandoffCallbacks(os.Stdout)
 	opts := tmux.AttachOptions{
-		DetachByte:         detach,
-		SwitchKeyByte:      switchByte,
-		ScrollbackKeyByte:  scrollByte,
-		ScrollbackOnPageUp: scroll.OnPageUp,
+		DetachByte:               detach,
+		SwitchKeyByte:            switchByte,
+		ScrollbackKeyByte:        scrollByte,
+		ScrollbackOnPageUp:       scroll.OnPageUp,
+		BeginCtrlReleaseHandoff:  beginCtrlReleaseHandoff,
+		CancelCtrlReleaseHandoff: cancelCtrlReleaseHandoff,
 	}
 	// Gate the bare-PageUp trigger on the pane's screen state: when the attached
 	// app is in the alternate screen (Claude fullscreen), leave PageUp for the
@@ -1553,11 +1556,31 @@ const (
 	switcherPrevious
 )
 
+func quickSwitchIntent(intent tmux.SwitchIntent) (direction switcherDirection, waitForRelease, ctrlReleased bool) {
+	switch intent {
+	case tmux.SwitchNextRequested:
+		return switcherNext, true, false
+	case tmux.SwitchPreviousRequested:
+		return switcherPrevious, true, false
+	case tmux.SwitchNextFallbackRequested:
+		return switcherNext, false, false
+	case tmux.SwitchPreviousFallbackRequested:
+		return switcherPrevious, false, false
+	case tmux.SwitchNextReleasedRequested:
+		return switcherNext, true, true
+	case tmux.SwitchPreviousReleasedRequested:
+		return switcherPrevious, true, true
+	default:
+		return switcherStay, false, false
+	}
+}
+
 type openSwitcherMsg struct {
 	fromSessionID   string // session we just detached from
 	attachedWorkDir string // pane_current_path captured after attach returns
 	quickDirection  switcherDirection
 	waitForRelease  bool // true for CSI-u; false for xterm modifyOtherKeys
+	ctrlReleased    bool // final Ctrl release was coalesced with the attached press
 }
 
 // openScrollbackMsg is emitted when the user pressed the scrollback trigger
@@ -9218,7 +9241,7 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
-			EnableTUIKeyboardProtocolsCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsAfterSwitchCmd(os.Stdout, msg.ctrlReleased),
 			tea.WindowSize(),
 			syncCmd,
 			switchCmd,
@@ -17774,24 +17797,13 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 					attachedWorkDir: fromWorkDir,
 				}
 			}
-			quickDirection := switcherStay
-			waitForRelease := false
-			if res.intent == tmux.SwitchNextRequested {
-				quickDirection = switcherNext
-				waitForRelease = true
-			} else if res.intent == tmux.SwitchPreviousRequested {
-				quickDirection = switcherPrevious
-				waitForRelease = true
-			} else if res.intent == tmux.SwitchNextFallbackRequested {
-				quickDirection = switcherNext
-			} else if res.intent == tmux.SwitchPreviousFallbackRequested {
-				quickDirection = switcherPrevious
-			}
+			quickDirection, waitForRelease, ctrlReleased := quickSwitchIntent(res.intent)
 			return openSwitcherMsg{
 				fromSessionID:   fromID,
 				attachedWorkDir: fromWorkDir,
 				quickDirection:  quickDirection,
 				waitForRelease:  waitForRelease,
+				ctrlReleased:    ctrlReleased,
 			}
 		}
 
@@ -26740,6 +26752,7 @@ func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.sessionSwitcher.cycle(true, time.Now())
 		return h, h.armSwitcherCommit()
 	case "ctrl+tab":
+		h.sessionSwitcher.bumpCommitGen()
 		h.sessionSwitcher.commitOnCtrlRelease = true
 		h.sessionSwitcher.cycle(true, time.Now())
 		return h, nil
@@ -26750,6 +26763,7 @@ func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.sessionSwitcher.cycle(false, time.Now())
 		return h, h.armSwitcherCommit()
 	case "ctrl+shift+tab":
+		h.sessionSwitcher.bumpCommitGen()
 		h.sessionSwitcher.commitOnCtrlRelease = true
 		h.sessionSwitcher.cycle(false, time.Now())
 		return h, nil

@@ -44,6 +44,26 @@ func TestIndexSwitchKey_PlainTabIgnored(t *testing.T) {
 	}
 }
 
+func TestNativeSwitchInputPreservation(t *testing.T) {
+	for _, intent := range []SwitchIntent{SwitchNextRequested, SwitchPreviousRequested} {
+		if !preserveInputForCtrlRelease(intent) {
+			t.Fatalf("preserveInputForCtrlRelease(%v) = false, want true", intent)
+		}
+	}
+	for _, intent := range []SwitchIntent{
+		SwitchNone,
+		SwitchRequested,
+		SwitchNextReleasedRequested,
+		SwitchPreviousReleasedRequested,
+		SwitchNextFallbackRequested,
+		SwitchPreviousFallbackRequested,
+	} {
+		if preserveInputForCtrlRelease(intent) {
+			t.Fatalf("preserveInputForCtrlRelease(%v) = true, want false", intent)
+		}
+	}
+}
+
 func TestIndexSwitchKey_EnhancedCtrlTabDirections(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -73,6 +73,24 @@ func EnableTUIKeyboardProtocolsCmd(w io.Writer) tea.Cmd {
 	}
 }
 
+// EnableTUIKeyboardProtocolsAfterSwitchCmd restores dashboard keyboard mode
+// after an attached session switch. When the attach reader already consumed
+// the final Ctrl release in the same read as Ctrl+Tab, the returned command
+// relays that release only after protocol restoration has completed.
+func EnableTUIKeyboardProtocolsAfterSwitchCmd(w io.Writer, ctrlReleased bool) tea.Cmd {
+	return func() tea.Msg {
+		EnableTUIKeyboardProtocols(w)
+		if !ctrlReleased {
+			return nil
+		}
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ctrlReleaseMarker}}
+	}
+}
+
+func ctrlReleaseHandoffCallbacks(w io.Writer) (begin, cancel func()) {
+	return func() { EnableKittyKeyboard(w) }, func() { DisableKittyKeyboard(w) }
+}
+
 // EnableKittyKeyboard writes the escape sequence that pushes the Kitty keyboard
 // flags consumed by NewCSIuReader onto the protocol stack: disambiguated escape
 // codes (1), event types (2), all keys as escape codes (8), and associated text
