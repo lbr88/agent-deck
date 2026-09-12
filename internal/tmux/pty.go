@@ -124,6 +124,12 @@ const (
 	SwitchNextRequested
 	// SwitchPreviousRequested is the Ctrl+Shift+Tab counterpart.
 	SwitchPreviousRequested
+	// SwitchNextFallbackRequested is the xterm modifyOtherKeys Ctrl+Tab
+	// counterpart. That protocol cannot report Ctrl release, so the caller uses
+	// its compatibility idle-commit path.
+	SwitchNextFallbackRequested
+	// SwitchPreviousFallbackRequested is the xterm Ctrl+Shift+Tab counterpart.
+	SwitchPreviousFallbackRequested
 )
 
 // pageUpSeq is the exact CSI sequence a bare PageUp emits. Modified variants
@@ -139,9 +145,11 @@ var enhancedSwitchKeys = [...]struct {
 	intent   SwitchIntent
 }{
 	{sequence: []byte("\x1b[9;5u"), intent: SwitchNextRequested},
-	{sequence: []byte("\x1b[27;5;9~"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[9;5:1u"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[27;5;9~"), intent: SwitchNextFallbackRequested},
 	{sequence: []byte("\x1b[9;6u"), intent: SwitchPreviousRequested},
-	{sequence: []byte("\x1b[27;6;9~"), intent: SwitchPreviousRequested},
+	{sequence: []byte("\x1b[9;6:1u"), intent: SwitchPreviousRequested},
+	{sequence: []byte("\x1b[27;6;9~"), intent: SwitchPreviousFallbackRequested},
 }
 
 // AttachOptions configures AttachWithOptions. The zero value attaches with the
@@ -248,7 +256,8 @@ func scrollbackPageUpAllowed(opts AttachOptions) bool {
 // The intent it returns is what the caller assigns to switchOutcome:
 //   - SwitchNone         => detach (or nothing found),
 //   - SwitchRequested    => open the session switcher on the origin,
-//   - SwitchNextRequested / SwitchPreviousRequested => open and advance,
+//   - SwitchNextRequested / SwitchPreviousRequested => open, advance, and wait for Ctrl release,
+//   - SwitchNextFallbackRequested / SwitchPreviousFallbackRequested => open, advance, and idle-commit,
 //   - ScrollbackRequested => open the scrollback pager.
 //
 // Extracted from the stdin goroutine so the precedence is unit-testable without

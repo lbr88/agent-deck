@@ -185,6 +185,10 @@ func TestAttachStdinPump_ReportsEnhancedCtrlTabDirection(t *testing.T) {
 	}{
 		{name: "next", input: "\x1b[9;5u", want: SwitchNextRequested},
 		{name: "previous", input: "\x1b[9;6u", want: SwitchPreviousRequested},
+		{name: "event next", input: "\x1b[9;5:1u", want: SwitchNextRequested},
+		{name: "event previous", input: "\x1b[9;6:1u", want: SwitchPreviousRequested},
+		{name: "fallback next", input: "\x1b[27;5;9~", want: SwitchNextFallbackRequested},
+		{name: "fallback previous", input: "\x1b[27;6;9~", want: SwitchPreviousFallbackRequested},
 	}
 
 	for _, tt := range tests {

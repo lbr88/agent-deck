@@ -11,11 +11,10 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
-// switcherIdleCommit is how long the switcher waits after the last quick-cycle
-// key before auto-committing to the highlighted session. It approximates
-// "switch when I let go of the key" — terminals do not deliver key-release
-// events, so we commit on a brief idle instead. Enter commits immediately; Esc
-// cancels; arrow-key navigation cancels the auto-commit (manual mode).
+// switcherIdleCommit is how long the switcher waits after the configurable
+// Ctrl-letter fallback before auto-committing. Native Ctrl+Tab uses CSI-u Ctrl
+// release events instead. Enter commits immediately; Esc cancels; arrow-key
+// navigation cancels the fallback auto-commit (manual mode).
 const switcherIdleCommit = 1 * time.Second
 
 // switcherRepeatGuard is the minimum gap between accepted quick-cycle
@@ -29,7 +28,8 @@ const switcherRepeatGuard = 80 * time.Millisecond
 // session. Ctrl+Tab / Ctrl+Shift+Tab cycle forward / backward; the configurable
 // Ctrl-letter fallback still opens on the origin and uses Ctrl+S / Ctrl+A for
 // cycling. Arrow keys browse, and the highlight is attached on Enter or after a
-// brief idle once quick cycling starts.
+// Ctrl release once native quick cycling starts (or a brief idle for the
+// configurable Ctrl-letter fallback).
 type SessionSwitcher struct {
 	visible       bool
 	width, height int
@@ -45,6 +45,9 @@ type SessionSwitcher struct {
 	labels           map[string]sessionRenderState
 	reattachOnCancel bool // Esc re-attaches to fromID (opened while attached) vs. just closing (opened from the overview)
 	hasOrigin        bool // fromID was present in the switchable list and occupies index zero
+	// commitOnCtrlRelease is true only while native Ctrl+Tab quick switching is
+	// active. A release event must not commit a picker opened by another route.
+	commitOnCtrlRelease bool
 	// commitGen is bumped on every open/cycle/cancel so a stale idle-commit
 	// timer (scheduled before a later keypress) is ignored when it fires. It is
 	// intentionally monotonic — never reset — so a timer from a previous
@@ -148,6 +151,7 @@ func (s *SessionSwitcher) Show(fromID string, allInstances []*session.Instance, 
 	s.fromID = fromID
 	s.hasOrigin = origin >= 0
 	s.subtitles = subtitles
+	s.commitOnCtrlRelease = false
 	return true
 }
 
@@ -163,6 +167,7 @@ func (s *SessionSwitcher) Hide() {
 	s.labels = nil
 	s.reattachOnCancel = false
 	s.hasOrigin = false
+	s.commitOnCtrlRelease = false
 	s.lastCycleAt = time.Time{}
 }
 
@@ -223,7 +228,7 @@ func (s *SessionSwitcher) View() string {
 	if s.reattachOnCancel {
 		escHint = "Esc back"
 	}
-	footerCycle := "Ctrl+Tab next · Ctrl+Shift+Tab prev"
+	footerCycle := "Hold Ctrl · Tab next · Shift+Tab prev · release attach"
 	footerNav := "↑/↓ browse · Enter attach · " + escHint
 
 	// Precompute each row once so we can measure the widest row (to auto-expand
