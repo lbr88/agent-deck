@@ -160,13 +160,24 @@ func TestIssue1753_FirstViewNonEmptyOnReloadingReturn(t *testing.T) {
 	h.reloadMu.Unlock()
 	h.isAttaching.Store(true)
 
-	_, _ = h.Update(statusUpdateMsg{})
+	_, cmd := h.Update(statusUpdateMsg{})
 
 	if h.isAttaching.Load() {
 		t.Fatal("statusUpdateMsg (reloading branch) left isAttaching set (#1753)")
 	}
 	if strings.TrimSpace(h.View()) == "" {
 		t.Fatal("first View() after reloading-branch attach return is empty (#1753)")
+	}
+	if cmd == nil {
+		t.Fatal("reloading-branch attach return omitted restoration commands")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("reloading-branch attach return command = %T, want tea.BatchMsg", msg)
+	}
+	if len(batch) < 2 {
+		t.Fatalf("reloading-branch attach return has %d commands, want mouse and keyboard protocol restoration", len(batch))
 	}
 }
 

@@ -1076,31 +1076,27 @@ func TestHomeUpdateResize(t *testing.T) {
 }
 
 // TestHomeUpdateStatusUpdateMsgBatchesKeyboardRestore is a regression guard for
-// PR #613 (Bug 2 from issue #472). After the user detaches from a tmux attach,
+// the attach-return lifecycle. After the user detaches from a tmux attach,
 // statusUpdateMsg's non-reload path must return a tea.Batch that includes the
-// RestoreLegacyKeyboardCmd helper alongside tea.EnableMouseCellMotion. If a
-// future refactor drops the keyboard-restore command, capitals silently break
-// on Ghostty after the first tmux attach/detach cycle, and this test catches
-// that regression.
+// dashboard keyboard-protocol enable command alongside tea.EnableMouseCellMotion.
 func TestHomeUpdateStatusUpdateMsgBatchesKeyboardRestore(t *testing.T) {
 	home := NewHome()
 
 	_, cmd := home.Update(statusUpdateMsg{})
 	if cmd == nil {
-		t.Fatal("statusUpdateMsg returned nil cmd; keyboard-restore batch removed?")
+		t.Fatal("statusUpdateMsg returned nil cmd; keyboard-protocol batch removed?")
 	}
 
 	msg := cmd()
 	batch, ok := msg.(tea.BatchMsg)
 	if !ok {
 		t.Fatalf(
-			"expected statusUpdateMsg to return a tea.BatchMsg (mouse + keyboard restore); got %T. "+
-				"RestoreLegacyKeyboardCmd was likely dropped from the handler, which will regress capitals on Ghostty after tmux detach.",
+			"expected statusUpdateMsg to return a tea.BatchMsg (mouse + keyboard protocols); got %T",
 			msg,
 		)
 	}
 	if len(batch) < 2 {
-		t.Fatalf("expected batch of >= 2 commands (EnableMouseCellMotion + RestoreLegacyKeyboardCmd); got %d", len(batch))
+		t.Fatalf("expected batch of >= 2 commands (mouse + keyboard protocols); got %d", len(batch))
 	}
 }
 

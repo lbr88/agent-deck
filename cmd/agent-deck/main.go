@@ -40,7 +40,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/web"
 )
 
-var Version = "1.13.10" // overridden at build time via -ldflags "-X main.Version=..."
+var Version = "1.13.11" // overridden at build time via -ldflags "-X main.Version=..."
 var Commit = ""         // overridden at build time via -ldflags "-X main.Commit=..."
 
 // Table column widths for list command output
@@ -999,14 +999,6 @@ func runAgentDeckMain() {
 		}()
 	}
 
-	// Reset any leaked Kitty keyboard mode, then enable Kitty disambiguation and
-	// xterm modifyOtherKeys while the TUI owns the terminal. NewCSIuReader
-	// translates both protocols for Bubble Tea v1.3.10. Kitty mode is required
-	// for terminals such as Alacritty to distinguish Ctrl+Tab from plain Tab;
-	// modifyOtherKeys retains Shift+Enter support in iTerm2 and similar clients.
-	ui.EnableTUIKeyboardProtocols(os.Stdout)
-	defer ui.DisableTUIKeyboardProtocols(os.Stdout)
-
 	// Check for atuin pty-proxy incompatibility (#1558).
 	// Atuin pty-proxy intercepts PTY I/O and breaks Bubble Tea's TUI rendering.
 	// The alternate screen, mouse tracking, and raw-mode interactions all fail
@@ -1055,7 +1047,10 @@ func runAgentDeckMain() {
 		p.Send(ui.MaintenanceCompleteMsg{Result: result})
 	})
 
-	if _, err := p.Run(); err != nil {
+	if err := runWithKeyboardCleanup(func() error {
+		_, err := p.Run()
+		return err
+	}, os.Stdout); err != nil {
 		uiLog := logging.ForComponent(logging.CompUI)
 		uiLog.Error("tui_run_failed", slog.String("error", err.Error()))
 		os.Exit(1)
@@ -1065,6 +1060,16 @@ func runAgentDeckMain() {
 		// process resurrection by a racing executable replacement.
 		cancelRuntimeHandoff()
 	}
+}
+
+// runWithKeyboardCleanup runs Bubble Tea and restores keyboard protocols after
+// Program.Run returns. At that point Bubble Tea has already switched from its
+// alternate screen back to the terminal's main screen, so this complements the
+// alternate-screen cleanup performed by Home's final shutdown path. Both are
+// needed because Kitty-compatible terminals keep keyboard state per screen.
+func runWithKeyboardCleanup(run func() error, w io.Writer) (err error) {
+	defer ui.DisableTUIKeyboardProtocols(w)
+	return run()
 }
 
 // globalFlagSubcommands lists every token that main()'s dispatch switch treats
