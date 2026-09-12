@@ -153,12 +153,12 @@ func killSession(t *testing.T, sessionName string) {
 	_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 }
 
-// TestSmoke_TUIRequestsCtrlTabDisambiguationInAltScreen launches the real TUI
-// on a PTY and verifies Kitty disambiguation is enabled after Bubble Tea enters
-// its alternate screen. Kitty-compatible terminals keep separate keyboard
-// protocol state per screen, so enabling it only on the main screen leaves the
-// dashboard unable to distinguish Ctrl+Tab from ordinary Tab.
-func TestSmoke_TUIRequestsCtrlTabDisambiguationInAltScreen(t *testing.T) {
+// TestSmoke_TUIRequestsCtrlReleaseReportingInAltScreen launches the real TUI on
+// a PTY and verifies the Kitty flags needed for Ctrl release reporting are
+// enabled after Bubble Tea enters its alternate screen. Kitty-compatible
+// terminals keep separate keyboard protocol state per screen, so enabling them
+// only on the main screen leaves the dashboard without release events.
+func TestSmoke_TUIRequestsCtrlReleaseReportingInAltScreen(t *testing.T) {
 	binary := buildBinary(t)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "AGENTDECK_PROFILE=_test", "AGENTDECK_SKIP_UPDATE_CHECK=1")
@@ -200,7 +200,7 @@ func TestSmoke_TUIRequestsCtrlTabDisambiguationInAltScreen(t *testing.T) {
 	}()
 
 	altScreen := []byte("\x1b[?1049h")
-	kittyEnable := []byte("\x1b[>1u")
+	kittyEnable := []byte("\x1b[>27u")
 	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
 	var output bytes.Buffer
@@ -217,7 +217,7 @@ func TestSmoke_TUIRequestsCtrlTabDisambiguationInAltScreen(t *testing.T) {
 			t.Fatalf("read TUI startup output: %v (output %q)", readErr, truncate(output.String(), 1000))
 		case <-timeout.C:
 			t.Fatalf(
-				"TUI did not enable Kitty Ctrl+Tab disambiguation after entering alternate screen (output %q)",
+				"TUI did not enable Kitty Ctrl-release reporting after entering alternate screen (output %q)",
 				truncate(output.String(), 1000),
 			)
 		}

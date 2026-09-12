@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -124,6 +125,17 @@ const (
 	SwitchNextRequested
 	// SwitchPreviousRequested is the Ctrl+Shift+Tab counterpart.
 	SwitchPreviousRequested
+	// SwitchNextFallbackRequested is the xterm modifyOtherKeys Ctrl+Tab
+	// counterpart. That protocol cannot report Ctrl release, so the caller uses
+	// its compatibility idle-commit path.
+	SwitchNextFallbackRequested
+	// SwitchPreviousFallbackRequested is the xterm Ctrl+Shift+Tab counterpart.
+	SwitchPreviousFallbackRequested
+	// SwitchNextReleasedRequested means the final Ctrl release was coalesced in
+	// the same stdin read as Ctrl+Tab and must be committed after TUI restore.
+	SwitchNextReleasedRequested
+	// SwitchPreviousReleasedRequested is the Ctrl+Shift+Tab counterpart.
+	SwitchPreviousReleasedRequested
 )
 
 // pageUpSeq is the exact CSI sequence a bare PageUp emits. Modified variants
@@ -139,9 +151,11 @@ var enhancedSwitchKeys = [...]struct {
 	intent   SwitchIntent
 }{
 	{sequence: []byte("\x1b[9;5u"), intent: SwitchNextRequested},
-	{sequence: []byte("\x1b[27;5;9~"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[9;5:1u"), intent: SwitchNextRequested},
+	{sequence: []byte("\x1b[27;5;9~"), intent: SwitchNextFallbackRequested},
 	{sequence: []byte("\x1b[9;6u"), intent: SwitchPreviousRequested},
-	{sequence: []byte("\x1b[27;6;9~"), intent: SwitchPreviousRequested},
+	{sequence: []byte("\x1b[9;6:1u"), intent: SwitchPreviousRequested},
+	{sequence: []byte("\x1b[27;6;9~"), intent: SwitchPreviousFallbackRequested},
 }
 
 // AttachOptions configures AttachWithOptions. The zero value attaches with the
@@ -176,6 +190,75 @@ type AttachOptions struct {
 	// cheap and never runs on ordinary keystrokes. It is NOT consulted for the
 	// ScrollbackKeyByte chord, which is an explicit user opt-in.
 	ScrollbackGate func() bool
+	// BeginCtrlReleaseHandoff temporarily enables release reporting on the
+	// attached terminal screen before the stdin pump relinquishes ownership.
+	// On a successful native Ctrl+Tab handoff, the dashboard's keyboard restore
+	// consumes that pushed mode without leaving a release-reporting gap.
+	// CancelCtrlReleaseHandoff restores the attached screen only if that handoff
+	// aborts before returning a native switch intent.
+	BeginCtrlReleaseHandoff  func()
+	CancelCtrlReleaseHandoff func()
+}
+
+func isNativeSwitchIntent(intent SwitchIntent) bool {
+	return intent == SwitchNextRequested || intent == SwitchPreviousRequested
+}
+
+func preserveInputForCtrlRelease(intent SwitchIntent) bool {
+	return isNativeSwitchIntent(intent)
+}
+
+func releasedSwitchIntent(intent SwitchIntent) SwitchIntent {
+	switch intent {
+	case SwitchNextRequested:
+		return SwitchNextReleasedRequested
+	case SwitchPreviousRequested:
+		return SwitchPreviousReleasedRequested
+	default:
+		return intent
+	}
+}
+
+func containsFinalCtrlRelease(data []byte) bool {
+	for start := 0; start+3 < len(data); {
+		rel := bytes.Index(data[start:], []byte("\x1b["))
+		if rel < 0 {
+			return false
+		}
+		start += rel
+		end := start + 2
+		for end < len(data) && (data[end] < 0x40 || data[end] > 0x7e) {
+			end++
+		}
+		if end >= len(data) {
+			return false
+		}
+		if isFinalCtrlRelease(data[start : end+1]) {
+			return true
+		}
+		start = end + 1
+	}
+	return false
+}
+
+func isFinalCtrlRelease(sequence []byte) bool {
+	if len(sequence) < 8 || sequence[0] != 0x1b || sequence[1] != '[' || sequence[len(sequence)-1] != 'u' {
+		return false
+	}
+	fields := bytes.Split(sequence[2:len(sequence)-1], []byte{';'})
+	if len(fields) < 2 {
+		return false
+	}
+	codepoint, err := strconv.Atoi(string(fields[0]))
+	if err != nil || (codepoint != 57442 && codepoint != 57448) {
+		return false
+	}
+	modifierEvent := bytes.Split(fields[1], []byte{':'})
+	if len(modifierEvent) != 2 || string(modifierEvent[1]) != "3" {
+		return false
+	}
+	modifier, err := strconv.Atoi(string(modifierEvent[0]))
+	return err == nil && modifier >= 1 && ((modifier-1)&0x04) == 0
 }
 
 // indexSwitchKey returns the earliest configured switch chord or enhanced
@@ -248,7 +331,9 @@ func scrollbackPageUpAllowed(opts AttachOptions) bool {
 // The intent it returns is what the caller assigns to switchOutcome:
 //   - SwitchNone         => detach (or nothing found),
 //   - SwitchRequested    => open the session switcher on the origin,
-//   - SwitchNextRequested / SwitchPreviousRequested => open and advance,
+//   - SwitchNextRequested / SwitchPreviousRequested => open, advance, and wait for Ctrl release,
+//   - SwitchNextReleasedRequested / SwitchPreviousReleasedRequested => open, advance, and commit a coalesced release,
+//   - SwitchNextFallbackRequested / SwitchPreviousFallbackRequested => open, advance, and idle-commit,
 //   - ScrollbackRequested => open the scrollback pager.
 //
 // Extracted from the stdin goroutine so the precedence is unit-testable without
@@ -319,10 +404,9 @@ func (p *attachStdinPump) run(ctx context.Context) (SwitchIntent, bool) {
 		}
 		// Re-check cancellation: ctx can be cancelled while this goroutine was
 		// parked inside poll, and a keystroke can land in that same window. The
-		// stale byte still gets read below without this check — harmless today
-		// only because the unconditional flush in QuiesceAttachInput discards it
-		// moments later, but that's an incidental backstop, not a reason to read
-		// stdin after the caller has already asked us to stop.
+		// stale byte still gets read below without this check. Cleanup normally
+		// flushes it, but native Ctrl+Tab deliberately preserves the final Ctrl
+		// release for the dashboard reader, so cancellation must win here.
 		if ctx.Err() != nil {
 			return SwitchNone, false
 		}
@@ -358,6 +442,13 @@ func (p *attachStdinPump) run(ctx context.Context) (SwitchIntent, bool) {
 		interruptIdx, outcome := resolveAttachInterrupt(chunk, p.detach, p.opts)
 
 		if interruptIdx >= 0 {
+			if isNativeSwitchIntent(outcome) {
+				if containsFinalCtrlRelease(chunk[interruptIdx:]) {
+					outcome = releasedSwitchIntent(outcome)
+				} else if p.opts.BeginCtrlReleaseHandoff != nil {
+					p.opts.BeginCtrlReleaseHandoff()
+				}
+			}
 			// Forward any bytes before the interrupt key, then stop.
 			if interruptIdx > 0 {
 				if _, err := p.out.Write(chunk[:interruptIdx]); err != nil {
@@ -377,8 +468,9 @@ func (p *attachStdinPump) run(ctx context.Context) (SwitchIntent, bool) {
 }
 
 // QuiesceAttachInput ends the attach's ownership of stdin: it waits for the
-// stdin reader to exit, then drops whatever is sitting in the terminal's input
-// queue and arms the reply quarantine.
+// stdin reader to exit, then invokes the caller-selected input-queue policy and
+// arms the reply quarantine. Most callers flush; native Ctrl+Tab supplies a
+// no-op so its final Ctrl release remains queued for the dashboard reader.
 //
 // The order is the point, and both halves are load-bearing:
 //
@@ -645,6 +737,14 @@ func (s *Session) AttachWithOptions(ctx context.Context, opts AttachOptions) (Sw
 	// atomic.Int32 closes it cheaply; SwitchIntent is a small int, so storing it
 	// as one loses nothing.
 	var switchOutcome atomic.Int32
+	var ctrlReleaseHandoffActive atomic.Bool
+	if opts.BeginCtrlReleaseHandoff != nil {
+		begin := opts.BeginCtrlReleaseHandoff
+		opts.BeginCtrlReleaseHandoff = func() {
+			begin()
+			ctrlReleaseHandoffActive.Store(true)
+		}
+	}
 
 	// Channel for I/O errors (buffered to prevent goroutine leaks)
 	ioErrors := make(chan error, 2)
@@ -722,14 +822,22 @@ func (s *Session) AttachWithOptions(ctx context.Context, opts AttachOptions) (Sw
 		cancel()
 		_ = ptmx.Close()
 		_, _ = waitForAttachOutputDrain(outputDone, attachOutputDrainTimeout)
-		// Hand stdin back: stop the reader, then flush the input queue and arm
-		// the quarantine. cancel() above makes the reader exit within one poll
-		// interval; the timeout is a wedged-reader backstop, not the expected
+		// Hand stdin back: stop the reader, apply the selected input-queue policy,
+		// then arm the quarantine. cancel() above makes the reader exit within one
+		// poll interval; the timeout is a wedged-reader backstop, not the expected
 		// path. See QuiesceAttachInput for why the order matters.
+		intent := SwitchIntent(switchOutcome.Load())
+		flushInput := func() { _ = FlushInput(int(os.Stdin.Fd())) }
+		if preserveInputForCtrlRelease(intent) {
+			// The final Ctrl release can arrive after the interrupting read. Keep
+			// it queued for the dashboard reader; reply quarantine still removes
+			// terminal capability responses during this handoff.
+			flushInput = func() {}
+		}
 		QuiesceAttachInput(
 			stdinReaderDone,
 			AttachStdinReaderStopTimeout,
-			func() { _ = FlushInput(int(os.Stdin.Fd())) },
+			flushInput,
 			func() { termreply.QuarantineFor(attachReplyQuarantine) },
 		)
 		// Clear host terminal scrollback before returning to TUI.
@@ -744,6 +852,9 @@ func (s *Session) AttachWithOptions(ctx context.Context, opts AttachOptions) (Sw
 		emitITermBadge(os.Stdout, "", s.terminalChromeIsEnabled())
 		// Reset OSC-8 hyperlink state + SGR attributes before Bubble Tea redraws.
 		_, _ = os.Stdout.WriteString(terminalStyleReset)
+		if ctrlReleaseHandoffActive.Load() && !preserveInputForCtrlRelease(intent) && opts.CancelCtrlReleaseHandoff != nil {
+			opts.CancelCtrlReleaseHandoff()
+		}
 	}
 
 	// Wait for either detach or command completion

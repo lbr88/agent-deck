@@ -44,20 +44,38 @@ func TestIndexSwitchKey_PlainTabIgnored(t *testing.T) {
 	}
 }
 
+func TestNativeSwitchInputPreservation(t *testing.T) {
+	for _, intent := range []SwitchIntent{SwitchNextRequested, SwitchPreviousRequested} {
+		if !preserveInputForCtrlRelease(intent) {
+			t.Fatalf("preserveInputForCtrlRelease(%v) = false, want true", intent)
+		}
+	}
+	for _, intent := range []SwitchIntent{
+		SwitchNone,
+		SwitchRequested,
+		SwitchNextReleasedRequested,
+		SwitchPreviousReleasedRequested,
+		SwitchNextFallbackRequested,
+		SwitchPreviousFallbackRequested,
+	} {
+		if preserveInputForCtrlRelease(intent) {
+			t.Fatalf("preserveInputForCtrlRelease(%v) = true, want false", intent)
+		}
+	}
+}
+
 func TestIndexSwitchKey_EnhancedCtrlTabDirections(t *testing.T) {
-	const (
-		wantNext     SwitchIntent = 3
-		wantPrevious SwitchIntent = 4
-	)
 	tests := []struct {
 		name  string
 		input string
 		want  SwitchIntent
 	}{
-		{name: "CSI u next", input: "\x1b[9;5u", want: wantNext},
-		{name: "CSI u previous", input: "\x1b[9;6u", want: wantPrevious},
-		{name: "modifyOtherKeys next", input: "\x1b[27;5;9~", want: wantNext},
-		{name: "modifyOtherKeys previous", input: "\x1b[27;6;9~", want: wantPrevious},
+		{name: "CSI u next", input: "\x1b[9;5u", want: SwitchNextRequested},
+		{name: "CSI u previous", input: "\x1b[9;6u", want: SwitchPreviousRequested},
+		{name: "CSI u event next", input: "\x1b[9;5:1u", want: SwitchNextRequested},
+		{name: "CSI u event previous", input: "\x1b[9;6:1u", want: SwitchPreviousRequested},
+		{name: "modifyOtherKeys next", input: "\x1b[27;5;9~", want: SwitchNextFallbackRequested},
+		{name: "modifyOtherKeys previous", input: "\x1b[27;6;9~", want: SwitchPreviousFallbackRequested},
 	}
 
 	for _, tt := range tests {

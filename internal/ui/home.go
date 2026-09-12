@@ -943,11 +943,14 @@ func (h *Home) attachOptions(sess *tmux.Session) tmux.AttachOptions {
 	if scrollByte == detach || (switchByte != 0 && scrollByte == switchByte) {
 		scrollByte = 0
 	}
+	beginCtrlReleaseHandoff, cancelCtrlReleaseHandoff := ctrlReleaseHandoffCallbacks(os.Stdout)
 	opts := tmux.AttachOptions{
-		DetachByte:         detach,
-		SwitchKeyByte:      switchByte,
-		ScrollbackKeyByte:  scrollByte,
-		ScrollbackOnPageUp: scroll.OnPageUp,
+		DetachByte:               detach,
+		SwitchKeyByte:            switchByte,
+		ScrollbackKeyByte:        scrollByte,
+		ScrollbackOnPageUp:       scroll.OnPageUp,
+		BeginCtrlReleaseHandoff:  beginCtrlReleaseHandoff,
+		CancelCtrlReleaseHandoff: cancelCtrlReleaseHandoff,
 	}
 	// Gate the bare-PageUp trigger on the pane's screen state: when the attached
 	// app is in the alternate screen (Claude fullscreen), leave PageUp for the
@@ -1247,6 +1250,15 @@ func normalizeOverviewKeyToken(pressed string) string {
 	if pressed == string(ctrlShiftTabMarker) {
 		pressed = "ctrl+shift+tab"
 	}
+	if pressed == string(ctrlReleaseMarker) {
+		pressed = "ctrl-release"
+	}
+	if pressed == string(ctrlTabFallback) {
+		pressed = "ctrl+tab-fallback"
+	}
+	if pressed == string(ctrlShiftFallback) {
+		pressed = "ctrl+shift+tab-fallback"
+	}
 	return pressed
 }
 
@@ -1544,10 +1556,31 @@ const (
 	switcherPrevious
 )
 
+func quickSwitchIntent(intent tmux.SwitchIntent) (direction switcherDirection, waitForRelease, ctrlReleased bool) {
+	switch intent {
+	case tmux.SwitchNextRequested:
+		return switcherNext, true, false
+	case tmux.SwitchPreviousRequested:
+		return switcherPrevious, true, false
+	case tmux.SwitchNextFallbackRequested:
+		return switcherNext, false, false
+	case tmux.SwitchPreviousFallbackRequested:
+		return switcherPrevious, false, false
+	case tmux.SwitchNextReleasedRequested:
+		return switcherNext, true, true
+	case tmux.SwitchPreviousReleasedRequested:
+		return switcherPrevious, true, true
+	default:
+		return switcherStay, false, false
+	}
+}
+
 type openSwitcherMsg struct {
 	fromSessionID   string // session we just detached from
 	attachedWorkDir string // pane_current_path captured after attach returns
 	quickDirection  switcherDirection
+	waitForRelease  bool // true for CSI-u; false for xterm modifyOtherKeys
+	ctrlReleased    bool // final Ctrl release was coalesced with the attached press
 }
 
 // openScrollbackMsg is emitted when the user pressed the scrollback trigger
@@ -9200,15 +9233,15 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var switchCmd tea.Cmd
 		switch msg.quickDirection {
 		case switcherNext:
-			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, true)
+			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, true, msg.waitForRelease)
 		case switcherPrevious:
-			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, false)
+			switchCmd = h.openQuickSessionSwitcher(msg.fromSessionID, true, false, msg.waitForRelease)
 		default:
 			h.openSessionSwitcher(msg.fromSessionID, true)
 		}
 		return h, tea.Batch(
 			tea.EnableMouseCellMotion,
-			EnableTUIKeyboardProtocolsCmd(os.Stdout),
+			EnableTUIKeyboardProtocolsAfterSwitchCmd(os.Stdout, msg.ctrlReleased),
 			tea.WindowSize(),
 			syncCmd,
 			switchCmd,
@@ -11424,12 +11457,14 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 	}
 
 	switch key {
-	case "ctrl+tab", "ctrl+shift+tab":
+	case "ctrl+tab", "ctrl+shift+tab", "ctrl+tab-fallback", "ctrl+shift+tab-fallback":
 		fromID := ""
 		if sel := h.getSelectedSession(); sel != nil {
 			fromID = sel.ID
 		}
-		return h, h.openQuickSessionSwitcher(fromID, false, key == "ctrl+tab")
+		forward := key == "ctrl+tab" || key == "ctrl+tab-fallback"
+		waitForRelease := key == "ctrl+tab" || key == "ctrl+shift+tab"
+		return h, h.openQuickSessionSwitcher(fromID, false, forward, waitForRelease)
 
 	case hotkeyQuit:
 		return h.tryQuit()
@@ -13109,7 +13144,7 @@ func (h *Home) handleMainDispatch(msg tea.KeyMsg, directAction ActionID) (tea.Mo
 
 func isStructuralOverviewKey(key string) bool {
 	switch key {
-	case "up", "down", "left", "right", "enter", "esc", " ", "ctrl+tab", "ctrl+shift+tab":
+	case "up", "down", "left", "right", "enter", "esc", " ", "ctrl+tab", "ctrl+shift+tab", "ctrl+tab-fallback", "ctrl+shift+tab-fallback":
 		return true
 	default:
 		return false
@@ -17762,16 +17797,13 @@ func (h *Home) attachSession(inst *session.Instance) tea.Cmd {
 					attachedWorkDir: fromWorkDir,
 				}
 			}
-			quickDirection := switcherStay
-			if res.intent == tmux.SwitchNextRequested {
-				quickDirection = switcherNext
-			} else if res.intent == tmux.SwitchPreviousRequested {
-				quickDirection = switcherPrevious
-			}
+			quickDirection, waitForRelease, ctrlReleased := quickSwitchIntent(res.intent)
 			return openSwitcherMsg{
 				fromSessionID:   fromID,
 				attachedWorkDir: fromWorkDir,
 				quickDirection:  quickDirection,
+				waitForRelease:  waitForRelease,
+				ctrlReleased:    ctrlReleased,
 			}
 		}
 
@@ -26543,12 +26575,12 @@ func (h *Home) openSessionSwitcher(fromID string, reattachOnCancel bool) bool {
 	return true
 }
 
-// openQuickSessionSwitcher opens the MRU picker, immediately advances away
-// from the current session, and arms the idle attach timer. This is the
-// Windows-style Ctrl+Tab path: the first press targets the most recently used
-// other session, while repeated Ctrl+Tab / Ctrl+Shift+Tab presses cycle before
-// the one-second idle commit fires.
-func (h *Home) openQuickSessionSwitcher(fromID string, reattachOnCancel, forward bool) tea.Cmd {
+// openQuickSessionSwitcher opens the MRU picker and immediately advances away
+// from the current session. This is the Windows-style Ctrl+Tab path: the first
+// press targets the most recently used other session, repeated Ctrl+Tab /
+// Ctrl+Shift+Tab presses cycle while Ctrl remains held, and the CSI-u Ctrl
+// release event commits the highlighted session.
+func (h *Home) openQuickSessionSwitcher(fromID string, reattachOnCancel, forward, waitForRelease bool) tea.Cmd {
 	if !h.openSessionSwitcher(fromID, reattachOnCancel) {
 		return nil
 	}
@@ -26558,13 +26590,18 @@ func (h *Home) openQuickSessionSwitcher(fromID string, reattachOnCancel, forward
 		h.sessionSwitcher.prev()
 	}
 	h.sessionSwitcher.lastCycleAt = time.Now()
-	return h.armSwitcherCommit()
+	h.sessionSwitcher.commitOnCtrlRelease = waitForRelease
+	if !waitForRelease {
+		return h.armSwitcherCommit()
+	}
+	return nil
 }
 
-// armSwitcherCommit (re)starts the idle-commit countdown and returns the timer
-// command. Quick-cycle keys call this, so the timer only fires once the user
-// stops tapping — the closest we can get to "commit on key release".
+// armSwitcherCommit (re)starts the idle-commit countdown for the configurable
+// Ctrl-letter fallback. Native Ctrl+Tab uses the terminal's real Ctrl release
+// event instead.
 func (h *Home) armSwitcherCommit() tea.Cmd {
+	h.sessionSwitcher.commitOnCtrlRelease = false
 	gen := h.sessionSwitcher.bumpCommitGen()
 	return tea.Tick(switcherIdleCommit, func(time.Time) tea.Msg {
 		return switcherCommitMsg{gen: gen}
@@ -26679,9 +26716,10 @@ func (h *Home) attachToSwitchTarget(id string) tea.Cmd {
 // visible. Two interaction modes share the overlay:
 //
 //   - Ctrl+Tab (forward) / Ctrl+Shift+Tab (backward): the primary quick mode.
-//     Ctrl+S / Ctrl+A remain the configurable Ctrl-letter fallback pair.
-//     Each tap re-arms the idle-commit timer (so it fires ~1s after you stop),
-//     and the advance is throttled so holding the key cannot spin the list.
+//     The overlay remains open while Ctrl is held and attaches on the final
+//     Ctrl release. Ctrl+S / Ctrl+A remain the configurable Ctrl-letter
+//     fallback pair and retain idle commit because their modifier release is
+//     not portably reported. Cycling is throttled so key-repeat cannot spin.
 //   - Up / Down: deliberate browsing. These cancel the pending auto-commit, so
 //     you stay in the switcher until you press Enter (or Esc).
 //
@@ -26705,18 +26743,41 @@ func (h *Home) handleSessionSwitcherKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Detach key: leave the switcher (and any session), landing in the overview.
 		h.sessionSwitcher.Hide()
 		return h, nil
-	case "ctrl+s", "ctrl+tab":
+	case "ctrl-release":
+		if !h.sessionSwitcher.commitOnCtrlRelease {
+			return h, nil
+		}
+		return h, h.commitSessionSwitch()
+	case "ctrl+s":
 		h.sessionSwitcher.cycle(true, time.Now())
 		return h, h.armSwitcherCommit()
-	case "ctrl+a", "ctrl+shift+tab":
+	case "ctrl+tab":
+		h.sessionSwitcher.bumpCommitGen()
+		h.sessionSwitcher.commitOnCtrlRelease = true
+		h.sessionSwitcher.cycle(true, time.Now())
+		return h, nil
+	case "ctrl+tab-fallback":
+		h.sessionSwitcher.cycle(true, time.Now())
+		return h, h.armSwitcherCommit()
+	case "ctrl+a":
+		h.sessionSwitcher.cycle(false, time.Now())
+		return h, h.armSwitcherCommit()
+	case "ctrl+shift+tab":
+		h.sessionSwitcher.bumpCommitGen()
+		h.sessionSwitcher.commitOnCtrlRelease = true
+		h.sessionSwitcher.cycle(false, time.Now())
+		return h, nil
+	case "ctrl+shift+tab-fallback":
 		h.sessionSwitcher.cycle(false, time.Now())
 		return h, h.armSwitcherCommit()
 	case "up":
 		h.sessionSwitcher.prev()
+		h.sessionSwitcher.commitOnCtrlRelease = false
 		h.sessionSwitcher.bumpCommitGen() // cancel pending auto-commit: manual mode
 		return h, nil
 	case "down":
 		h.sessionSwitcher.next()
+		h.sessionSwitcher.commitOnCtrlRelease = false
 		h.sessionSwitcher.bumpCommitGen()
 		return h, nil
 	default:
