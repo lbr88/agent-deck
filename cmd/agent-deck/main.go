@@ -40,8 +40,8 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/web"
 )
 
-var Version = "1.13.9" // overridden at build time via -ldflags "-X main.Version=..."
-var Commit = ""        // overridden at build time via -ldflags "-X main.Commit=..."
+var Version = "1.13.10" // overridden at build time via -ldflags "-X main.Version=..."
+var Commit = ""         // overridden at build time via -ldflags "-X main.Commit=..."
 
 // Table column widths for list command output
 const (
@@ -999,30 +999,13 @@ func runAgentDeckMain() {
 		}()
 	}
 
-	// Disable the Kitty keyboard protocol before starting the TUI.
-	// Wayland terminals (Ghostty, Foot, Alacritty) send keys using CSI u
-	// encoding by default; Bubble Tea v1.3.10 does not parse those sequences,
-	// so uppercase shortcuts and uppercase text input (including '_') are
-	// silently dropped. Pushing keyboard mode 0 (legacy) restores standard
-	// key reporting. Terminals that don't support the protocol ignore this
-	// sequence safely.
-	//
-	// As a belt-and-suspenders fallback, we also wrap os.Stdin with
-	// NewCSIuReader, which translates any remaining CSI u sequences (including
-	// Shift+hyphen → '_', codepoint 95) to their legacy byte equivalents
-	// before Bubble Tea sees them. This handles terminals that send CSI u
-	// sequences even after the disable request (e.g. tmux with extended-keys).
-	ui.DisableKittyKeyboard(os.Stdout)
-	defer ui.RestoreKittyKeyboard(os.Stdout)
-
-	// Issue #1093: also request xterm modifyOtherKeys mode 1 so iTerm2 (and
-	// other xterm-compatible terminals) send Shift+Enter as a distinct
-	// CSI 27;2;13~ sequence instead of plain '\r'. Without this, Bubble Tea
-	// v1.3.10 cannot distinguish Shift+Enter from Enter on a fresh launch,
-	// and the "open in new iTerm window" binding shipped in #1077 falls
-	// through to the in-pane attach handler. Plain Enter is unaffected.
-	ui.EnableModifyOtherKeys(os.Stdout)
-	defer ui.DisableModifyOtherKeys(os.Stdout)
+	// Reset any leaked Kitty keyboard mode, then enable Kitty disambiguation and
+	// xterm modifyOtherKeys while the TUI owns the terminal. NewCSIuReader
+	// translates both protocols for Bubble Tea v1.3.10. Kitty mode is required
+	// for terminals such as Alacritty to distinguish Ctrl+Tab from plain Tab;
+	// modifyOtherKeys retains Shift+Enter support in iTerm2 and similar clients.
+	ui.EnableTUIKeyboardProtocols(os.Stdout)
+	defer ui.DisableTUIKeyboardProtocols(os.Stdout)
 
 	// Check for atuin pty-proxy incompatibility (#1558).
 	// Atuin pty-proxy intercepts PTY I/O and breaks Bubble Tea's TUI rendering.

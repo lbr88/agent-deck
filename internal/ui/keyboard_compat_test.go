@@ -209,6 +209,34 @@ func TestCSIuReader_ShiftTab(t *testing.T) {
 	}
 }
 
+func TestCSIuReaderPreservesAltModifiers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "CSI u Alt+j", input: "\x1b[106;3u", want: "\x1bj"},
+		{name: "CSI u Alt+1", input: "\x1b[49;3u", want: "\x1b1"},
+		{name: "CSI u Alt+Space", input: "\x1b[32;3u", want: "\x1b "},
+		{name: "modifyOtherKeys Alt+j", input: "\x1b[27;3;106~", want: "\x1bj"},
+		{name: "modifyOtherKeys Alt+1", input: "\x1b[27;3;49~", want: "\x1b1"},
+		{name: "modifyOtherKeys Alt+Space", input: "\x1b[27;3;32~", want: "\x1b "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewCSIuReader(bytes.NewReader([]byte(tt.input)))
+			got, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("ReadAll error: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("translated %q to %q, want %q", tt.input, string(got), tt.want)
+			}
+		})
+	}
+}
+
 // TestCSIuReaderPassesNormalASCII verifies plain ASCII passes through unchanged.
 func TestCSIuReaderPassesNormalASCII(t *testing.T) {
 	input := "hello world"
