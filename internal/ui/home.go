@@ -24536,6 +24536,20 @@ func (h *Home) renderSessionInfoCard(inst *session.Instance, width, height int) 
 	return b.String()
 }
 
+func renderLaunchFailureDetails(failure *session.SpawnFailureRecord, retainedPane string) string {
+	retainedPane = strings.TrimSpace(retainedPane)
+	// PreviewFull prefixes retained dead panes with the authoritative exit
+	// status/signal. Prefer that over the startup-watch record, which captures
+	// output and elapsed time but cannot recover tmux's exact termination code.
+	if strings.HasPrefix(retainedPane, "The session process ") {
+		return retainedPane
+	}
+	if failure != nil {
+		return failure.FormatForDisplay()
+	}
+	return retainedPane
+}
+
 // renderPreviewPane renders the right panel with live preview
 func (h *Home) renderPreviewPane(width, height int) string {
 	var b strings.Builder
@@ -25302,16 +25316,23 @@ func (h *Home) renderPreviewPane(width, height int) string {
 		dimStyle := lipgloss.NewStyle().Foreground(ColorText)
 		keyStyle := lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
 
-		b.WriteString(warnStyle.Render("✕ No tmux session running"))
-		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("This can happen if:"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  - Session was added but not yet started"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  - tmux server was restarted"))
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("  - Terminal was closed or system rebooted"))
-		b.WriteString("\n\n")
+		h.previewCacheMu.RLock()
+		retainedPane := h.previewCache[pvKey]
+		h.previewCacheMu.RUnlock()
+		failureDetails := renderLaunchFailureDetails(selected.SpawnFailure(), retainedPane)
+		if failureDetails != "" {
+			b.WriteString(warnStyle.Render("✕ Launch failed"))
+			b.WriteString("\n\n")
+			b.WriteString(dimStyle.Render(failureDetails))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(warnStyle.Render("✕ No tmux session running"))
+			b.WriteString("\n\n")
+			b.WriteString(dimStyle.Render("No launch diagnostic was recorded."))
+			b.WriteString("\n")
+			b.WriteString(dimStyle.Render("The session may have been interrupted before Agent Deck observed the failure."))
+			b.WriteString("\n\n")
+		}
 		b.WriteString(dimStyle.Render("Actions:"))
 		b.WriteString("\n")
 		if restartKey := h.actionKey(hotkeyRestart); restartKey != "" {

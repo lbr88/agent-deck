@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -23,6 +26,12 @@ import (
 // resume chokepoint.
 func TestIssue1830_TUICreateResumeByIDVouchesOwnership(t *testing.T) {
 	const wantID = "a1a1a1a1-2222-4333-8444-555555555555"
+	home := setXDGTestHome(t)
+	claudeStub := filepath.Join(home, "claude-stub")
+	if err := os.WriteFile(claudeStub, []byte("#!/bin/sh\nsleep 30\n"), 0o700); err != nil {
+		t.Fatalf("write Claude stub: %v", err)
+	}
+	writeXDGTestConfig(t, home, fmt.Sprintf("[claude]\ncommand = %q\n", claudeStub))
 
 	opts := session.NewClaudeOptions(nil)
 	opts.SessionMode = "resume"

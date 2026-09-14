@@ -346,7 +346,9 @@ func (i *Instance) watchForFastDeath(command string, gen uint64, wake <-chan str
 			return
 		}
 
-		if sess.Exists() {
+		exists := sess.Exists()
+		dead := exists && sess.IsPaneDead()
+		if exists && !dead {
 			// Alive: snapshot the current pane so we hold the dying output the
 			// instant it disappears (tmux discards the pane on process exit for
 			// non-remain-on-exit sessions).
@@ -372,9 +374,20 @@ func (i *Instance) watchForFastDeath(command string, gen uint64, wake <-chan str
 			}
 			continue
 		}
+		if dead {
+			// Agent panes use remain-on-exit so the final output and exit status
+			// survive. Capture that retained pane before recording the same
+			// fast-death diagnostic used for a pane tmux already discarded.
+			if content, err := sess.CaptureFullHistory(); err == nil {
+				if trimmed := strings.TrimSpace(content); trimmed != "" {
+					lastSnapshot = trimmed
+				}
+			}
+		}
 
-		// Session is gone — but sess.Exists() shells out to tmux, so a
-		// teardown may well have started during that call: killInternal and
+		// Session is gone or its retained pane is dead — but the tmux probes
+		// above shell out, so a teardown may well have started during them:
+		// killInternal and
 		// the restart paths bump the generation BEFORE killing tmux, precisely
 		// so this is visible here even though it was not visible at the top of
 		// the iteration. Everything below therefore commits under the write

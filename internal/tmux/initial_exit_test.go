@@ -29,7 +29,16 @@ func TestInitialProcessRetainsImmediateFailureOutput(t *testing.T) {
 	if err != nil || !strings.Contains(out, "immediate-launch-error") {
 		t.Fatalf("launch error lost: %v %q", err, out)
 	}
-	if code, ok := s.PaneDeadExitStatus(); !ok || code != 23 {
+	var code int
+	var ok bool
+	statusDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(statusDeadline) {
+		if code, ok = s.PaneDeadExitStatus(); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ok || code != 23 {
 		t.Fatalf("lost exit status: %d %v", code, ok)
 	}
 }

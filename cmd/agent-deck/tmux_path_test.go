@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,47 @@ func TestResolveTmuxPATH_EmptyPathBecomesDir(t *testing.T) {
 	got := resolveTmuxPATH("", false, []string{"/opt/homebrew/bin"}, hasTmux)
 	if got != "/opt/homebrew/bin" {
 		t.Fatalf("resolveTmuxPATH with empty PATH = %q, want %q", got, "/opt/homebrew/bin")
+	}
+}
+
+func TestResolveUserToolPATH_AppendsConventionalBinsWithoutReordering(t *testing.T) {
+	home := "/home/u"
+	existing := "/usr/local/bin:/usr/bin"
+	localBin := filepath.Join(home, ".local", "bin")
+	pnpmBin := filepath.Join(home, ".local", "share", "pnpm", "bin")
+	pnpmHome := filepath.Join(home, ".local", "share", "pnpm")
+	opencodeBin := filepath.Join(home, ".opencode", "bin")
+	homeBin := filepath.Join(home, "bin")
+
+	got := resolveUserToolPATH(existing, home)
+	want := existing + ":" + localBin + ":" + pnpmBin + ":" + pnpmHome + ":" + opencodeBin + ":" + homeBin
+	if got != want {
+		t.Fatalf("resolveUserToolPATH = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, existing) {
+		t.Fatalf("user tool directories reordered the inherited PATH: %q", got)
+	}
+}
+
+func TestResolveUserToolPATH_DoesNotDuplicateExistingDirectory(t *testing.T) {
+	home := "/home/u"
+	localBin := filepath.Join(home, ".local", "bin")
+	pnpmBin := filepath.Join(home, ".local", "share", "pnpm", "bin")
+	pnpmHome := filepath.Join(home, ".local", "share", "pnpm")
+	opencodeBin := filepath.Join(home, ".opencode", "bin")
+	homeBin := filepath.Join(home, "bin")
+	existing := localBin + ":" + pnpmBin + ":/usr/bin"
+
+	got := resolveUserToolPATH(existing, home)
+	want := existing + ":" + pnpmHome + ":" + opencodeBin + ":" + homeBin
+	if got != want || strings.Count(got, localBin) != 1 {
+		t.Fatalf("resolveUserToolPATH = %q, want %q with one local bin", got, want)
+	}
+}
+
+func TestResolveUserToolPATH_NoHomeIsNoop(t *testing.T) {
+	existing := "/usr/local/bin:/usr/bin"
+	if got := resolveUserToolPATH(existing, ""); got != existing {
+		t.Fatalf("resolveUserToolPATH without a home = %q, want %q", got, existing)
 	}
 }

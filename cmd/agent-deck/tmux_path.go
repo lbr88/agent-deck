@@ -19,6 +19,51 @@ var tmuxInstallDirs = []string{
 	"/snap/bin",
 }
 
+// resolveUserToolPATH appends conventional per-user binary directories that
+// were omitted from a sparse desktop/service environment. Appending preserves
+// every inherited resolution choice while making agent harnesses such as OMP
+// available to a long-running Agent Deck process. PATH entries need not exist,
+// so this stays filesystem-free on the command startup hot path.
+func resolveUserToolPATH(path, home string) string {
+	if home == "" {
+		return path
+	}
+	onPath := map[string]bool{}
+	for _, dir := range strings.Split(path, string(os.PathListSeparator)) {
+		onPath[dir] = true
+	}
+	for _, dir := range []string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".local", "share", "pnpm", "bin"),
+		filepath.Join(home, ".local", "share", "pnpm"),
+		filepath.Join(home, ".opencode", "bin"),
+		filepath.Join(home, "bin"),
+	} {
+		if onPath[dir] {
+			continue
+		}
+		if path == "" {
+			path = dir
+		} else {
+			path += string(os.PathListSeparator) + dir
+		}
+		onPath[dir] = true
+	}
+	return path
+}
+
+func ensureUserToolsOnPath() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	path := os.Getenv("PATH")
+	resolved := resolveUserToolPATH(path, home)
+	if resolved != path {
+		_ = os.Setenv("PATH", resolved)
+	}
+}
+
 // resolveTmuxPATH returns path augmented with the first candidate dir that holds
 // a tmux binary, when tmux is not already resolvable on path. It never
 // duplicates a dir already present and is a no-op when tmux is resolvable or no

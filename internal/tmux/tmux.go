@@ -2335,8 +2335,8 @@ func (s *Session) Start(command string) error {
 	s.Command = command
 	s.invalidateCache()
 	s.Created = time.Now()
-	s.startupAt = s.Created
 	s.mu.Lock()
+	s.startupAt = s.Created
 	s.lastStableStatus = "waiting"
 	s.stateTracker = nil
 	s.cachedPromptDetector = nil
@@ -3033,8 +3033,16 @@ func (s *Session) ExistsCached() bool {
 // Falls back to a direct tmux query targeting pane 0.0 (the primary pane)
 // to avoid false positives in multi-pane layouts.
 func (s *Session) IsPaneDead() bool {
-	if info, ok := GetCachedPaneInfo(s.Name); ok {
-		return info.Dead
+	if info, sampledAt, ok := GetCachedPaneInfoSnapshot(s.Name); ok {
+		s.mu.Lock()
+		startupAt := s.startupAt
+		s.mu.Unlock()
+		// A same-name respawn deliberately reuses the tmux pane identity. The
+		// global cache may still describe the process generation that just died;
+		// never let that stale dead bit condemn its live replacement.
+		if startupAt.IsZero() || !sampledAt.Before(startupAt) {
+			return info.Dead
+		}
 	}
 	// Cache miss: direct tmux check targeting the primary pane. Bound it the
 	// same way Exists() bounds has-session — a wedged tmux server must not hang
@@ -3079,7 +3087,7 @@ func (s *Session) PrimaryPaneAliveFresh() (bool, error) {
 // PaneDeadExitStatus returns the exit code of the process that ran in the
 // session's primary pane, and true, but ONLY when the pane died while
 // remain-on-exit was enabled so tmux still holds the dead pane and its exit
-// status (#{pane_dead_status}).
+// status (#{pane_dead_status}) or terminating signal (#{pane_dead_signal}).
 //
 // The second return is false whenever no exit code is available: the pane is
 // still alive, the session is gone, or the pane was torn down without
@@ -3088,32 +3096,52 @@ func (s *Session) PrimaryPaneAliveFresh() (bool, error) {
 // pair to distinguish a clean exit (0) from a crash (non-zero) instead of
 // treating every terminated pane as an error.
 func (s *Session) PaneDeadExitStatus() (int, bool) {
+	exitCode, _, ok := s.PaneDeadTermination()
+	return exitCode, ok
+}
+
+// PaneDeadTermination returns both the conventional process exit code and the
+// original terminating signal. signal is zero for a normal exit, including a
+// process that explicitly exits with a code in the 128..255 range.
+func (s *Session) PaneDeadTermination() (exitCode, signal int, ok bool) {
 	// Bounded like IsPaneDead: this runs on the notify-daemon poll loop, so a
 	// wedged tmux server must not stall it.
 	ctx, cancel := context.WithTimeout(context.Background(), hasSessionProbeTimeout)
 	defer cancel()
-	out, err := s.tmuxCmdContext(ctx, "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}|#{pane_dead_status}").Output()
+	out, err := s.tmuxCmdContext(ctx, "list-panes", "-t", s.Name+":0.0", "-F", "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}").Output()
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return parsePaneDeadStatus(string(out))
+	return parsePaneDeadTermination(string(out))
 }
 
-// parsePaneDeadStatus interprets the "#{pane_dead}|#{pane_dead_status}" line
-// tmux emits for a pane. It returns (code, true) only for a dead pane whose
-// exit status is a parseable integer — i.e. one preserved by remain-on-exit.
-// A live pane ("0|..."), or a dead pane with an empty status field (no
-// remain-on-exit), yields (0, false). Pure so the parsing is unit-testable.
+// parsePaneDeadStatus interprets the
+// "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}" line tmux emits for a
+// pane. tmux leaves pane_dead_status empty when a process dies from a signal,
+// so convert pane_dead_signal to the conventional 128+signal exit status.
+// A live pane, or a dead pane with neither field, yields (0, false).
 func parsePaneDeadStatus(raw string) (int, bool) {
-	dead, status, ok := strings.Cut(strings.TrimSpace(raw), "|")
-	if !ok || dead != "1" {
-		return 0, false // pane not dead → no meaningful exit status
+	exitCode, _, ok := parsePaneDeadTermination(raw)
+	return exitCode, ok
+}
+
+func parsePaneDeadTermination(raw string) (exitCode, signal int, ok bool) {
+	fields := strings.Split(strings.TrimSpace(raw), "|")
+	if len(fields) != 3 || fields[0] != "1" {
+		return 0, 0, false // pane not dead → no meaningful exit status
 	}
-	code, err := strconv.Atoi(strings.TrimSpace(status))
-	if err != nil {
-		return 0, false // remain-on-exit off → pane_dead_status is empty
+	if status := strings.TrimSpace(fields[1]); status != "" {
+		code, err := strconv.Atoi(status)
+		if err != nil {
+			return 0, 0, false
+		}
+		return code, 0, true
 	}
-	return code, true
+	parsedSignal, err := strconv.Atoi(strings.TrimSpace(fields[2]))
+	if err != nil || parsedSignal <= 0 {
+		return 0, 0, false
+	}
+	return 128 + parsedSignal, parsedSignal, true
 }
 
 // buildStatusBarArgs returns the tmux command args for configuring the status bar.
@@ -3653,6 +3681,17 @@ func (s *Session) RespawnPane(command string) error {
 	}
 	mcpLog.Debug("respawn_pane_output", slog.String("output", string(output)))
 
+	// Publish the replacement generation boundary immediately after tmux
+	// accepts it. IsPaneDead uses this timestamp to reject a cached dead bit
+	// sampled from the process that respawn-pane just replaced.
+	s.mu.Lock()
+	s.startupAt = time.Now()
+	s.lastStableStatus = "waiting"
+	s.stateTracker = nil
+	s.cachedPromptDetector = nil
+	s.cachedPromptDetectorTool = ""
+	s.mu.Unlock()
+
 	// Capture the NEW process tree so we don't accidentally kill anything the
 	// respawn just created. Keep the probe error: "could not tell" must not be
 	// spent as an empty tree, which would silently disable that very guard
@@ -3674,15 +3713,6 @@ func (s *Session) RespawnPane(command string) error {
 			)
 		}
 	}
-
-	// Reset startup/status trackers so GetStatus can classify the fresh process correctly.
-	s.mu.Lock()
-	s.startupAt = time.Now()
-	s.lastStableStatus = "waiting"
-	s.stateTracker = nil
-	s.cachedPromptDetector = nil
-	s.cachedPromptDetectorTool = ""
-	s.mu.Unlock()
 
 	return nil
 }

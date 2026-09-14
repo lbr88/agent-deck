@@ -272,6 +272,9 @@ func (i *Instance) prepareOmpIdentity() error {
 	} else if !os.IsNotExist(markerErr) {
 		return refuse(fmt.Errorf("cannot inspect OMP identity migration state: %w; history is preserved", markerErr))
 	}
+	if _, recoveryErr := recoverUnacknowledgedOmpLaunch(dir); recoveryErr != nil {
+		return refuse(recoveryErr)
+	}
 	binding, err := resolveOmpActiveBinding(dir)
 	if nonTUI {
 		if err == nil && binding != nil && binding.State == "pending" {
@@ -298,6 +301,108 @@ func (i *Instance) prepareOmpIdentity() error {
 		i.recordPrepareFailure(i.Command, err)
 	}
 	return err
+}
+
+// recoverUnacknowledgedOmpLaunch rolls the launch pointer back to the exact
+// binding copied before a provider process started. The identity preamble
+// advances .agent-deck-launch-generation before exec'ing OMP, so a missing
+// binary or another pre-exec failure can leave a generation that has no active
+// binding. Without this rollback every later retry fails preflight even though
+// the last acknowledged conversation is still intact.
+//
+// A fresh-start boundary is deliberately never rolled back: doing so would
+// silently reopen the conversation the user explicitly superseded. Likewise,
+// a directory containing transcripts but no validated source binding remains
+// ambiguous and fails closed.
+func recoverUnacknowledgedOmpLaunch(dir string) (bool, error) {
+	currentPath, failedGeneration, tracked, err := ompCurrentBindingPath(dir)
+	if err != nil || !tracked {
+		return false, err
+	}
+	current, err := readOmpBindingRecord(currentPath)
+	if err != nil {
+		return false, err
+	}
+	if current != nil {
+		return false, nil
+	}
+
+	freshMarker := filepath.Join(dir, ".agent-deck-fresh-pending."+failedGeneration)
+	if _, err := os.Lstat(freshMarker); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("cannot inspect OMP fresh-conversation boundary: %w; history is preserved", err)
+	}
+
+	sourcePath := filepath.Join(dir, ".agent-deck-source-binding."+failedGeneration)
+	source, err := readOmpBindingRecord(sourcePath)
+	if err != nil {
+		return false, err
+	}
+	if source == nil {
+		roots, globErr := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+		if globErr != nil {
+			return false, fmt.Errorf("inspect OMP transcripts before launch recovery: %w; history is preserved", globErr)
+		}
+		if len(roots) != 0 {
+			return false, nil
+		}
+		return rollbackOmpLaunchGeneration(dir, failedGeneration, "")
+	}
+	if err := validateOmpActiveBinding(dir, source); err != nil {
+		return false, fmt.Errorf("cannot recover prior OMP binding: %w", err)
+	}
+
+	previousPath := filepath.Join(dir, ompActiveBindingName)
+	if source.Generation != "legacy" {
+		previousPath += "." + source.Generation
+	}
+	previous, err := readOmpBindingRecord(previousPath)
+	if err != nil {
+		return false, err
+	}
+	if previous == nil || *previous != *source {
+		return false, fmt.Errorf("OMP failed launch source does not match the prior acknowledged binding %s; history is preserved", previousPath)
+	}
+
+	rollbackGeneration := source.Generation
+	if rollbackGeneration == "legacy" {
+		rollbackGeneration = ""
+	}
+	return rollbackOmpLaunchGeneration(dir, failedGeneration, rollbackGeneration)
+}
+
+func rollbackOmpLaunchGeneration(dir, failedGeneration, rollbackGeneration string) (bool, error) {
+	generationPath := filepath.Join(dir, ".agent-deck-launch-generation")
+	observed, exists, err := readOmpControlLine(generationPath, "launch generation")
+	if err != nil {
+		return false, err
+	}
+	if !exists || observed != failedGeneration {
+		return false, fmt.Errorf("OMP launch generation changed during recovery in %s; retry without modifying history", dir)
+	}
+	if rollbackGeneration == "" {
+		if err := os.Remove(generationPath); err != nil {
+			return false, fmt.Errorf("roll back failed OMP launch generation: %w; history is preserved", err)
+		}
+		return true, nil
+	}
+	if !ompSafeGeneration(rollbackGeneration) {
+		return false, fmt.Errorf("invalid prior OMP launch generation %q; history is preserved", rollbackGeneration)
+	}
+	if err := safeio.SafeOverwrite(generationPath, []byte(rollbackGeneration+"\n"), safeio.Options{
+		Perm:       0o600,
+		SkipBackup: true,
+		Guard: func(oldContent, _ []byte) error {
+			if string(oldContent) != failedGeneration+"\n" {
+				return fmt.Errorf("OMP launch generation changed during recovery in %s; retry without modifying history", dir)
+			}
+			return nil
+		},
+	}); err != nil {
+		return false, fmt.Errorf("roll back failed OMP launch generation: %w; history is preserved", err)
+	}
+	return true, nil
 }
 
 func ompSafeGeneration(generation string) bool {

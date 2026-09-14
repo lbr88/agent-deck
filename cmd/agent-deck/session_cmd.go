@@ -441,6 +441,39 @@ func claudeImportCandidateJSON(candidates []session.ClaudeImportCandidate) []map
 	return out
 }
 
+// prepareSessionStartTarget distinguishes a live process from a retained dead
+// pane before `session start` calls Instance.Start. A retained pane is still a
+// tmux session, so Start would otherwise treat its persisted name as a fresh
+// collision and silently generate a suffix, leaving the old target orphaned.
+// Marking it as persisted identity reuse makes Start replace that exact target.
+//
+// A failed fresh pane probe is only safe to ignore when a second existence
+// check proves the target is gone. Timeout/protocol-mismatch paths deliberately
+// make Exists report present, so an indeterminate target fails closed instead
+// of risking a duplicate process or identity drift.
+func prepareSessionStartTarget(inst *session.Instance) error {
+	if inst == nil {
+		return fmt.Errorf("session no longer exists")
+	}
+	pane := inst.GetTmuxSession()
+	if pane == nil {
+		return nil
+	}
+
+	alive, err := pane.PrimaryPaneAliveFresh()
+	switch {
+	case err == nil && alive:
+		return fmt.Errorf("session %q is already running", inst.Title)
+	case err == nil:
+		pane.MarkPersistedIdentityReuse()
+		return nil
+	case pane.Exists():
+		return fmt.Errorf("cannot determine whether session %q is running: %w", inst.Title, err)
+	default:
+		return nil
+	}
+}
+
 // handleSessionStart starts a session's tmux process
 func handleSessionStart(profile string, args []string) {
 	fs := flag.NewFlagSet("session start", flag.ExitOnError)
@@ -502,9 +535,8 @@ func handleSessionStart(profile string, args []string) {
 		return // unreachable, satisfies staticcheck SA5011
 	}
 
-	// Check if already running
-	if inst.Exists() {
-		out.Error(fmt.Sprintf("session '%s' is already running", inst.Title), ErrCodeInvalidOperation)
+	if err := prepareSessionStartTarget(inst); err != nil {
+		out.Error(err.Error(), ErrCodeInvalidOperation)
 		os.Exit(1)
 	}
 
