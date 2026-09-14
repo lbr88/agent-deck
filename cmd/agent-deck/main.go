@@ -40,7 +40,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/web"
 )
 
-var Version = "1.13.12" // overridden at build time via -ldflags "-X main.Version=..."
+var Version = "1.13.13" // overridden at build time via -ldflags "-X main.Version=..."
 var Commit = ""         // overridden at build time via -ldflags "-X main.Commit=..."
 
 // Table column widths for list command output
@@ -305,6 +305,11 @@ func initColorProfile() {
 }
 
 func runAgentDeckMain() {
+	// Desktop launchers, user services, and already-running shells commonly
+	// omit ~/.local/bin even though agent harness installers place binaries
+	// there. Repair that inherited environment before any session is built.
+	ensureUserToolsOnPath()
+
 	// Make bare `tmux` invocations resolve even when launched from a minimal
 	// environment (notably a `terminal-notifier -execute` notification click,
 	// whose launchd PATH omits Homebrew's /opt/homebrew/bin). Must run before any

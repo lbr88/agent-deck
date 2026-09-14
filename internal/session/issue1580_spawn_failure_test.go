@@ -99,7 +99,7 @@ func TestIssue1580_TmuxStartFailureRecorded(t *testing.T) {
 // TestIssue1580_FastDeathWatcherCapturesDyingOutput is the behavioral repro. A
 // real tmux session runs a custom command whose initial process prints a marker
 // then exits non-zero. The watcher must capture the dying output and persist a
-// spawn_died_fast record; PreviewFull must surface it once the pane is gone.
+// spawn_died_fast record; PreviewFull must surface the retained exit reason.
 //
 // Pre-fix, this scenario produced no record, an erroring preview, and no
 // lifecycle event — the surfaces did not exist.
@@ -137,11 +137,12 @@ func TestIssue1580_FastDeathWatcherCapturesDyingOutput(t *testing.T) {
 	// The lifecycle log must carry the spawn_died_fast trace.
 	assert.Contains(t, readLifecycleLog(t), "spawn_died_fast")
 
-	// PreviewFull falls back to the record now that the pane is gone.
+	// PreviewFull uses the retained dead pane, which carries a more exact exit
+	// status than the fallback record while still showing the dying output.
 	preview, err := inst.PreviewFull()
 	require.NoError(t, err, "PreviewFull must not error once the record exists")
 	assert.Contains(t, preview, "boom-1580-dying-output")
-	assert.Contains(t, preview, "failed to start")
+	assert.Contains(t, preview, "exit status 7")
 }
 
 func readLifecycleLog(t *testing.T) string {

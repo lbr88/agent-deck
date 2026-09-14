@@ -326,38 +326,49 @@ func TestOmpLaunchSetupRejectsCorruptPriorGenerationBytes(t *testing.T) {
 }
 
 func TestOmpConcurrentSlowIdentityFailureNeverDeduplicatesAsSuccess(t *testing.T) {
-	inst := newOmpLaunchAckInstance(t, "omp-concurrent-identity-failure")
-	invocations := filepath.Join(t.TempDir(), "invocations")
-	inst.Command = writeOmpLaunchAckProbe(t, "concurrent-failure", fmt.Sprintf(`
+	for _, action := range []string{"start", "start-with-message", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			inst := newOmpLaunchAckInstance(t, "omp-concurrent-identity-failure-"+action)
+			invocations := filepath.Join(t.TempDir(), "invocations")
+			inst.Command = writeOmpLaunchAckProbe(t, "concurrent-failure", fmt.Sprintf(`
 printf 'attempt\n' >> %s
 sleep 0.8
 printf '{"instance_id":"%%s","launch_id":"%%s","session_id":"","session_file":"","identity_ready":false,"error":"concurrent tracker failure"}\n' "$AGENTDECK_INSTANCE_ID" "$AGENTDECK_OMP_LAUNCH_ID" > "$AGENTDECK_OMP_DIR/.agent-deck-omp-status.$AGENTDECK_OMP_LAUNCH_ID.json"
 sleep 1`, shellescape.Quote(invocations)))
 
-	start := make(chan struct{})
-	errors := make(chan error, 2)
-	var ready sync.WaitGroup
-	ready.Add(2)
-	for range 2 {
-		go func() {
-			ready.Done()
-			<-start
-			errors <- inst.StartWithMessage("must not be dropped")
-		}()
-	}
-	ready.Wait()
-	close(start)
-	for range 2 {
-		if err := <-errors; err == nil {
-			t.Fatal("concurrent unacknowledged OMP start was deduplicated as success")
-		}
-	}
-	data, err := os.ReadFile(invocations)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(data), "attempt\n") != 1 {
-		t.Fatalf("concurrent identity failure launched OMP more than once: %q", data)
+			start := make(chan struct{})
+			errors := make(chan error, 2)
+			var ready sync.WaitGroup
+			ready.Add(2)
+			for range 2 {
+				go func() {
+					ready.Done()
+					<-start
+					switch action {
+					case "start":
+						errors <- inst.Start()
+					case "restart":
+						errors <- inst.Restart()
+					default:
+						errors <- inst.StartWithMessage("must not be dropped")
+					}
+				}()
+			}
+			ready.Wait()
+			close(start)
+			for range 2 {
+				if err := <-errors; err == nil {
+					t.Fatal("concurrent unacknowledged OMP start was deduplicated as success")
+				}
+			}
+			data, err := os.ReadFile(invocations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(data), "attempt\n") != 1 {
+				t.Fatalf("concurrent identity failure launched OMP more than once: %q", data)
+			}
+		})
 	}
 }
 

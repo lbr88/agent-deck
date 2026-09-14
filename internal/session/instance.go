@@ -5018,14 +5018,17 @@ func (i *Instance) buildTmuxOptionOverrides() map[string]string {
 		overrides["window-style"] = tmuxCfg.WindowStyleOverride
 		overrides["window-active-style"] = tmuxCfg.WindowStyleOverride
 	}
-	// Sandbox sessions need remain-on-exit so dead-pane detection works.
-	// Non-sandbox sessions use default tmux behaviour (pane closes on exit).
+	// Agent harnesses need remain-on-exit so their exit status and final output
+	// survive for diagnosis. Without it, a provider that exits outside the
+	// short startup-watch window leaves only a red error glyph and destroys the
+	// reason with its pane. Interactive shell sessions keep normal tmux
+	// behaviour so `exit` closes them as users expect.
 	//
 	// A documented one-shot needs it for a different reason: the process prints
 	// its answer and exits BY DESIGN, and without remain-on-exit tmux tears the
 	// pane down with the answer still in it — the user asked a question and got
 	// a closed window. Keeping the pane is what makes a one-shot readable.
-	if i.IsSandboxed() || i.expectsFastExit() || i.Tool == "omp" {
+	if i.IsSandboxed() || i.expectsFastExit() || (i.Tool != "" && i.Tool != "shell") {
 		if overrides == nil {
 			overrides = make(map[string]string)
 		}
@@ -5293,7 +5296,14 @@ func (i *Instance) Start() error {
 	// spawn_attempt trace so a spawn that dies before anything else runs still
 	// leaves a durable record.
 	i.recordSpawnAttempt()
+	// Validate OMP's existing durable identity before checking the executable.
+	// Otherwise a missing binary can hide an ambiguity that the operator must
+	// resolve before any launch is safe.
 	if err := i.prepareOmpIdentity(); err != nil {
+		return err
+	}
+	if err := i.validateLaunchExecutable(); err != nil {
+		i.recordPrepareFailure(i.Command, err)
 		return err
 	}
 
@@ -5477,6 +5487,14 @@ func (i *Instance) Start() error {
 
 	// Start the tmux session
 	if err := i.startTmuxWithOmpTracking(command); err != nil {
+		if i.Tool == "omp" {
+			// Stamp the completed attempt even when identity acknowledgment fails.
+			// Callers already waiting on the per-instance lock must observe this
+			// result instead of rolling the failed generation back and launching a
+			// second OMP process. A later user action starts after this timestamp
+			// and can safely retry through prepareOmpIdentity.
+			recordInstanceSpawn(i.ID)
+		}
 		// #1580: persist the tmux-level failure so the preview / session show /
 		// lifecycle log can surface it instead of a bare "error".
 		i.recordTmuxStartFailure(command, err)
@@ -5660,6 +5678,10 @@ func (i *Instance) StartWithMessage(message string) error {
 	if err := i.prepareOmpIdentity(); err != nil {
 		return err
 	}
+	if err := i.validateLaunchExecutable(); err != nil {
+		i.recordPrepareFailure(i.Command, err)
+		return err
+	}
 
 	// Prepare scratch CLAUDE_CONFIG_DIR for non-conductor claude workers
 	// (issue #59, v1.7.68). Same call as in Start() — both spawn paths
@@ -5830,6 +5852,9 @@ func (i *Instance) StartWithMessage(message string) error {
 
 	// Start the tmux session
 	if err := i.startTmuxWithOmpTracking(command); err != nil {
+		if i.Tool == "omp" {
+			recordInstanceSpawn(i.ID)
+		}
 		// #1580: persist the tmux-level failure (sister path to Start()).
 		i.recordTmuxStartFailure(command, err)
 		return fmt.Errorf("failed to start tmux session: %w", err)
@@ -6394,6 +6419,19 @@ func (i *Instance) UpdateStatus() error {
 			i.refreshAuthHoldOnDeathLocked()
 		}
 		i.lastErrorCheck = time.Now() // Record when we confirmed error/stopped
+		return nil
+	}
+
+	// A retained pane still makes the tmux session "exist", but its agent
+	// process is definitively gone. Classify that fact before consulting hook
+	// files: the final provider hook can remain fresh after SIGTERM and must not
+	// resurrect a dead process as waiting/running.
+	if i.tmuxSession.IsPaneDead() {
+		if i.Status != StatusStopped {
+			i.applyTerminatedPaneStatus()
+			i.refreshAuthHoldOnDeathLocked()
+		}
+		i.lastErrorCheck = time.Now()
 		return nil
 	}
 
@@ -8064,12 +8102,32 @@ func (i *Instance) PreviewFull() (string, error) {
 		}
 		return "", err
 	}
+	if i.tmuxSession.IsPaneDead() {
+		exitCode, signal, haveExitCode := i.tmuxSession.PaneDeadTermination()
+		content = formatTerminatedPanePreview(content, exitCode, signal, haveExitCode)
+	}
 	if warning != "" {
 		// Remote previews keep only the newest tail. Put diagnostics after
 		// history so long transcripts cannot truncate the actionable warning.
 		content += "\n\n" + warning
 	}
 	return content, nil
+}
+
+func formatTerminatedPanePreview(content string, exitCode, signal int, haveExitCode bool) string {
+	header := "The session process exited."
+	if haveExitCode {
+		if signal > 0 {
+			header = fmt.Sprintf("The session process was terminated by signal %d (exit status %d).", signal, exitCode)
+		} else {
+			header = fmt.Sprintf("The session process exited with exit status %d.", exitCode)
+		}
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return header + "\n\n(no terminal output was captured)"
+	}
+	return header + "\n\nLast terminal output:\n" + content
 }
 
 // spawnFailurePreview returns the formatted diagnostic for a session whose pane
@@ -8305,11 +8363,7 @@ func (i *Instance) recreateTmuxSession() {
 	i.tmuxSession.SetTerminalChromeEnabled(GetTerminalSettings().GetITermBadge())
 }
 
-func (i *Instance) prepareRestartMCPConfig() {
-	// Clear flag immediately to prevent it staying set if restart fails.
-	skipRegen := i.SkipMCPRegenerate
-	i.SkipMCPRegenerate = false
-
+func (i *Instance) prepareRestartMCPConfig(skipRegen bool) {
 	if IsClaudeCompatible(i.Tool) && !skipRegen {
 		if err := i.regenerateMCPConfig(); err != nil {
 			mcpLog.Warn("mcp_config_regen_failed", slog.String("error", err.Error()))
@@ -9641,7 +9695,17 @@ func (i *Instance) restart(env map[string]string) error {
 	if i.Tool != "omp" {
 		defer recordInstanceSpawn(i.ID)
 	}
+	// Consume this one-shot intent as soon as an actual restart attempt wins
+	// the spawn lock. Launch preflight may return before MCP regeneration, but
+	// it must not leave the flag armed for an unrelated later restart.
+	skipMCPRegenerate := i.SkipMCPRegenerate
+	i.SkipMCPRegenerate = false
 	if err := i.prepareOmpIdentity(); err != nil {
+		return err
+	}
+	if err := i.validateLaunchExecutable(); err != nil {
+		i.recordSpawnAttempt()
+		i.recordPrepareFailure(i.Command, err)
 		return err
 	}
 
@@ -9681,7 +9745,7 @@ func (i *Instance) restart(env map[string]string) error {
 
 	// Regenerate .mcp.json before restart to use socket pool if available.
 	// Skip if MCP dialog just wrote the config (avoids race condition).
-	i.prepareRestartMCPConfig()
+	i.prepareRestartMCPConfig(skipMCPRegenerate)
 
 	// Regenerate worker-scratch CLAUDE_CONFIG_DIR before restart so
 	// changes to Instance.Plugins (added/removed via TUI Plugin Manager
@@ -10243,6 +10307,9 @@ func (i *Instance) restart(env map[string]string) error {
 	mcpLog.Debug("restart_starting_new_session", slog.String("command", command))
 
 	if err := i.startTmuxWithOmpTracking(command); err != nil {
+		if i.Tool == "omp" {
+			recordInstanceSpawn(i.ID)
+		}
 		mcpLog.Debug("restart_start_failed", slog.String("error", err.Error()))
 		// #1924: Start() and its sister path have recorded this since #1580,
 		// but restart() never did — so the one case where the user has just
@@ -10338,7 +10405,9 @@ func (i *Instance) RestartFresh() error {
 			return err
 		}
 	}
-	i.prepareRestartMCPConfig()
+	skipMCPRegenerate := i.SkipMCPRegenerate
+	i.SkipMCPRegenerate = false
+	i.prepareRestartMCPConfig(skipMCPRegenerate)
 
 	i.mu.Lock()
 	if IsCodexCompatible(i.Tool) {
@@ -11416,6 +11485,17 @@ func (i *Instance) Exists() bool {
 		return false
 	}
 	return i.tmuxSession.Exists()
+}
+
+// HasLivePane reports whether this instance has an agent process that can be
+// attached to. A tmux session retained by remain-on-exit still Exists(), but
+// its dead pane must be restartable rather than rejected as "already running".
+func (i *Instance) HasLivePane() bool {
+	if i.tmuxSession == nil {
+		return false
+	}
+	alive, err := i.tmuxSession.PrimaryPaneAliveFresh()
+	return err == nil && alive
 }
 
 // GetTmuxSession returns the tmux session object

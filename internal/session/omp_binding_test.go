@@ -135,6 +135,74 @@ func TestOmpImmediateProviderFailureIsReturnedByLifecycle(t *testing.T) {
 	}
 }
 
+func TestOmpPrepareIdentityRecoversPriorBindingAfterPreExecFailure(t *testing.T) {
+	for _, previousGeneration := range []string{"legacy", "previous-generation"} {
+		t.Run(previousGeneration, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			inst := &Instance{ID: "recover-pre-exec-" + previousGeneration, Tool: "omp", Command: "omp"}
+			dir := filepath.Join(home, ".omp", "agent-deck", inst.ID)
+			transcript := filepath.Join(dir, "preserved.jsonl")
+			writeOmpValidationTranscript(t, transcript, "preserved-session")
+
+			bindingName := ompActiveBindingName
+			if previousGeneration != "legacy" {
+				bindingName += "." + previousGeneration
+			}
+			writeOmpValidationBindingAt(t, dir, bindingName, transcript, "preserved-session", "saved", previousGeneration)
+			if previousGeneration != "legacy" {
+				if err := os.WriteFile(filepath.Join(dir, ".agent-deck-launch-generation"), []byte(previousGeneration+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if output, err := exec.Command("bash", "-c", inst.buildOmpCommand("false")).CombinedOutput(); err == nil {
+				t.Fatalf("pre-exec failure probe unexpectedly succeeded: %s", output)
+			}
+			failedGeneration, err := os.ReadFile(filepath.Join(dir, ".agent-deck-launch-generation"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			failedGeneration = []byte(strings.TrimSpace(string(failedGeneration)))
+			failedSource := filepath.Join(dir, ".agent-deck-source-binding."+string(failedGeneration))
+			if _, err := os.Stat(failedSource); err != nil {
+				t.Fatalf("failed launch did not retain its prior validated source binding: %v", err)
+			}
+
+			if err := inst.prepareOmpIdentity(); err != nil {
+				t.Fatalf("safe retry stayed trapped behind the failed generation: %v", err)
+			}
+			binding, err := resolveOmpActiveBinding(dir)
+			if err != nil {
+				t.Fatalf("recovered binding is not valid: %v", err)
+			}
+			if binding == nil || binding.File != transcript || binding.SessionID != "preserved-session" || binding.Generation != previousGeneration {
+				t.Fatalf("recovery selected the wrong conversation: %+v", binding)
+			}
+			if _, err := os.Stat(failedSource); err != nil {
+				t.Fatalf("recovery removed failed-launch forensic evidence: %v", err)
+			}
+		})
+	}
+}
+
+func TestOmpPrepareIdentityRecoversEmptyFirstLaunchAfterPreExecFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inst := &Instance{ID: "recover-empty-pre-exec", Tool: "omp", Command: "omp"}
+	dir := filepath.Join(home, ".omp", "agent-deck", inst.ID)
+
+	if output, err := exec.Command("bash", "-c", inst.buildOmpCommand("false")).CombinedOutput(); err == nil {
+		t.Fatalf("pre-exec failure probe unexpectedly succeeded: %s", output)
+	}
+	if err := inst.prepareOmpIdentity(); err != nil {
+		t.Fatalf("empty first launch could not be retried safely: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".agent-deck-launch-generation")); !os.IsNotExist(err) {
+		t.Fatalf("failed empty generation still blocks retry: %v", err)
+	}
+}
+
 func TestOmpFreshRestartPreservesPreviousHistory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

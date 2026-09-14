@@ -106,6 +106,44 @@ func TestPreviewPane_Error_HasCrashDiagnosticText(t *testing.T) {
 	}
 }
 
+func TestRenderLaunchFailureDetailsShowsExactFailure(t *testing.T) {
+	failure := &session.SpawnFailureRecord{
+		Tool:        "omp",
+		Command:     "omp",
+		Reason:      "prepare_failed",
+		DyingOutput: "command \"omp\" was not found on PATH",
+	}
+
+	rendered := renderLaunchFailureDetails(failure, "")
+	if !strings.Contains(rendered, `command "omp" was not found on PATH`) {
+		t.Fatalf("launch details hid the exact failure: %q", rendered)
+	}
+	if !strings.Contains(rendered, "command: omp") {
+		t.Fatalf("launch details hid the attempted command: %q", rendered)
+	}
+}
+
+func TestRenderLaunchFailureDetailsFallsBackToRetainedPane(t *testing.T) {
+	rendered := renderLaunchFailureDetails(nil, "process exited with exit status 17\nprovider rejected configuration")
+	if !strings.Contains(rendered, "exit status 17") || !strings.Contains(rendered, "provider rejected configuration") {
+		t.Fatalf("retained pane diagnostic was hidden: %q", rendered)
+	}
+}
+
+func TestRenderLaunchFailureDetailsPrefersExactRetainedTermination(t *testing.T) {
+	failure := &session.SpawnFailureRecord{
+		Command:     "omp",
+		Reason:      "spawn_died_fast",
+		DyingOutput: "provider rejected configuration",
+	}
+	retained := "The session process was terminated by signal 15 (exit status 143).\n\nLast terminal output:\nprovider rejected configuration"
+
+	rendered := renderLaunchFailureDetails(failure, retained)
+	if rendered != retained {
+		t.Fatalf("exact retained termination was hidden by a less precise spawn record: %q", rendered)
+	}
+}
+
 // Test 5: Both paths pad output to approximately the same height (no layout shifts).
 // The function pads using the existing pattern: pad until lines >= height, then strip
 // the trailing newline. This yields height-1 lines in strings.Split. The caller always
